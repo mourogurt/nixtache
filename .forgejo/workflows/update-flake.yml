@@ -1,0 +1,81 @@
+# Reusable workflow: update flake inputs, validate, and push a signed commit.
+# Lives in nixtache and is called from consumer repositories.
+#
+# Per Q2=B it is invoked as:
+#   jobs.update-flake.uses: nixops/nixtache/.forgejo/workflows/update-flake.yml@main
+#
+# NOTE: the `schedule` trigger must live in the CALLER's thin wrapper, not here
+# (a schedule in nixtache would update nixtache's own flake, not the caller's).
+name: Update Flakes
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  update-flake:
+    runs-on: nixos
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Checkout nixtache (for reusable actions)
+        uses: actions/checkout@v4
+        with:
+          repository: nixops/nixtache
+          path: .nixtache
+          ref: main
+
+      - name: Setup SSH
+        id: ssh
+        uses: ./.nixtache/.forgejo/actions/ssh-setup
+        with:
+          git-host: code.zinzaguras.ru
+          git-user: fbot
+
+      - name: Setup Git
+        # Q5=A: signing key path comes from ssh-setup's output (was ~/.ssh/id_rsa).
+        run: |
+          git config --local user.email "localhost@localhost"
+          git config --local user.name "fbot"
+          git config --local user.signingkey "${{ steps.ssh.outputs.key-path }}"
+          git config --local gpg.format ssh
+
+      - name: Update Flakes Inputs
+        run: |
+          nix flake update --commit-lock-file
+
+      - name: Validate Nix Configuration
+        uses: ./.nixtache/.forgejo/actions/flake-validation
+
+      - name: Rebuilding All NixOS Configurations
+        uses: ./.nixtache/.forgejo/actions/rebuild-configurations
+
+      - name: Rebuilding All Nix DevShells
+        uses: ./.nixtache/.forgejo/actions/rebuild-devshells
+        timeout-minutes: 4320
+        with:
+          systems: "x86_64-linux"
+
+      - name: Push Changes
+        run: |
+          echo "Setting origin to ssh://forgejo@code.zinzaguras.ru/${{ forge.repository }}"
+          git remote set-url origin ssh://forgejo@code.zinzaguras.ru/${{ forge.repository }}
+          echo "Pushing to ${{ forge.ref_name }}"
+          git push origin ${{ forge.ref_name }}
+
+      - name: Deploy artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs
+          path: |
+            artifacts/
+
+      - name: Handle Validation Errors
+        if: failure()
+        run: |
+          echo "Configuration validation failed! Please check the build logs artifact."
+          exit 1

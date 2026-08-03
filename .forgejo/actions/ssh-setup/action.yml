@@ -1,0 +1,49 @@
+name: "SSH Setup"
+description: "Configure the bot SSH key (from systemd LoadCredential) for git push and SSH commit signing"
+
+inputs:
+  git-host:
+    description: "Git host to configure in the SSH config (e.g. code.zinzaguras.ru)"
+    required: false
+    default: "code.zinzaguras.ru"
+  git-user:
+    description: "SSH user for the git host (the bot account)"
+    required: false
+    default: "fbot"
+
+outputs:
+  key-path:
+    description: "Path to the configured SSH private key (use for `git config user.signingkey`)"
+    value: ${{ steps.setup.outputs.key-path }}
+  config-path:
+    description: "Path to the generated SSH config file (use for `ssh -F ...`)"
+    value: ${{ steps.setup.outputs.config-path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure SSH
+      id: setup
+      shell: bash
+      run: |
+        set -euo pipefail
+        ssh_dir="${{ runner.temp }}/ssh"
+        cfg="$ssh_dir/config"
+        mkdir -p "$ssh_dir"
+
+        # Keys are provided by the runner host via systemd LoadCredential
+        # (see nixtache forgejo-runner module: gitea-runner-default LoadCredential).
+        cp "$CREDENTIALS_DIRECTORY/ssh_private" "$ssh_dir/id_key"
+        cp "$CREDENTIALS_DIRECTORY/ssh_public" "$ssh_dir/id_key.pub"
+        chmod 400 "$ssh_dir/id_key"
+        chmod 400 "$ssh_dir/id_key.pub"
+
+        echo "Host ${{ inputs.git-host }}" > "$cfg"
+        echo "  HostName ${{ inputs.git-host }}" >> "$cfg"
+        echo "  User ${{ inputs.git-user }}" >> "$cfg"
+        echo "  IdentityFile $ssh_dir/id_key" >> "$cfg"
+
+        git config --global core.sshCommand "ssh -F $cfg"
+
+        echo "key-path=$ssh_dir/id_key" >> "$GITHUB_OUTPUT"
+        echo "config-path=$cfg" >> "$GITHUB_OUTPUT"

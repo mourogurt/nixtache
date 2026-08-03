@@ -1,0 +1,68 @@
+# Reusable workflow: validate a nix flake and rebuild its NixOS configurations
+# and devShells. Lives in nixtache and is called from consumer repositories.
+#
+# Per Q2=B it is invoked as:
+#   jobs.check-flake.uses: nixops/nixtache/.forgejo/workflows/nix-check.yml@main
+#
+# The reusable workflow runs in the CALLER's context: `actions/checkout@v4`
+# checks out the caller repo (so `nix flake show` sees the caller's configs).
+# We additionally check out nixtache itself to resolve the composite actions
+# below (robust against Forgejo's cross-repo action path resolution).
+name: Nix Flake Check
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  check-flake:
+    runs-on: nixos
+    timeout-minutes: 4600
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Checkout nixtache (for reusable actions)
+        uses: actions/checkout@v4
+        with:
+          repository: nixops/nixtache
+          path: .nixtache
+          ref: main
+
+      - name: Setup SSH
+        uses: ./.nixtache/.forgejo/actions/ssh-setup
+        with:
+          git-host: code.zinzaguras.ru
+          git-user: fbot
+
+      - name: Verify flake metadata
+        run: nix flake metadata
+
+      - name: Validate Nix Configuration
+        uses: ./.nixtache/.forgejo/actions/flake-validation
+
+      - name: Rebuilding All NixOS Configurations
+        uses: ./.nixtache/.forgejo/actions/rebuild-configurations
+        timeout-minutes: 4320
+
+      - name: Rebuilding All Nix DevShells
+        uses: ./.nixtache/.forgejo/actions/rebuild-devshells
+        timeout-minutes: 4320
+        with:
+          systems: "x86_64-linux"
+
+      - name: Deploy artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs
+          path: |
+            artifacts/
+
+      - name: Handle Validation Errors
+        if: failure()
+        run: |
+          echo "Configuration validation failed! Please check the logs."
+          exit 1

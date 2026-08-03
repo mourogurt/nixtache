@@ -1,0 +1,14 @@
+name: "Nix Flake Validation"
+description: "Validate a nix flake with `nix flake check`"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate nix configuration
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! nix flake check --show-trace --all-systems; then
+          echo "Nix configuration validation failed!"
+          exit 1
+        fi

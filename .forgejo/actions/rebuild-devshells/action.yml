@@ -1,0 +1,47 @@
+name: "NixOS Rebuild All DevShells"
+description: "Rebuild all Nix devShells found in the current flake for multiple systems"
+
+inputs:
+  systems:
+    description: "Space-separated list of systems to build for"
+    required: false
+    default: "x86_64-linux"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Rebuild all devShells
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        for system in ${{ inputs.systems }}; do
+          echo "Processing system: $system"
+
+          shells=$(nix flake show --json --no-pretty --all-systems | jq -r ".devShells.\"$system\" | keys[]? // empty")
+
+          if [ -z "$shells" ]; then
+            echo "No devShells found for system: $system"
+            continue
+          fi
+
+          for shell in $shells; do
+            echo "Building NixOS DevShell: $shell for system: $system"
+            mkdir -p "artifacts/$system"
+            log_path="artifacts/$system/rebuild_$shell.log"
+
+            set +e
+            nix print-dev-env ".#devShells.$system.$shell" \
+              --no-sandbox \
+              --print-build-logs &> "$log_path"
+            build_exit=$?
+            set -e
+
+            echo "--- Last 50 lines of $shell ($system) build log ---"
+            tail -n 50 "$log_path"
+            if [ $build_exit -ne 0 ]; then
+              echo "BUILD FAILED for devShell $shell ($system) (exit code: $build_exit)"
+              exit 1
+            fi
+          done
+        done
