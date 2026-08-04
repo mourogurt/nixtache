@@ -13,7 +13,9 @@ actions that build/validate consumer flakes. Any project can consume it
 ```nix
 inputs.nixtache.url = "git+ssh://forgejo@code.zinzaguras.ru/nixops/nixtache.git";
 # ...
-nixtache.nixosModules.runner   # (or .default alias)
+nixtache.nixosModules.runner    # (or .default alias)
+nixtache.nixosModules.secrets   # secrets provider abstraction (vars + providers)
+nixtache.lib.mkDocs             # consumer docs helper (configurations + devShells)
 ```
 
 - **`nixosModules.runner`** — `services.nixtache.runner`: a NixOS container
@@ -24,21 +26,39 @@ nixtache.nixosModules.runner   # (or .default alias)
   vhost, and **multi-instance** support (`instances.<name>`). Exports
   `gitUser` + `bot` identity to every CI job via act_runner `runner.envs`
   (see "Module → CI wiring" below). All project-specific values are options;
-  **secrets are `types.path`, supplied by the consumer**.
+  **secrets are `types.path`, supplied by the consumer**. Source split by
+  responsibility under `modules/runner/` (default/types/store/cache/ssh/
+  sandbox/known-hosts/instances) — all contributions merge into one container
+  via `mkMerge`.
+- **`nixosModules.secrets`** — `services.nixtache.secrets`: provider
+  abstraction. `vars` (name → path, internal) is the uniform end result;
+  `providers` is an extensible attrset (ssh/forgejo/vault/systemd roadmap,
+  any combination). Today the runner consumes direct path options; `vars` is
+  the target providers write into. See modules/secrets.nix.
+- **`lib.mkDocs`** — consumer docs helper. Generates `configurationDocs.<machine>`
+  (via `nixosOptionsDoc`, scoped by `optionPrefixes`) + `devShellDocs` + a
+  combined `docs` artifact. Consumers expose it under `packages.<system>` and
+  build via the reusable `docs.yml` workflow. See README "Documenting your flake".
+- **`packages.<system>.optionsMarkdown` / `.optionsJSON`** — this flake's OWN
+  option reference, generated from the runner module via `nixosOptionsDoc`
+  (filtered to `services.nixtache.*`). Built into the `nixtache-options`
+  artifact by self-CI.
 - **`checks.x86_64-linux.runner`** (alias `.default`) — pure-evaluation tests
   for the module contract (store `/`/`/srv`/empty, multi-instance, optional
-  SSH, gitUser/bot envs). Build with `nix build .#checks.x86_64-linux.runner`.
-- **`.forgejo/workflows/{nix-check,update-flake}.yml`** — reusable workflows
-  (`on: workflow_call`) for consumer repositories.
+  SSH, gitUser/bot envs, sandbox cap on/off). Build with `nix build .#checks.x86_64-linux.runner`.
+- **`.forgejo/workflows/{nix-check,update-flake,docs}.yml`** — reusable
+  workflows (`on: workflow_call`) for consumer repositories.
 - **`.forgejo/workflows/ci.yml`** — nixtache's **own** CI: on push/PR to
   `main`, runs `nix flake check` (which builds `checks.*`, i.e. the module
-  tests) and prints the test report. Not reusable — nixtache has no
-  `nixosConfigurations`/`devShells`, so it deliberately does not call
-  `rebuild-configurations`/`rebuild-devshells`.
-- **`.forgejo/actions/{ssh-setup,flake-validation,rebuild-configurations,rebuild-devshells}`**
+  tests), prints the test report, and generates the `nixtache-options` docs
+  artifact. Not reusable — nixtache has no `nixosConfigurations`/`devShells`,
+  so it deliberately does not call `rebuild-configurations`/`rebuild-devshells`.
+- **`.forgejo/actions/{ssh-setup,flake-validation,rebuild-configurations,rebuild-devshells,generate-docs}`**
   — reusable composite actions.
+- **`README.md`** — user-facing documentation (quickstart, architecture,
+  wiring, sandboxing, secrets providers, "Documenting your flake", sha1).
 - **`doc/migration-plan.md`** — the migration plan + architectural decisions
-  (Q1–Q5) that shaped this repo.
+  (Q1–Q5) that shaped this repo (draft reference).
 
 ## CRITICAL: this repo MUST stay `sha1`
 
@@ -174,7 +194,10 @@ Reference consumer: `codemaster/nixos-configuration`
 nix flake check --show-trace --all-systems
 
 # Evaluate the module standalone (no host needed) — sanity-check options
-nix-instantiate --parse modules/runner.nix > /dev/null && echo OK
+nix-instantiate --parse modules/runner/default.nix > /dev/null && echo OK
+
+# Build this flake's own generated option reference
+nix build .#optionsMarkdown && cat ./result
 
 # SSH commit signing for this repo (if pushing bot commits):
 #   bot key path comes from the ssh-setup action output `key-path`.
@@ -275,11 +298,14 @@ for non-trivial defaults.
 
 ## TODO / out of scope here
 
+- **Secret provider implementations.** The provider abstraction
+  (`services.nixtache.secrets.{vars,providers}`) is in place — see
+  `modules/secrets.nix`. The runner today consumes direct path options (the
+  stable contract); concrete provider modules (`ssh`, `forgejo`, `vault` as
+  primary, `systemd`) land incrementally, each just appending to `vars`. Vault
+  is the intended primary, ssh the supplementary one.
 - **Deploy contract** (`deploy.yml` + `deploy-target` action) is defined in
   `doc/migration-plan.md` (section "Контракт деплоя") as stubs, and the
   chicken-and-egg bootstrap design is sketched in "Bootstrap & deploy" above.
   Implementation is a separate task (deploy tool choice, target SSH auth,
   rollback strategy).
-- **Secret provider presets** (`nixtache.secrets.providers.{sops,vault,systemd}`)
-  are planned sugar over the path-based core (decision Q4=B in the migration
-  plan). The path-based core is the stable contract today.

@@ -51,6 +51,14 @@ jobs:
           echo "----- module test report -----"
           cat "$out"
 
+      - name: Generate this flake's option docs
+        # Build `.#optionsMarkdown` + `.#optionsJSON` (this flake's own option
+        # reference, generated from the runner module) and upload as an artifact.
+        uses: ./.forgejo/actions/generate-docs
+        with:
+          attributes: "optionsMarkdown optionsJSON"
+          artifact-name: nixtache-options
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v3

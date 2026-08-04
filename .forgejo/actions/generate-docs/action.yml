@@ -1,0 +1,67 @@
+name: "Generate Nix documentation"
+description: |
+  Build documentation outputs (option references, devShell listings, combined
+  docs) from a flake and upload them as a CI artifact.
+  Works for nixtache's own `.#optionsMarkdown` / `.#optionsJSON` AND for any
+  consumer flake exposing docs via `nixtache.lib.mkDocs` (typically `.#docs`,
+  `.#optionsMarkdown`, per-machine `.#configurationDocs-<name>`).
+
+inputs:
+  attributes:
+    description: |
+      Newline- or space-separated list of flake attributes to build, e.g.
+      `optionsMarkdown` or `docs configurationDocs-server`. Each is built as
+      `nix build .#<attr>` and its output collected into the artifact.
+    required: false
+    default: "optionsMarkdown"
+  artifact-name:
+    description: "Name of the uploaded artifact (default `docs`)."
+    required: false
+    default: "docs"
+  out-dir:
+    description: "Where under the workspace to stage built docs (default `docs-out`)."
+    required: false
+    default: "docs-out"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build docs outputs
+      shell: bash
+      env:
+        ATTRS: ${{ inputs.attributes }}
+        OUT_DIR: ${{ inputs.out-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$OUT_DIR"
+        # HAS_SANDBOX_CAP is exported by the nixtache runner module (1 = the
+        # container has CAP_SYS_ADMIN and sandboxes; 0 = legacy/unprivileged).
+        # Docs generation is pure, but respect the flag for consistency.
+        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+          SANDBOX_FLAG=""
+        else
+          echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+          SANDBOX_FLAG="--no-sandbox"
+        fi
+        # Build each requested attribute; stage its output under $OUT_DIR/<attr>.
+        # `--print-out-paths` gives the store path; we copy it so the artifact
+        # is browsable even after the store path is GC'd.
+        for attr in $ATTRS; do
+          echo "::group::Building .#${attr}"
+          out=$(nix build --no-link --print-out-paths $SANDBOX_FLAG ".#${attr}")
+          # Preserve the attr name in the staged filename; detect extension.
+          case "$out" in
+            *.md)   dst="${OUT_DIR}/${attr}.md" ;;
+            *.json) dst="${OUT_DIR}/${attr}.json" ;;
+            *)      dst="${OUT_DIR}/${attr}" ;;
+          esac
+          cp "$out" "$dst"
+          echo "Staged ${attr} → ${dst}"
+          echo "::endgroup::"
+        done
+
+    - name: Upload docs artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.out-dir }}

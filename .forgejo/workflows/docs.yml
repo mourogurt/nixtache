@@ -1,0 +1,65 @@
+# Reusable workflow: build a flake's documentation outputs and upload them as
+# a CI artifact. Lives in nixtache and is called from consumer repositories.
+#
+# Per Q2=B it is invoked as:
+#   jobs.docs.uses: nixops/nixtache/.forgejo/workflows/docs.yml@main
+#
+# The reusable workflow runs in the CALLER's context: `actions/checkout@v4`
+# checks out the caller repo (so `nix build .#<attr>` sees the caller's flake).
+# We additionally check out nixtache itself to resolve the composite action
+# (robust against Forgejo's cross-repo action path resolution).
+#
+# Default `attributes` is `docs` — the combined artifact produced by
+# `nixtache.lib.mkDocs`. Override `inputs.attributes` to build per-machine
+# references (`configurationDocs-server`) or a different attribute name.
+#
+# In the Forgejo UI a reusable call renders as two jobs: `docs` (0s caller) and
+# `docs-1` (the work). Expected.
+name: Generate documentation
+
+on:
+  workflow_call:
+    inputs:
+      attributes:
+        description: "Newline- or space-separated flake attributes to build (default `docs`)."
+        type: string
+        default: "docs"
+      artifact-name:
+        description: "Uploaded artifact name (default `docs`)."
+        type: string
+        default: "docs"
+  workflow_dispatch:
+    inputs:
+      attributes:
+        description: "Flake attributes to build."
+        type: string
+        default: "docs"
+
+jobs:
+  docs:
+    runs-on: nixos
+    timeout-minutes: 120
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Checkout nixtache (for the reusable action)
+        uses: actions/checkout@v4
+        with:
+          repository: nixops/nixtache
+          path: .nixtache
+          ref: main
+
+      - name: Generate documentation
+        uses: ./.nixtache/.forgejo/actions/generate-docs
+        with:
+          attributes: ${{ inputs.attributes }}
+          artifact-name: ${{ inputs.artifact-name }}
+
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "Documentation generation failed! See the logs above."
+          exit 1
