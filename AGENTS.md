@@ -13,19 +13,21 @@ actions that build/validate consumer flakes. Any project can consume it
 ```nix
 inputs.nixtache.url = "git+ssh://forgejo@code.zinzaguras.ru/nixops/nixtache.git";
 # ...
-nixtache.nixosModules.forgejo-runner   # (or .default alias)
+nixtache.nixosModules.runner   # (or .default alias)
 ```
 
-- **`nixosModules.forgejo-runner`** — `services.nixtache.forgejo-runner`:
-  a NixOS container running `gitea-actions-runner` (forgejo-runner) with a
-  configurable nix store location (`store.path`: `"/"` reuses the container's
-  system nix-daemon; any other base like `/srv` relocates the store to
-  `<path>/nix` via a custom `nix-daemon` + storage oneshot), a `nix-serve-ng`
-  binary cache, and an nginx vhost. All project-specific values are options;
+- **`nixosModules.runner`** — `services.nixtache.runner`: a NixOS container
+  running `gitea-actions-runner` (forgejo-runner) with a configurable nix
+  store location (`store.path`: `"/"` reuses the container's system nix-daemon;
+  any other base like `/srv` relocates the store to `<path>/nix` via a custom
+  `nix-daemon` + storage oneshot), a `nix-serve-ng` binary cache, an nginx
+  vhost, and **multi-instance** support (`instances.<name>`). Exports
+  `gitUser` + `bot` identity to every CI job via act_runner `runner.envs`
+  (see "Module → CI wiring" below). All project-specific values are options;
   **secrets are `types.path`, supplied by the consumer**.
-- **`checks.x86_64-linux.forgejo-runner`** (alias `.default`) — pure-evaluation
-  tests for the `store.path` contract (`/`, `/srv`, empty). Build with
-  `nix build .#checks.x86_64-linux.forgejo-runner`.
+- **`checks.x86_64-linux.runner`** (alias `.default`) — pure-evaluation tests
+  for the module contract (store `/`/`/srv`/empty, multi-instance, optional
+  SSH, gitUser/bot envs). Build with `nix build .#checks.x86_64-linux.runner`.
 - **`.forgejo/workflows/{nix-check,update-flake}.yml`** — reusable workflows
   (`on: workflow_call`) for consumer repositories.
 - **`.forgejo/workflows/ci.yml`** — nixtache's **own** CI: on push/PR to
@@ -58,11 +60,20 @@ The module takes **paths** for secrets and **values** for everything
 project-specific. It declares **no** `sops.secrets` and stores **no** files.
 
 ```nix
-services.nixtache.forgejo-runner = {
+services.nixtache.runner = {
   enable        = true;
-  forgejoUrl    = "http://localhost:3000";          # Forgejo URL (shared by all instances)
-  containerName = "forgejo-runner";                  # NixOS container name
-  package       = pkgs.forgejo-runner;               # forgejo-runner package (default)
+  forgejoUrl    = "http://localhost:3000";          # Forgejo/Gitea URL (shared by all instances)
+  containerName = "runner";                         # NixOS container name
+  package       = pkgs.forgejo-runner;              # forgejo-runner (set pkgs.gitea-actions-runner for Gitea)
+  flakeSshCreds = {                                 # SSH creds to fetch PRIVATE flake inputs (e.g. nixos-private)
+    user = "forgejo"; sshPrivateKey = config.sops.secrets.forgejo-private-key.path;
+    sshPublicKey = config.sops.secrets.forgejo-public-key.path;
+  };
+  updateSshCreds = {                                # SSH creds for update-flake (push + sign). null ⇒ update-flake disabled
+    user = "forgejo"; sshPrivateKey = config.sops.secrets.forgejo-private-key.path;
+    sshPublicKey = config.sops.secrets.forgejo-public-key.path;
+  };
+  bot           = { name = "fbot"; email = "fbot@localhost"; };  # commit author → NIXTACHE_BOT_NAME/EMAIL
   instances     = {                                 # one gitea-runner-<name> per attr; each needs its own tokenFile
     default = { name = "nixos-container-runner"; tokenFile = config.sops.secrets.runner-token-default.path; };
     test    = { labels = [ "nixos:test" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
@@ -73,15 +84,9 @@ services.nixtache.forgejo-runner = {
   nixSettings   = { substituters = [...]; trusted-public-keys = [...]; max-jobs = 1; cores = 8; };
   gitHost       = { name = "forgejo_ed25519"; hostNames = [ "git.example.com" "10.0.0.1" "localhost" ]; publicKey = "ssh-ed25519 AAAA..."; };
   extraKnownHosts = [ { name = "github_ed25519"; hostNames = [ "github.com" ]; publicKey = "ssh-ed25519 AAAA..."; } ];
-  secrets = {
-    # Shared across instances. The bot SSH key pair is OPTIONAL: omit both for
-    # build-only / test instances (no git push-back → no fbot wiring).
-    sshPrivateKey   = config.sops.secrets.forgejo-private-key.path;  # optional (null = disabled)
-    sshPublicKey    = config.sops.secrets.forgejo-public-key.path;   # optional (null = disabled)
-    cachePrivateKey = config.sops.secrets.cache-private-key.path;
-    # Any backend works: paths can come from sops, agenix, vault-agent,
-    # systemd LoadCredential, etc. The module is backend-agnostic by design.
-  };
+  secrets.cachePrivateKey = config.sops.secrets.cache-private-key.path;
+  # Secret paths can come from sops, agenix, vault-agent, systemd
+  # LoadCredential, etc. The module is backend-agnostic by design.
 };
 ```
 
@@ -90,10 +95,32 @@ global. Resource limits (`memoryMax`, `memoryHigh`, `timeoutStartSec`), runner
 package, host packages, timeouts, log level are all options with sensible
 defaults.
 
+## Module → CI wiring (`flakeSshCreds`, `updateSshCreds`, `bot`)
+
+The runner host is configured by the consumer; CI workflows/actions run on it
+as jobs. Deployment-specific values (SSH user, bot identity) are NOT hardcoded
+in YAML — the module exports them into every job via act_runner's
+**`runner.envs`** (a mode-agnostic config key — applies to `host` jobs too,
+not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
+
+| module option | job env / credential | used by |
+|---|---|---|
+| `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_*` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`) |
+| `updateSshCreds.user` | `NIXTACHE_UPDATE_GIT_USER` + `update_ssh_*` LoadCredential | `ssh-setup` (creds: update) + `update-flake.yml` push URL + commit signing |
+| `bot.name` / `bot.email` | `NIXTACHE_BOT_NAME` / `NIXTACHE_BOT_EMAIL` | `update-flake.yml` commit author |
+
+`*.user` is the git SSH **transport** user (server's `RUN_USER`, e.g.
+`forgejo`/`git`) — not the bot account. The two bundles are **independent**:
+`flakeSshCreds` gates private-input fetch, `updateSshCreds` gates update-flake
+push. Typically the consumer points both at the same key files. If
+`updateSshCreds = null`, `NIXTACHE_UPDATE_GIT_USER` is empty and
+`update-flake.yml` **self-disables** (a guard step no-ops the job with a
+warning). The bot's commit identity is separate (`bot.*`).
+
 ## Consumer pattern
 
 1. Add the flake input (`git+ssh`, see above) and import
-   `nixtache.nixosModules.forgejo-runner` into the host's modules.
+   `nixtache.nixosModules.runner` into the host's modules.
 2. Write a thin **instance** that owns the secrets (e.g. `sops.secrets.*`)
    and feeds the module options + secret paths.
 3. Replace the consumer's `.forgejo/workflows/*.yml` with thin wrappers:
@@ -110,7 +137,7 @@ Reference consumer: `codemaster/nixos-configuration`
 nix flake check --show-trace --all-systems
 
 # Evaluate the module standalone (no host needed) — sanity-check options
-nix-instantiate --parse modules/forgejo-runner.nix > /dev/null && echo OK
+nix-instantiate --parse modules/runner.nix > /dev/null && echo OK
 
 # SSH commit signing for this repo (if pushing bot commits):
 #   bot key path comes from the ssh-setup action output `key-path`.

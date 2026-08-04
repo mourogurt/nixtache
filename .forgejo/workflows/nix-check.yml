@@ -35,7 +35,7 @@ jobs:
         uses: ./.nixtache/.forgejo/actions/ssh-setup
         with:
           git-host: code.zinzaguras.ru
-          git-user: fbot
+          creds: flake
 
       - name: Verify flake metadata
         run: nix flake metadata

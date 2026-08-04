@@ -7,11 +7,15 @@ inputs:
     required: false
     default: "code.zinzaguras.ru"
   git-user:
-    description: "SSH user for the git host (the bot account)"
+    description: "Fallback SSH user (server RUN_USER) if the runner module did not export one for this purpose."
     required: false
-    default: "fbot"
+    default: "git"
+  creds:
+    description: "Which credential bundle to use: `flake` (fetch private flake inputs) or `update` (update-flake push+sign). Selects the LoadCredential (flake_ssh_* / update_ssh_*) and the NIXTACHE_<CREDS>_GIT_USER env."
+    required: false
+    default: "flake"
   required:
-    description: "If \"true\", fail when the bot SSH key is not provided by the runner. Default \"false\" = skip with a warning (the runner instance has no secrets.ssh* set)."
+    description: "If \"true\", fail when the chosen SSH key is not provided by the runner. Default \"false\" = skip with a warning (the corresponding *SshCreds is not set)."
     required: false
     default: "false"
 
@@ -35,13 +39,16 @@ runs:
         cfg="$ssh_dir/config"
         mkdir -p "$ssh_dir"
 
-        # Keys are provided by the runner host via systemd LoadCredential
-        # (see nixtache forgejo-runner module: gitea-runner-<name> LoadCredential,
-        # only present when the instance's secrets.ssh* are set). Check presence
-        # so build-only / test instances (no bot key) don't fail here.
+        # Keys are provided by the runner host via systemd LoadCredential, one
+        # pair per purpose: `<creds>_ssh_private` / `<creds>_ssh_public` where
+        # <creds> ∈ {flake, update} (see nixtache runner module flakeSshCreds /
+        # updateSshCreds). Each pair is present only when the consumer set the
+        # matching option, so missing creds => graceful skip (or error if
+        # `required: true`).
+        creds="${{ inputs.creds }}"
         cred_dir="${CREDENTIALS_DIRECTORY:-}"
-        if [ -z "$cred_dir" ] || [ ! -f "$cred_dir/ssh_private" ] || [ ! -f "$cred_dir/ssh_public" ]; then
-          msg="ssh-setup: bot SSH key not provided by the runner (LoadCredential ssh_private/ssh_public absent — the nixtache instance has no secrets.ssh* set)."
+        if [ -z "$cred_dir" ] || [ ! -f "$cred_dir/${creds}_ssh_private" ] || [ ! -f "$cred_dir/${creds}_ssh_public" ]; then
+          msg="ssh-setup: '${creds}' SSH credentials not provided by the runner (LoadCredential ${creds}_ssh_private/${creds}_ssh_public absent — services.nixtache.runner.${creds}SshCreds is null)."
           if [ "${{ inputs.required }}" = "true" ]; then
             echo "::error::$msg"
             exit 1
@@ -52,14 +59,23 @@ runs:
           exit 0
         fi
 
-        cp "$cred_dir/ssh_private" "$ssh_dir/id_key"
-        cp "$cred_dir/ssh_public" "$ssh_dir/id_key.pub"
+        # Git SSH user for this purpose: the runner module exports
+        # NIXTACHE_<CREDS>_GIT_USER (server RUN_USER, e.g. forgejo/git); fall
+        # back to the `git-user` input.
+        case "$creds" in
+          flake) git_user="${NIXTACHE_FLAKE_GIT_USER:-${{ inputs.git-user }}}" ;;
+          update) git_user="${NIXTACHE_UPDATE_GIT_USER:-${{ inputs.git-user }}}" ;;
+          *) git_user="${{ inputs.git-user }}" ;;
+        esac
+
+        cp "$cred_dir/${creds}_ssh_private" "$ssh_dir/id_key"
+        cp "$cred_dir/${creds}_ssh_public" "$ssh_dir/id_key.pub"
         chmod 400 "$ssh_dir/id_key"
         chmod 400 "$ssh_dir/id_key.pub"
 
         echo "Host ${{ inputs.git-host }}" > "$cfg"
         echo "  HostName ${{ inputs.git-host }}" >> "$cfg"
-        echo "  User ${{ inputs.git-user }}" >> "$cfg"
+        echo "  User $git_user" >> "$cfg"
         echo "  IdentityFile $ssh_dir/id_key" >> "$cfg"
 
         git config --global core.sshCommand "ssh -F $cfg"

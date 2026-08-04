@@ -8,20 +8,20 @@
   outputs = { self, nixpkgs, ... }:
     {
       # NixOS modules. Consumers import via:
-      #   inputs.nixtache.nixosModules.forgejo-runner
+      #   inputs.nixtache.nixosModules.runner
       # or the convenience alias:
       #   inputs.nixtache.nixosModules.default
       nixosModules = {
-        forgejo-runner = import ./modules/forgejo-runner.nix;
-        default = self.nixosModules.forgejo-runner;
+        runner = import ./modules/runner.nix;
+        default = self.nixosModules.runner;
       };
 
-      # Pure-evaluation tests for the forgejo-runner module (see
-      # tests/forgejo-runner.nix). Build with:
-      #   nix build .#checks.x86_64-linux.forgejo-runner
+      # Pure-evaluation tests for the runner module (see tests/runner.nix).
+      # Build with:
+      #   nix build .#checks.x86_64-linux.runner
       checks = nixpkgs.lib.genAttrs [ "x86_64-linux" ] (system: rec {
-        forgejo-runner = import ./tests/forgejo-runner.nix { inherit nixpkgs self system; };
-        default = forgejo-runner;
+        runner = import ./tests/runner.nix { inherit nixpkgs self system; };
+        default = runner;
       });
     };
 }

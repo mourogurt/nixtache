@@ -28,43 +28,77 @@ jobs:
           path: .nixtache
           ref: main
 
+      - name: Guard — update-flake enabled?
+        # update-flake needs push credentials. The nixtache runner module
+        # exports NIXTACHE_UPDATE_GIT_USER only when `updateSshCreds` is set;
+        # if it's absent, no-op the whole job with a warning instead of failing
+        # at the push step.
+        id: guard
+        shell: bash
+        run: |
+          if [ -z "${NIXTACHE_UPDATE_GIT_USER:-}" ]; then
+            echo "::warning::update-flake disabled: services.nixtache.runner.updateSshCreds is null (no push credential). Set updateSshCreds to enable."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup SSH
+        if: steps.guard.outputs.enabled == 'true'
         id: ssh
         uses: ./.nixtache/.forgejo/actions/ssh-setup
         with:
           git-host: code.zinzaguras.ru
-          git-user: fbot
+          creds: update
 
       - name: Setup Git
-        # Q5=A: signing key path comes from ssh-setup's output (was ~/.ssh/id_rsa).
+        # Bot identity (commit author) from the runner module (NIXTACHE_BOT_*),
+        # signing key = the update SSH key loaded above.
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          BOT_NAME: ${NIXTACHE_BOT_NAME:-fbot}
+          BOT_EMAIL: ${NIXTACHE_BOT_EMAIL:-fbot@localhost}
         run: |
-          git config --local user.email "localhost@localhost"
-          git config --local user.name "fbot"
+          git config --local user.name "$BOT_NAME"
+          git config --local user.email "$BOT_EMAIL"
           git config --local user.signingkey "${{ steps.ssh.outputs.key-path }}"
           git config --local gpg.format ssh
 
       - name: Update Flakes Inputs
+        if: steps.guard.outputs.enabled == 'true'
         run: |
           nix flake update --commit-lock-file
 
       - name: Validate Nix Configuration
+        if: steps.guard.outputs.enabled == 'true'
         uses: ./.nixtache/.forgejo/actions/flake-validation
 
       - name: Rebuilding All NixOS Configurations
+        if: steps.guard.outputs.enabled == 'true'
         uses: ./.nixtache/.forgejo/actions/rebuild-configurations
 
       - name: Rebuilding All Nix DevShells
+        if: steps.guard.outputs.enabled == 'true'
         uses: ./.nixtache/.forgejo/actions/rebuild-devshells
         timeout-minutes: 4320
         with:
           systems: "x86_64-linux"
 
       - name: Push Changes
+        # SSH push URL from server state — no hardcoded user/host.
+        # NIXTACHE_UPDATE_GIT_USER = server RUN_USER (from updateSshCreds.user);
+        # host derived from GITHUB_SERVER_URL; repo/ref from GitHub-compat env.
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GIT_USER: ${NIXTACHE_UPDATE_GIT_USER}
         run: |
-          echo "Setting origin to ssh://forgejo@code.zinzaguras.ru/${{ forge.repository }}"
-          git remote set-url origin ssh://forgejo@code.zinzaguras.ru/${{ forge.repository }}
-          echo "Pushing to ${{ forge.ref_name }}"
-          git push origin ${{ forge.ref_name }}
+          set -euo pipefail
+          host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
+          url="ssh://${GIT_USER}@${host}/${GITHUB_REPOSITORY}"
+          echo "Setting origin to $url"
+          git remote set-url origin "$url"
+          echo "Pushing to ${GITHUB_REF_NAME}"
+          git push origin "${GITHUB_REF_NAME}"
 
       - name: Deploy artifacts
         if: always()

@@ -1,7 +1,7 @@
-# Pure-evaluation tests for the forgejo-runner module.
+# Pure-evaluation tests for the runner module.
 #
 # The module is consumed by nixtache itself (dogfooding): each scenario imports
-# `self.nixosModules.forgejo-runner` and feeds it a per-instance `tokenFile`
+# `self.nixosModules.runner` and feeds it a per-instance `tokenFile`
 # pointing at nixtache's own (sops-encrypted) `secrets/runner.env`. These
 # checks verify the module WIRING without running any container/VM — the token
 # file is ciphertext, which is fine since the module never reads it at eval
@@ -16,8 +16,10 @@
 #              wired, with its own token mount + name/labels;
 #   - ssh    → optional SSH key pair: absent = no LoadCredential / key mounts;
 #              present = LoadCredential + mounts wired; half-set = assertion.
+#   - gitUser → cfg.gitUser is exported to every job as NIXTACHE_GIT_USER via
+#               runner.envs (the mechanism ssh-setup / push steps rely on).
 #
-# Exposed via the flake as `checks.<system>.forgejo-runner`.
+# Exposed via the flake as `checks.<system>.runner`.
 {
   nixpkgs,
   self,
@@ -38,10 +40,12 @@ let
 
   # Minimal host + module config shared by every scenario. One `default`
   # instance, real token, cache key, and NO SSH keys (build-only / test — no
-  # fbot push-back). Only `store.path` (and the `extra` module) varies.
-  baseModule = { ... }: {
-    system.stateVersion = "24.11";
-    services.nixtache.forgejo-runner = {
+  # push-back). Only `store.path` (and the `extra` module) varies.
+  # stateVersion follows nixpkgs' own test convention (lib.trivial.release) so
+  # the test exercises the current release, not a pinned old one.
+  baseModule = { lib, ... }: {
+    system.stateVersion = lib.trivial.release;
+    services.nixtache.runner = {
       enable = true;
       forgejoUrl = "http://localhost:3000";
       cache = {
@@ -59,17 +63,17 @@ let
     nixpkgs.lib.nixosSystem {
       inherit system;
       modules = [
-        self.nixosModules.forgejo-runner
+self.nixosModules.runner
         baseModule
-        { services.nixtache.forgejo-runner.store.path = storePath; }
+        { services.nixtache.runner.store.path = storePath; }
         extra
       ];
     };
 
-  containerCfg = host: host.config.containers."forgejo-runner".config;
+  containerCfg = host: host.config.containers."runner".config;
   servicesOf = host: (containerCfg host).systemd.services;
   socketsOf = host: (containerCfg host).systemd.sockets;
-  bindMountsOf = host: host.config.containers."forgejo-runner".bindMounts;
+  bindMountsOf = host: host.config.containers."runner".bindMounts;
   instancesOf = host: (containerCfg host).services.gitea-actions-runner.instances;
   loadCred = svc: svc."gitea-runner-default".serviceConfig.LoadCredential or [ ];
   has = set: name: set ? ${name};
@@ -91,8 +95,9 @@ let
       socketPath = (socketsOf hostSrv)."nix-daemon-custom".listenStreams == [ "/srv/nix/var/nix/daemon-socket/socket" ];
       srvMountPoint = (bindMountsOf hostSrv)."srv-nix".mountPoint == "/srv";
       # per-instance token mount present, SSH mounts / LoadCredential absent
-      tokenMount = (bindMountsOf hostSrv)."forgejo-token-default".mountPoint == "/var/secrets/forgejo-runner/default/token";
-      noSshPrivateMount = !(has (bindMountsOf hostSrv) "ssh-private-key");
+      tokenMount = (bindMountsOf hostSrv)."runner-token-default".mountPoint == "/var/secrets/runner/default/token";
+      noFlakeSshMount = !(has (bindMountsOf hostSrv) "flake-ssh-private-key");
+      noUpdateSshMount = !(has (bindMountsOf hostSrv) "update-ssh-private-key");
       noLoadCredential = loadCred svcSrv == [ ];
     };
   };
@@ -122,9 +127,9 @@ let
 
   # --- scenario D: multiple instances share the relocated store -----------
   hostMulti = mkHost "/srv" {
-    services.nixtache.forgejo-runner.instances = {
+    services.nixtache.runner.instances = {
       default.tokenFile = runnerToken;
-      test = { labels = [ "nixos:test" ]; tokenFile = runnerToken; };
+      test = { labels = [ "test:host" ]; tokenFile = runnerToken; };
     };
   };
   svcMulti = servicesOf hostMulti;
@@ -136,46 +141,89 @@ let
       defaultBindPaths = svcMulti."gitea-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
       testBindPaths = svcMulti."gitea-runner-test".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
       defaultLabels = (instancesOf hostMulti)."default".labels == [ "nixos:host" ];
-      testLabels = (instancesOf hostMulti)."test".labels == [ "nixos:test" ];
+      testLabels = (instancesOf hostMulti)."test".labels == [ "test:host" ];
       defaultName = (instancesOf hostMulti)."default".name == "default";
       testName = (instancesOf hostMulti)."test".name == "test";
       # distinct per-instance token mounts
-      defaultTokenMount = (bindMountsOf hostMulti)."forgejo-token-default".mountPoint == "/var/secrets/forgejo-runner/default/token";
-      testTokenMount = (bindMountsOf hostMulti)."forgejo-token-test".mountPoint == "/var/secrets/forgejo-runner/test/token";
+      defaultTokenMount = (bindMountsOf hostMulti)."runner-token-default".mountPoint == "/var/secrets/runner/default/token";
+      testTokenMount = (bindMountsOf hostMulti)."runner-token-test".mountPoint == "/var/secrets/runner/test/token";
     };
   };
 
-  # --- scenario E: SSH keys enabled → LoadCredential + key mounts ----------
+  # --- scenario E: flake + update sshCreds → both LoadCredentials mounted ---
   hostSsh = mkHost "/srv" {
-    services.nixtache.forgejo-runner.secrets = {
+    services.nixtache.runner.flakeSshCreds = {
+      user = "forgejo";
+      sshPrivateKey = dummySecret;
+      sshPublicKey = dummySecret;
+    };
+    services.nixtache.runner.updateSshCreds = {
+      user = "forgejo";
       sshPrivateKey = dummySecret;
       sshPublicKey = dummySecret;
     };
   };
   svcSsh = servicesOf hostSsh;
   scenarioSsh = {
-    name = "secrets.ssh* set → bot key mounts + LoadCredential wired";
+    name = "flakeSshCreds + updateSshCreds → both LoadCredentials + mounts wired";
     checks = {
       loadCredential = loadCred svcSsh == [
-        "ssh_private:/var/secrets/forgejo-runner/ssh_host_ed25519_key"
-        "ssh_public:/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub"
+        "flake_ssh_private:/var/secrets/runner/flake_ssh_key"
+        "flake_ssh_public:/var/secrets/runner/flake_ssh_key.pub"
+        "update_ssh_private:/var/secrets/runner/update_ssh_key"
+        "update_ssh_public:/var/secrets/runner/update_ssh_key.pub"
       ];
-      hasPrivateMount = (bindMountsOf hostSsh)."ssh-private-key".mountPoint == "/var/secrets/forgejo-runner/ssh_host_ed25519_key";
-      hasPublicMount = (bindMountsOf hostSsh)."ssh-public-key".mountPoint == "/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub";
+      hasFlakeMount = (bindMountsOf hostSsh)."flake-ssh-private-key".mountPoint == "/var/secrets/runner/flake_ssh_key";
+      hasUpdateMount = (bindMountsOf hostSsh)."update-ssh-private-key".mountPoint == "/var/secrets/runner/update_ssh_key";
     };
   };
 
-  # --- scenario F: half-set SSH keys fires the assertion ------------------
-  tryHalfSsh = builtins.tryEval (mkHost "/srv" {
-    services.nixtache.forgejo-runner.secrets.sshPrivateKey = dummySecret;
-    # sshPublicKey left null
-  }).config.system.build.toplevel.outPath;
-  scenarioHalfSsh = {
-    name = "secrets: only one of sshPrivateKey/sshPublicKey set fires the assertion";
-    checks = { refused = !tryHalfSsh.success; };
+  # --- scenario F: only flakeSshCreds → flake-only LoadCredential ----------
+  hostFlakeOnly = mkHost "/srv" {
+    services.nixtache.runner.flakeSshCreds = {
+      user = "git";
+      sshPrivateKey = dummySecret;
+      sshPublicKey = dummySecret;
+    };
+    # updateSshCreds left null → no update_* LoadCredential, update user empty
+  };
+  envsFlakeOnly = (instancesOf hostFlakeOnly)."default".settings.runner.envs;
+  scenarioFlakeOnly = {
+    name = "only flakeSshCreds set → flake LoadCredential only, update user empty";
+    checks = {
+      hasFlakeCred = lib.elem "flake_ssh_private:/var/secrets/runner/flake_ssh_key" (loadCred (servicesOf hostFlakeOnly));
+      noUpdateCred = !(lib.elem "update_ssh_private:/var/secrets/runner/update_ssh_key" (loadCred (servicesOf hostFlakeOnly)));
+      flakeUser = envsFlakeOnly.NIXTACHE_FLAKE_GIT_USER == "git";
+      updateUserEmpty = envsFlakeOnly.NIXTACHE_UPDATE_GIT_USER == "";
+    };
   };
 
-  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty scenarioMulti scenarioSsh scenarioHalfSsh ];
+  # --- scenario G: sshCreds users + bot identity exported via runner.envs --
+  hostEnvs = mkHost "/srv" {
+    services.nixtache.runner.flakeSshCreds = {
+      user = "forgejo";
+      sshPrivateKey = dummySecret;
+      sshPublicKey = dummySecret;
+    };
+    services.nixtache.runner.updateSshCreds = {
+      user = "forgejo";
+      sshPrivateKey = dummySecret;
+      sshPublicKey = dummySecret;
+    };
+    services.nixtache.runner.bot.email = "ci@example.com";
+  };
+  envsOf = (instancesOf hostEnvs)."default".settings.runner.envs;
+  scenarioEnvs = {
+    name = "sshCreds users + bot identity exported to jobs via runner.envs";
+    checks = {
+      flakeUser = envsOf.NIXTACHE_FLAKE_GIT_USER == "forgejo";
+      updateUser = envsOf.NIXTACHE_UPDATE_GIT_USER == "forgejo";
+      botName = envsOf.NIXTACHE_BOT_NAME == "fbot";
+      botEmail = envsOf.NIXTACHE_BOT_EMAIL == "ci@example.com";
+    };
+  };
+
+  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty scenarioMulti scenarioSsh scenarioFlakeOnly scenarioEnvs ];
 
   failed = builtins.concatMap
     (s:
@@ -204,7 +252,7 @@ let
   # (writeShellScript), so its content is verified at build time below.
   storageExecSrv = svcSrv."nix-daemon-storage".serviceConfig.ExecStart;
 in
-pkgs.runCommand "forgejo-runner-module-test"
+pkgs.runCommand "runner-module-test"
   {
     inherit report failMsg;
     passAsFile = [ "report" "failMsg" ];

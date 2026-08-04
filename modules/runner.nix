@@ -1,15 +1,18 @@
-# Forgejo Actions runner as a reusable, vendor-agnostic NixOS module.
+# Forgejo/Gitea Actions runner as a reusable, vendor-agnostic NixOS module.
 #
 # Lifted from nixos-configuration/server/services/forgejo-runner.nix and parameterised:
 #   - all project-specific values are options (URL, cache domain/port, known hosts, limits);
 #   - secrets are supplied by the consumer as `types.path` (Q4 path-based contract);
 #   - the module does NOT declare sops.secrets nor hardcode hosts/domains.
 #
-# The module spins up a NixOS container `forgejo-runner` that:
+# The module spins up a NixOS container `runner` that:
 #   - runs one or more `gitea-actions-runner` (forgejo-runner) instances, each
-#     with its own name/labels, all registering against the same Forgejo URL
+#     with its own name/labels, all registering against the same Forgejo/Gitea URL
 #     (e.g. a `default` runner on `nixos:host` and a `test` runner on
 #     `nixos:test` for CI experiments);
+#   - exports `gitUser` to every job via `runner.envs.NIXTACHE_GIT_USER` so the
+#     CI (ssh-setup, push steps) use the consumer's git SSH user instead of a
+#     hardcoded `forgejo@`/`git@`;
 #   - keeps a nix store at `store.path` + "/nix". Set `store.path = "/"` to
 #     reuse the container's system nix-daemon (native /nix); any other base
 #     (e.g. "/srv") relocates the store and runs a custom nix-daemon +
@@ -26,7 +29,7 @@
 with lib;
 
 let
-  cfg = config.services.nixtache.forgejo-runner;
+  cfg = config.services.nixtache.runner;
 
   # Known-host entry type: a named SSH host key trusted inside the container.
   knownHostEntry = types.submodule {
@@ -130,13 +133,37 @@ let
   # receives the relocated-store BindPaths + nix-daemon-custom dependency.
   enabledInstances = filterAttrs (_: i: i.enable) cfg.instances;
 
-  # Whether the bot SSH key pair is configured. The key mounts + LoadCredential
-  # are only wired when both halves are present; without them the runner simply
-  # can't push back to git (fine for test instances that only run builds).
-  sshEnabled = cfg.secrets.sshPrivateKey != null && cfg.secrets.sshPublicKey != null;
+  # SSH credentials for a single purpose: a user (server RUN_USER) + key pair.
+  # Two independent bundles exist — one for fetching private flake inputs
+  # (`flakeSshCreds`, used by nix-check's `nix flake check`), one for the
+  # update-flake workflow (`updateSshCreds`, push + commit signing). They mount
+  # as separate LoadCredentials (flake_ssh_* / update_ssh_*); typically the
+  # consumer points both at the same key files.
+  sshCredsType = types.submodule {
+    options = {
+      user = mkOption {
+        type = types.str;
+        description = "SSH user (server `RUN_USER`, e.g. `forgejo`/`git`) for this credential.";
+      };
+      sshPrivateKey = mkOption {
+        type = types.path;
+        description = "Bot SSH private key file path.";
+      };
+      sshPublicKey = mkOption {
+        type = types.path;
+        description = "Bot SSH public key file path matching `sshPrivateKey`.";
+      };
+    };
+  };
+
+  flakeSsh = cfg.flakeSshCreds;
+  updateSsh = cfg.updateSshCreds;
+  flakeSshEnabled = flakeSsh != null;
+  updateSshEnabled = updateSsh != null;
+  anySsh = flakeSshEnabled || updateSshEnabled;
 in
 {
-  options.services.nixtache.forgejo-runner = {
+  options.services.nixtache.runner = {
     enable = mkEnableOption "Forgejo Actions runner in a NixOS container with a detached nix store and binary cache";
 
     # --- Forgejo connection -------------------------------------------------
@@ -153,7 +180,7 @@ in
     # --- Runner identity & behaviour ---------------------------------------
     containerName = mkOption {
       type = types.str;
-      default = "forgejo-runner";
+      default = "runner";
       description = "Name of the NixOS container (and the `container@<name>` systemd unit).";
     };
 
@@ -161,7 +188,54 @@ in
       type = types.package;
       default = pkgs.forgejo-runner;
       defaultText = lib.literalExpression "pkgs.forgejo-runner";
-      description = "forgejo-runner package used by all instances (`services.gitea-actions-runner.package`).";
+      description = "forgejo-runner package used by all instances (`services.gitea-actions-runner.package`). Set to `pkgs.gitea-actions-runner` for a Gitea server.";
+    };
+
+    # SSH credentials for fetching PRIVATE flake inputs (e.g. nixos-private)
+    # during `nix flake check`. Optional: omit for public-input-only setups.
+    # Exported to jobs as NIXTACHE_FLAKE_GIT_USER + a `flake_ssh_*`
+    # LoadCredential that the ssh-setup action (creds: flake) reads.
+    flakeSshCreds = mkOption {
+      type = types.nullOr sshCredsType;
+      default = null;
+      description = ''
+        SSH credentials for fetching private flake inputs in CI. When set,
+        `nix flake check` / `nix flake metadata` can git+ssh-clone private
+        inputs (e.g. `nixos-private`). null = no private-input auth (public
+        inputs only).
+      '';
+    };
+
+    # SSH credentials for the update-flake workflow (push lock-file commits +
+    # sign them). Optional: when null, update-flake self-disables with a
+    # warning. Exported as NIXTACHE_UPDATE_GIT_USER + `update_ssh_*`
+    # LoadCredential (ssh-setup creds: update). Typically the same key files as
+    # `flakeSshCreds`.
+    updateSshCreds = mkOption {
+      type = types.nullOr sshCredsType;
+      default = null;
+      description = ''
+        SSH credentials for the update-flake workflow (push + commit signing).
+        null = update-flake is disabled (its workflow detects the missing
+        credential and no-ops with a warning). Typically points at the same
+        key files as `flakeSshCreds`.
+      '';
+    };
+
+    # Bot identity (Forgejo account) that owns CI-generated commits. Its KEY is
+    # `updateSshCreds`; `name`/`email` are the commit author. Exported to jobs
+    # as NIXTACHE_BOT_NAME / NIXTACHE_BOT_EMAIL.
+    bot = {
+      name = mkOption {
+        type = types.str;
+        default = "fbot";
+        description = "Bot account name (commit `user.name`) for CI-generated commits.";
+      };
+      email = mkOption {
+        type = types.str;
+        default = "fbot@localhost";
+        description = "Bot account email (commit `user.email`) for CI-generated commits.";
+      };
     };
 
     # Runner instances. Each registers as a separate runner on `forgejoUrl`
@@ -347,22 +421,8 @@ in
 
     # --- Secrets (Q4: path-based, supplied by the consumer) ---------------
     # NOTE: the registration token is per-instance (`instances.<name>.tokenFile`),
-    # not global. The keys below are shared across all instances.
+    # not global. SSH creds live in `flakeSshCreds` / `updateSshCreds`.
     secrets = {
-      # Bot SSH key pair — optional. Set both to let jobs push back to git
-      # (e.g. the `fbot` bot). Omit both for build-only / test instances.
-      sshPrivateKey = mkOption {
-        type = types.nullOr types.path;
-        default = null;
-        description = "Bot SSH private key file (for pushing back to the git host). Set together with `sshPublicKey`; null disables SSH push-back.";
-      };
-
-      sshPublicKey = mkOption {
-        type = types.nullOr types.path;
-        default = null;
-        description = "Bot SSH public key file matching `sshPrivateKey`. Set together with `sshPrivateKey`; null disables SSH push-back.";
-      };
-
       cachePrivateKey = mkOption {
         type = types.path;
         description = "Binary cache signing key file (used by nix-serve-ng).";
@@ -374,12 +434,7 @@ in
     assertions = [
       {
         assertion = cfg.store.path != "";
-        message = "services.nixtache.forgejo-runner.store.path is mandatory and must not be empty (use \"/\" for the native /nix store).";
-      }
-      {
-        # SSH keys must be both-set or both-unset.
-        assertion = cfg.secrets.sshPrivateKey == null -> cfg.secrets.sshPublicKey == null;
-        message = "services.nixtache.forgejo-runner.secrets: set both sshPrivateKey and sshPublicKey, or neither.";
+        message = "services.nixtache.runner.store.path is mandatory and must not be empty (use \"/\" for the native /nix store).";
       }
     ];
 
@@ -391,27 +446,39 @@ in
       bindMounts = mkMerge [
         (listToAttrs (mapAttrsToList
           (iname: i:
-            nameValuePair "forgejo-token-${iname}" {
-              mountPoint = "/var/secrets/forgejo-runner/${iname}/token";
+            nameValuePair "runner-token-${iname}" {
+              mountPoint = "/var/secrets/runner/${iname}/token";
               hostPath = i.tokenFile;
               isReadOnly = true;
             })
           enabledInstances))
-        (optionalAttrs sshEnabled {
-          "ssh-private-key" = {
-            mountPoint = "/var/secrets/forgejo-runner/ssh_host_ed25519_key";
-            hostPath = cfg.secrets.sshPrivateKey;
+        (optionalAttrs flakeSshEnabled {
+          "flake-ssh-private-key" = {
+            mountPoint = "/var/secrets/runner/flake_ssh_key";
+            hostPath = flakeSsh.sshPrivateKey;
             isReadOnly = true;
           };
-          "ssh-public-key" = {
-            mountPoint = "/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub";
-            hostPath = cfg.secrets.sshPublicKey;
+          "flake-ssh-public-key" = {
+            mountPoint = "/var/secrets/runner/flake_ssh_key.pub";
+            hostPath = flakeSsh.sshPublicKey;
+            isReadOnly = true;
+          };
+        })
+        (optionalAttrs updateSshEnabled {
+          "update-ssh-private-key" = {
+            mountPoint = "/var/secrets/runner/update_ssh_key";
+            hostPath = updateSsh.sshPrivateKey;
+            isReadOnly = true;
+          };
+          "update-ssh-public-key" = {
+            mountPoint = "/var/secrets/runner/update_ssh_key.pub";
+            hostPath = updateSsh.sshPublicKey;
             isReadOnly = true;
           };
         })
         {
           "cache-private-key" = {
-            mountPoint = "/var/secrets/forgejo-runner/cache-private-key.pem";
+            mountPoint = "/var/secrets/runner/cache-private-key.pem";
             hostPath = cfg.secrets.cachePrivateKey;
             isReadOnly = true;
           };
@@ -474,12 +541,25 @@ in
               enable = true;
               name = i.name;
               url = cfg.forgejoUrl;
-              tokenFile = "/var/secrets/forgejo-runner/${iname}/token";
+              tokenFile = "/var/secrets/runner/${iname}/token";
               labels = i.labels;
               settings = {
                 runner = {
                   timeout = cfg.runnerTimeout;
                   shutdown_timeout = cfg.runnerTimeout;
+                  # Export the consumer's git SSH user + bot identity to every
+                  # job step (act_runner `runner.envs` — mode-agnostic, applies
+                  # to host mode too). Read by ssh-setup / push / commit steps
+                  # to avoid hardcoding forgejo@/git@ and the bot name/email.
+                  # Export SSH users + bot identity to every job step (act_runner
+                  # `runner.envs` — mode-agnostic, applies to host mode too).
+                  # `ssh-setup` picks the right pair via its `creds` input.
+                  envs = {
+                    NIXTACHE_FLAKE_GIT_USER = lib.optionalString flakeSshEnabled flakeSsh.user;
+                    NIXTACHE_UPDATE_GIT_USER = lib.optionalString updateSshEnabled updateSsh.user;
+                    NIXTACHE_BOT_NAME = cfg.bot.name;
+                    NIXTACHE_BOT_EMAIL = cfg.bot.email;
+                  };
                 };
                 log = {
                   level = cfg.logLevel;
@@ -497,7 +577,7 @@ in
             };
             nix-serve = mkIf cfg.cache.enable {
               enable = true;
-              secretKeyFile = "/var/secrets/forgejo-runner/cache-private-key.pem";
+              secretKeyFile = "/var/secrets/runner/cache-private-key.pem";
               package = cfg.cache.package;
               bindAddress = "localhost";
               port = cfg.cache.port;
@@ -513,13 +593,15 @@ in
             (mapAttrs'
               (iname: _:
                 nameValuePair "gitea-runner-${iname}" (mkMerge [
-                  # Bot SSH credentials are only loaded when the key pair is
-                  # configured (null for build-only / test instances).
-                  (mkIf sshEnabled {
-                    serviceConfig.LoadCredential = [
-                      "ssh_private:/var/secrets/forgejo-runner/ssh_host_ed25519_key"
-                      "ssh_public:/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub"
-                    ];
+                  # SSH credentials are loaded per purpose (flake / update),
+                  # each only when its bundle is configured. ssh-setup selects
+                  # via its `creds` input → $CREDENTIALS_DIRECTORY/<creds>_ssh_*.
+                  (mkIf anySsh {
+                    serviceConfig.LoadCredential =
+                      (optional flakeSshEnabled "flake_ssh_private:/var/secrets/runner/flake_ssh_key")
+                      ++ (optional flakeSshEnabled "flake_ssh_public:/var/secrets/runner/flake_ssh_key.pub")
+                      ++ (optional updateSshEnabled "update_ssh_private:/var/secrets/runner/update_ssh_key")
+                      ++ (optional updateSshEnabled "update_ssh_public:/var/secrets/runner/update_ssh_key.pub");
                   })
                   (mkIf customStore {
                     after = [ "nix-daemon-custom.service" ];

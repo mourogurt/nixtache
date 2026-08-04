@@ -1,5 +1,5 @@
 # Self-CI for nixtache: validate the flake and run its `checks.*` (the
-# forgejo-runner module tests in tests/forgejo-runner.nix).
+# runner module tests in tests/runner.nix).
 #
 # Unlike nix-check.yml / update-flake.yml (reusable workflows meant for
 # CONSUMER repositories), this triggers on push/PR to nixtache's own main
@@ -21,7 +21,10 @@ on:
 
 jobs:
   checks:
-    runs-on: nixos
+    # Runs on the dedicated `test` runner instance (label `test:host`),
+    # registered (in Forgejo) for nixops/nixtache — see nixos-configuration
+    # services.nixtache.runner.instances.test + the test-runner-env secret.
+    runs-on: test
     timeout-minutes: 120
     steps:
       - name: Checkout nixtache
@@ -36,7 +39,7 @@ jobs:
       - name: Run module tests
         run: |
           set -euo pipefail
-          out=$(nix build --no-link --print-out-paths --print-build-logs .#checks.x86_64-linux.forgejo-runner)
+          out=$(nix build --no-link --print-out-paths --print-build-logs .#checks.x86_64-linux.runner)
           echo "----- module test report -----"
           cat "$out"
 
