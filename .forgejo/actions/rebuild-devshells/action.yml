@@ -15,6 +15,16 @@ runs:
       run: |
         set -uo pipefail
 
+        # HAS_SANDBOX_CAP is exported by the nixtache runner module (1 =
+        # sandbox-capable; 0 = legacy/unprivileged). Append --no-sandbox only
+        # in the 0 case.
+        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+          SANDBOX_FLAG=""
+        else
+          echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+          SANDBOX_FLAG="--no-sandbox"
+        fi
+
         for system in ${{ inputs.systems }}; do
           echo "Processing system: $system"
 
@@ -32,7 +42,7 @@ runs:
 
             set +e
             nix print-dev-env ".#devShells.$system.$shell" \
-              --no-sandbox \
+              $SANDBOX_FLAG \
               --print-build-logs &> "$log_path"
             build_exit=$?
             set -e

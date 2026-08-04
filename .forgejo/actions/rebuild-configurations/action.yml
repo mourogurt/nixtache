@@ -8,6 +8,16 @@ runs:
       shell: bash
       run: |
         set -uo pipefail
+        # HAS_SANDBOX_CAP is exported by the nixtache runner module (1 =
+        # sandbox-capable; 0 = legacy/unprivileged). Append --no-sandbox only
+        # in the 0 case.
+        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+          SANDBOX_FLAG=""
+        else
+          echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+          SANDBOX_FLAG="--no-sandbox"
+        fi
+
         configs=$(nix flake show --json | jq -r '.nixosConfigurations | keys[]')
 
         if [ -z "$configs" ]; then
@@ -19,7 +29,7 @@ runs:
           echo "Building NixOS configuration: $config"
           mkdir -p artifacts
           set +e
-          nix build --no-sandbox --print-out-paths .#nixosConfigurations.$config.config.system.build.toplevel --no-link --print-build-logs &> "artifacts/rebuild_$config.log"
+          nix build $SANDBOX_FLAG --print-out-paths .#nixosConfigurations.$config.config.system.build.toplevel --no-link --print-build-logs &> "artifacts/rebuild_$config.log"
           build_exit=$?
           set -e
           echo "--- Last 50 lines of $config build log ---"

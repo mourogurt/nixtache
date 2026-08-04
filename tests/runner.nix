@@ -99,6 +99,9 @@ self.nixosModules.runner
       noFlakeSshMount = !(has (bindMountsOf hostSrv) "flake-ssh-private-key");
       noUpdateSshMount = !(has (bindMountsOf hostSrv) "update-ssh-private-key");
       noLoadCredential = loadCred svcSrv == [ ];
+      # CAP_SYS_ADMIN granted so the Nix build sandbox works inside nspawn
+      # (without it `nix.settings.sandbox = true` (NixOS default) fails).
+      hasSandboxCap = lib.elem "CAP_SYS_ADMIN" hostSrv.config.containers."runner".additionalCapabilities;
     };
   };
 
@@ -220,10 +223,47 @@ self.nixosModules.runner
       updateUser = envsOf.NIXTACHE_UPDATE_GIT_USER == "forgejo";
       botName = envsOf.NIXTACHE_BOT_NAME == "fbot";
       botEmail = envsOf.NIXTACHE_BOT_EMAIL == "ci@example.com";
+      # enableSandbox defaults to true → HAS_SANDBOX_CAP=1 exported to jobs.
+      hasSandboxEnv = envsOf.HAS_SANDBOX_CAP == "1";
     };
   };
 
-  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty scenarioMulti scenarioSsh scenarioFlakeOnly scenarioEnvs ];
+  # --- scenario H: enableSandbox=true (default) + additionalCapabilities merge
+  # Symmetric counterpart to scenarioNoSandbox: with the default (sandbox on),
+  # CAP_SYS_ADMIN is granted, the daemon sandbox stays on, HAS_SANDBOX_CAP=1 is
+  # exported, AND consumer-supplied additionalCapabilities merge on top.
+  hostSandboxOn = mkHost "/srv" {
+    services.nixtache.runner.additionalCapabilities = [ "CAP_NET_ADMIN" ];
+  };
+  scenarioSandboxOn = {
+    name = "enableSandbox=true (default): CAP_SYS_ADMIN granted, daemon sandbox on, HAS_SANDBOX_CAP=1, extra caps merged";
+    checks = {
+      hasSysAdmin = lib.elem "CAP_SYS_ADMIN" hostSandboxOn.config.containers."runner".additionalCapabilities;
+      hasExtraCap = lib.elem "CAP_NET_ADMIN" hostSandboxOn.config.containers."runner".additionalCapabilities;
+      daemonSandboxOn = (containerCfg hostSandboxOn).nix.settings.sandbox == true;
+      sandboxEnvOn = (instancesOf hostSandboxOn)."default".settings.runner.envs.HAS_SANDBOX_CAP == "1";
+    };
+  };
+
+  # --- scenario I: enableSandbox=false keeps the container unprivileged -----
+  # No CAP_SYS_ADMIN, daemon sandbox forced off, and HAS_SANDBOX_CAP=0 so the
+  # reusable CI actions fall back to --no-sandbox. Consumer-supplied
+  # additionalCapabilities still merge through.
+  hostNoSandbox = mkHost "/srv" {
+    services.nixtache.runner.enableSandbox = false;
+    services.nixtache.runner.additionalCapabilities = [ "CAP_NET_ADMIN" ];
+  };
+  scenarioNoSandbox = {
+    name = "enableSandbox=false: no CAP_SYS_ADMIN, daemon sandbox off, HAS_SANDBOX_CAP=0, extra caps preserved";
+    checks = {
+      noSysAdmin = !(lib.elem "CAP_SYS_ADMIN" hostNoSandbox.config.containers."runner".additionalCapabilities);
+      hasExtraCap = lib.elem "CAP_NET_ADMIN" hostNoSandbox.config.containers."runner".additionalCapabilities;
+      daemonSandboxOff = (containerCfg hostNoSandbox).nix.settings.sandbox == false;
+      sandboxEnvOff = (instancesOf hostNoSandbox)."default".settings.runner.envs.HAS_SANDBOX_CAP == "0";
+    };
+  };
+
+  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty scenarioMulti scenarioSsh scenarioFlakeOnly scenarioEnvs scenarioSandboxOn scenarioNoSandbox ];
 
   failed = builtins.concatMap
     (s:

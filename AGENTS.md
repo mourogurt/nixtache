@@ -82,6 +82,8 @@ services.nixtache.runner = {
   store.path = "/srv";                           # base dir; store lives at <path>/nix. "/" = system nix-daemon
   store.hostBackup = "/srv/bincache";            # host dir mounted at store.path
   nixSettings   = { substituters = [...]; trusted-public-keys = [...]; max-jobs = 1; cores = 8; };
+  enableSandbox = true;                           # grant CAP_SYS_ADMIN so Nix's build sandbox works inside nspawn (default)
+  additionalCapabilities = [ "CAP_NET_ADMIN" ];   # extra caps merged on top of the sandbox one (optional)
   gitHost       = { name = "forgejo_ed25519"; hostNames = [ "git.example.com" "10.0.0.1" "localhost" ]; publicKey = "ssh-ed25519 AAAA..."; };
   extraKnownHosts = [ { name = "github_ed25519"; hostNames = [ "github.com" ]; publicKey = "ssh-ed25519 AAAA..."; } ];
   secrets.cachePrivateKey = config.sops.secrets.cache-private-key.path;
@@ -116,6 +118,41 @@ push. Typically the consumer points both at the same key files. If
 `updateSshCreds = null`, `NIXTACHE_UPDATE_GIT_USER` is empty and
 `update-flake.yml` **self-disables** (a guard step no-ops the job with a
 warning). The bot's commit identity is separate (`bot.*`).
+
+## Build sandboxing (`enableSandbox`, `HAS_SANDBOX_CAP`)
+
+The runner is a NixOS `systemd-nspawn` container. NixOS sets
+`nix.settings.sandbox = true` by default, **but nspawn drops `CAP_SYS_ADMIN`
+from the container's bounding set**, so `nix-daemon` inside cannot create the
+user/mount namespaces + bind-mounts the sandbox needs. Result: every
+`nix build` / `nix flake check` fails with
+`this system does not support the kernel namespaces that are required for
+sandboxing`. Two module options make the trade-off explicit:
+
+| option | default | effect |
+|---|---|---|
+| `enableSandbox` | `true` | grants `CAP_SYS_ADMIN` to the container, forces `nix.settings.sandbox = true`, exports `HAS_SANDBOX_CAP=1` to every job |
+| `additionalCapabilities` | `[]` | extra caps merged on top (e.g. `CAP_NET_ADMIN` for tunnel setup) |
+
+`enableSandbox = false` keeps the container **unprivileged** (no `CAP_SYS_ADMIN`)
+at the cost of unsandboxed builds — use it only if your threat model forbids
+granting that cap. The module then forces `nix.settings.sandbox = false` and
+exports `HAS_SANDBOX_CAP=0`.
+
+**CI side.** The reusable actions (`flake-validation`, `rebuild-configurations`,
+`rebuild-devshells`) and nixtache's own `ci.yml` read `HAS_SANDBOX_CAP`:
+- `1` → build normally (sandboxed);
+- `0` / unset → append `--no-sandbox` (legacy / unprivileged fallback).
+
+So a runner deployed without the cap still passes CI; a runner with the cap
+builds properly sandboxed. The old `--no-sandbox` flags that were hardcoded
+into every action are gone.
+
+> Deployment note (chicken-and-egg, see "Bootstrap & deploy" below): the cap
+> is granted only after the server is rebuilt with the updated module, so a
+> first-time rollout needs one manual `nixos-rebuild switch` on the server.
+> Until then jobs run in the `--no-sandbox` fallback — they don't break, they
+> just don't sandbox.
 
 ## Consumer pattern
 
@@ -155,6 +192,80 @@ nix-instantiate --parse modules/runner.nix > /dev/null && echo OK
 - In the Forgejo UI a reusable call renders as two jobs: `<name>` (0s caller)
   and `<name>-1` (the work). Expected.
 
+## Bootstrap & deploy: the chicken-and-egg (future task)
+
+**Problem.** The Forgejo CI runner is itself declared in the server's NixOS
+config (`services.nixtache.runner` in nixos-configuration). When that config
+changes in a way that affects how CI runs — the runner module contract
+(`flakeSshCreds`/`updateSshCreds`, LoadCredential names), the `ssh-setup`
+action, or the reusable workflows — the **deployed** runner keeps running the
+OLD code until `nixos-rebuild switch`. Meanwhile the NEW workflow (checked out
+from `nixtache@main` / the consumer's `main`) already expects the new runner.
+Result: CI fails — e.g. `ssh-setup` (`creds: flake`) skips because
+`flake_ssh_*` is absent on the old runner, a stale `core.sshCommand` lingers in
+`~/.gitconfig`, and `nix flake check` can't git+ssh-fetch private inputs. The
+runner can't deploy itself, because deploying restarts the very container the
+job runs in — a chicken-and-egg.
+
+**Goal.** A deploy path that activates the server config from an executor that
+is NOT the nixtache runner container, so "update the runner" is decoupled from
+"run CI on the runner". After a deploy, the regular runner restarts with the
+new config and the main CI proceeds normally.
+
+**Design — a stable "deploy" executor + a deploy workflow.**
+
+1. **Bootstrap runner** — a second runner that is NOT inside the nixtache
+   container and whose config is intentionally minimal and rarely changed:
+   - either a host-level runner on the server (a separate
+     `services.gitea-actions-runner.instances.deploy` running directly on the
+     host, label `deploy:host`), or
+   - a runner on a different machine with SSH access to the server.
+   It lives outside the container, so rebuilding the server (and restarting
+   the `default`/`test` containers) does not interrupt it. It only needs to
+   build flakes and run `nixos-rebuild`/`deploy-rs` over SSH.
+
+2. **`deploy.yml`** (reusable workflow in nixtache, thin wrapper in the
+   consumer) — `runs-on: deploy`, on push to `main` (or `workflow_dispatch`):
+   checkout consumer flake → build `.#nixosConfigurations.server` → activate
+   over SSH with a dedicated **deploy key** (a separate credential with host
+   login rights — NOT the fbot git-bot key) via `nixos-rebuild switch --flake
+   .#server --target-host …` or `deploy-rs`/`colmena`. On success the
+   `default`/`test` runner containers restart with the new module config.
+
+3. **Sequencing** — the main CI (`nix-check.yml`) runs only after the deploy
+   succeeds, on the now-updated regular runner: either two jobs in one
+   pipeline (`deploy` on `runs-on: deploy` → `check` on `runs-on: nixos` with
+   `needs: deploy`), or `nix-check` triggered via `workflow_run` on
+   `deploy.yml` completion.
+
+4. **Bootstrap-of-the-bootstrap** — the deploy runner must be brought up
+   manually once (initial `nixos-rebuild switch` that starts the `deploy`
+   instance). After that it's self-sustaining as long as its minimal config
+   doesn't break; if it ever does, another manual bootstrap. Keep its config
+   tiny and stable on purpose.
+
+5. **Rollback resilience** — because the deploy runner is separate, a bad
+   deploy that breaks `default`/`test` does NOT brick CI: the deploy runner can
+   re-run and roll the server back. This is the main robustness win over "the
+   runner rebuilds itself".
+
+**Lighter alternative (status quo).** No bootstrap runner; document that
+changes touching the runner module contract or the CI workflows require a
+one-time **manual** `nixos-rebuild switch` on the server, and CI-driven
+deploys handle only non-runner-breaking changes. Cheaper, but every contract
+change needs a human deploy and there is no auto-rollback.
+
+**Open sub-decisions (when this is picked up):**
+- deploy tool: `nixos-rebuild --target-host` vs `deploy-rs` vs `colmena`;
+- deploy-key scope (dedicated `nixos-deploy` user with passwordless
+  `nixos-rebuild` sudo, or root);
+- where the deploy runner lives (host-level `deploy` instance vs external
+  machine);
+- whether `deploy.yml` gates `nix-check` (`needs:`) or runs independently.
+
+See also `doc/migration-plan.md` "Контракт деплоя" for the original deploy
+contract stubs.
+
 ## Nix style
 
 Follows the workspace conventions (`../AGENTS.md`): 2-space indent, kebab-case
@@ -165,8 +276,10 @@ for non-trivial defaults.
 ## TODO / out of scope here
 
 - **Deploy contract** (`deploy.yml` + `deploy-target` action) is defined in
-  `doc/migration-plan.md` (section "Контракт деплоя") as stubs; implementation
-  is a separate task (deploy tool choice, target SSH auth, rollback strategy).
+  `doc/migration-plan.md` (section "Контракт деплоя") as stubs, and the
+  chicken-and-egg bootstrap design is sketched in "Bootstrap & deploy" above.
+  Implementation is a separate task (deploy tool choice, target SSH auth,
+  rollback strategy).
 - **Secret provider presets** (`nixtache.secrets.providers.{sops,vault,systemd}`)
   are planned sugar over the path-based core (decision Q4=B in the migration
   plan). The path-based core is the stable contract today.

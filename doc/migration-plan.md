@@ -105,7 +105,7 @@
 |---|---|
 | `ssh-setup` | Копирует SSH-ключи из `$CREDENTIALS_DIRECTORY` (systemd `LoadCredential`), формирует `~/.ssh/config` для `code.zinzaguras.ru` (user `fbot`), настраивает `git config core.sshCommand`. |
 | `flake-validation` | `nix flake check --show-trace --all-systems`. |
-| `rebuild-configurations` | Через `nix flake show --json` перечисляет `nixosConfigurations`, собирает `.#nixosConfigurations.$c.config.system.build.toplevel` (`--no-sandbox`, логи в `artifacts/`). |
+| `rebuild-configurations` | Через `nix flake show --json` перечисляет `nixosConfigurations`, собирает `.#nixosConfigurations.$c.config.system.build.toplevel` (логи в `artifacts/`). |
 | `rebuild-devshells` | Для каждого `system` из inputs — `nix print-dev-env .#devShells.$system.$shell`. |
 
 > Все 4 действия переносятся в `nixtache/.forgejo/actions/` и становятся переиспользуемыми.

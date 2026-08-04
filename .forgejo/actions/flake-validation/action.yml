@@ -8,7 +8,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        if ! nix flake check --show-trace --all-systems; then
+        # HAS_SANDBOX_CAP is exported by the nixtache runner module (1 = the
+        # container has CAP_SYS_ADMIN and the daemon sandboxes; 0 = legacy /
+        # unprivileged container). Only fall back to --no-sandbox in the 0
+        # case so the check still runs instead of dying on missing namespaces.
+        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+          SANDBOX_FLAG=""
+        else
+          echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+          SANDBOX_FLAG="--no-sandbox"
+        fi
+        if ! nix flake check --show-trace --all-systems $SANDBOX_FLAG; then
           echo "Nix configuration validation failed!"
           exit 1
         fi

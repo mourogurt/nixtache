@@ -398,6 +398,49 @@ in
         `experimental-features`, `trusted-users` and `system-features` on top
         of these. Include your binary cache (`substituters` +
         `trusted-public-keys`) here if you want the runner to consume it.
+
+        Do NOT set `sandbox` here — it is owned by `enableSandbox` below.
+      '';
+    };
+
+    # --- Build sandboxing ---------------------------------------------------
+    # NixOS enables `nix.settings.sandbox` by default, but systemd-nspawn
+    # drops CAP_SYS_ADMIN from the container's bounding set, so the daemon
+    # inside cannot create the user/mount namespaces the sandbox needs — every
+    # `nix build` / `nix flake check` then fails with "this system does not
+    # support the kernel namespaces that are required for sandboxing". These
+    # two options make the trade-off explicit: enableSandbox=true (default)
+    # grants the cap and keeps the sandbox on; enableSandbox=false keeps the
+    # container unprivileged at the cost of unsandboxed builds (the CI actions
+    # detect this via HAS_SANDBOX_CAP and fall back to --no-sandbox).
+    enableSandbox = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Whether Nix builds inside the container run sandboxed.
+
+        - `true` (default): grants `CAP_SYS_ADMIN` to the container (required
+          for the Nix build sandbox under systemd-nspawn), forces
+          `nix.settings.sandbox = true`, and exports `HAS_SANDBOX_CAP=1` to
+          every CI job so the reusable actions keep sandboxing on.
+        - `false`: keeps the container unprivileged (no `CAP_SYS_ADMIN`), forces
+          `nix.settings.sandbox = false`, and exports `HAS_SANDBOX_CAP=0`; the
+          CI actions then append `--no-sandbox` (legacy/relaxed mode).
+
+        Use `false` only if your threat model forbids granting `CAP_SYS_ADMIN`
+        (a powerful capability) to the runner container. The default gives a
+        working sandbox out of the box.
+      '';
+    };
+
+    additionalCapabilities = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "CAP_NET_ADMIN" "CAP_MKNOD" ];
+      description = ''
+        Extra capabilities to grant the container, merged on top of the
+        `CAP_SYS_ADMIN` that `enableSandbox = true` adds automatically. See
+        {manpage}`capabilities(7)` and {manpage}`systemd-nspawn(1)`.
       '';
     };
 
@@ -440,6 +483,16 @@ in
 
     containers.${cfg.containerName} = {
       autoStart = true;
+
+      # CAP_SYS_ADMIN (when enableSandbox) so nix-daemon inside the container
+      # can create the user/mount namespaces + bind-mounts that Nix's build
+      # sandbox requires. systemd-nspawn drops CAP_SYS_ADMIN by default, and
+      # `nix.settings.sandbox` defaults to `true` on NixOS — without the cap
+      # every `nix build` / `nix flake check` fails with "this system does not
+      # support the kernel namespaces that are required for sandboxing". Any
+      # consumer-supplied additionalCapabilities are merged on top.
+      additionalCapabilities =
+        cfg.additionalCapabilities ++ optional cfg.enableSandbox "CAP_SYS_ADMIN";
 
       # Per-instance token mounts + shared key/cache mounts. The relocated-store
       # mount and the (optional) SSH key mounts are added conditionally below.
@@ -529,6 +582,10 @@ in
                   "@users"
                 ];
                 system-features = system_features;
+                # Owned by `enableSandbox`. Forcing here so it tracks the cap
+                # granted to the container 1:1 (sandbox without the cap fails;
+                # cap without sandbox is a pointless privilege).
+                sandbox = lib.mkForce cfg.enableSandbox;
               }
             ];
           };
@@ -554,11 +611,15 @@ in
                   # Export SSH users + bot identity to every job step (act_runner
                   # `runner.envs` — mode-agnostic, applies to host mode too).
                   # `ssh-setup` picks the right pair via its `creds` input.
+                  # HAS_SANDBOX_CAP tells the reusable actions whether the
+                  # daemon can sandbox (1) or whether they must fall back to
+                  # --no-sandbox (0); mirrors `enableSandbox` 1:1.
                   envs = {
                     NIXTACHE_FLAKE_GIT_USER = lib.optionalString flakeSshEnabled flakeSsh.user;
                     NIXTACHE_UPDATE_GIT_USER = lib.optionalString updateSshEnabled updateSsh.user;
                     NIXTACHE_BOT_NAME = cfg.bot.name;
                     NIXTACHE_BOT_EMAIL = cfg.bot.email;
+                    HAS_SANDBOX_CAP = if cfg.enableSandbox then "1" else "0";
                   };
                 };
                 log = {
