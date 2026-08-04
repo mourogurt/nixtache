@@ -1,0 +1,11 @@
+keys:
+  - &pc_machine age1z9hdyxxq7gjvadrsnq7pu7pnjsfj5vmxvkl0gd04ekfjyjgaaehscgqhr9
+  - &laptop_machine age10ypqzyyfdhxul0v9cp50ztr42c47yar2f267wtkeslvlc4s5revsrc3yq4
+  - &server_machine age1nqqc0v5dfpy5qvytk59xg33vc3zrechwyffn3uf5n4t99xa4d3rq7uttsp
+creation_rules:
+  - path_regex: secrets/[^/]+\.(yaml|json|env|ini|key|enc)$
+    key_groups:
+    - age:
+      - *pc_machine
+      - *laptop_machine
+      - *server_machine

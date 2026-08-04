@@ -6,12 +6,15 @@
 #   - the module does NOT declare sops.secrets nor hardcode hosts/domains.
 #
 # The module spins up a NixOS container `forgejo-runner` that:
-#   - runs `gitea-actions-runner` (forgejo-runner) with a label `nixos:host`;
+#   - runs one or more `gitea-actions-runner` (forgejo-runner) instances, each
+#     with its own name/labels, all registering against the same Forgejo URL
+#     (e.g. a `default` runner on `nixos:host` and a `test` runner on
+#     `nixos:test` for CI experiments);
 #   - keeps a nix store at `store.path` + "/nix". Set `store.path = "/"` to
 #     reuse the container's system nix-daemon (native /nix); any other base
 #     (e.g. "/srv") relocates the store and runs a custom nix-daemon +
-#     storage oneshot, injecting a BindPaths bind onto /nix into the working
-#     services (gitea-runner, nix-serve);
+#     storage oneshot, injecting a BindPaths bind onto /nix into every
+#     runner service + nix-serve;
 #   - serves a binary cache (nix-serve-ng) proxied by nginx.
 {
   config,
@@ -43,6 +46,40 @@ let
       };
     };
   };
+
+  # A single runner instance. All instances share the container's relocated
+  # nix store, SSH/bot keys, cache and Forgejo URL; they differ by `name`,
+  # `labels` and `tokenFile` (one registration token per instance) so Forgejo
+  # can route jobs to a specific runner (e.g. a "test" runner on a distinct
+  # label with its own token).
+  instanceType = types.submodule ({ name, ... }: {
+    options = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Whether to enable this runner instance.";
+      };
+      name = mkOption {
+        type = types.str;
+        default = name;
+        description = "Runner name as registered in Forgejo (defaults to the instance attribute name).";
+      };
+      labels = mkOption {
+        type = types.listOf types.str;
+        default = [ "nixos:host" ];
+        description = "Runner labels (Forgejo routes jobs to instances by label).";
+      };
+      tokenFile = mkOption {
+        type = types.path;
+        description = ''
+          Environment file (a systemd `EnvironmentFile`) containing the
+          `TOKEN` variable used to register THIS instance. One token per
+          instance — Forgejo issues a registration token per runner.
+          Supplied by the consumer (sops / vault / systemd / ...).
+        '';
+      };
+    };
+  });
 
   # Default GitHub known hosts (generic, reusable).
   defaultExtraKnownHosts = [
@@ -88,6 +125,15 @@ let
   # systemd BindPaths spec that re-exposes the relocated store (<path>/nix)
   # at /nix. nix itself reconstructs the /nix suffix for `nix copy --to <path>`.
   bindPath = "${cfg.store.path}/nix:/nix";
+
+  # Enabled runner instances. Each becomes a `gitea-runner-<name>` service and
+  # receives the relocated-store BindPaths + nix-daemon-custom dependency.
+  enabledInstances = filterAttrs (_: i: i.enable) cfg.instances;
+
+  # Whether the bot SSH key pair is configured. The key mounts + LoadCredential
+  # are only wired when both halves are present; without them the runner simply
+  # can't push back to git (fine for test instances that only run builds).
+  sshEnabled = cfg.secrets.sshPrivateKey != null && cfg.secrets.sshPublicKey != null;
 in
 {
   options.services.nixtache.forgejo-runner = {
@@ -98,8 +144,9 @@ in
       type = types.str;
       example = "http://localhost:3000";
       description = ''
-        URL of the Forgejo instance the runner registers against.
-        Typically `http://localhost:<port>` when Forgejo runs on the same host.
+        URL of the Forgejo instance every runner instance registers against
+        (shared by all `instances.*`). Typically `http://localhost:<port>`
+        when Forgejo runs on the same host.
       '';
     };
 
@@ -110,16 +157,31 @@ in
       description = "Name of the NixOS container (and the `container@<name>` systemd unit).";
     };
 
-    runnerName = mkOption {
-      type = types.str;
-      default = "nixos-container-runner";
-      description = "Runner name as registered in Forgejo.";
+    package = mkOption {
+      type = types.package;
+      default = pkgs.forgejo-runner;
+      defaultText = lib.literalExpression "pkgs.forgejo-runner";
+      description = "forgejo-runner package used by all instances (`services.gitea-actions-runner.package`).";
     };
 
-    labels = mkOption {
-      type = types.listOf types.str;
-      default = [ "nixos:host" ];
-      description = "Runner labels.";
+    # Runner instances. Each registers as a separate runner on `forgejoUrl`
+    # with its own name/labels/tokenFile; all share the container's store,
+    # (optional) SSH/bot keys, cache and nix settings. Add a second instance
+    # (e.g. `test`) to get a dedicated runner for CI experiments routed by label.
+    instances = mkOption {
+      type = types.attrsOf instanceType;
+      description = ''
+        Runner instances to start inside the container. Each becomes a
+        `gitea-runner-<name>` service and needs its own `tokenFile`
+        (a Forgejo registration token). Example:
+
+        ```
+        instances = {
+          default = { tokenFile = config.sops.secrets.runner-token-default.path; };
+          test    = { labels = [ "nixos:test" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
+        };
+        ```
+      '';
     };
 
     hostPackages = mkOption {
@@ -284,23 +346,21 @@ in
     };
 
     # --- Secrets (Q4: path-based, supplied by the consumer) ---------------
+    # NOTE: the registration token is per-instance (`instances.<name>.tokenFile`),
+    # not global. The keys below are shared across all instances.
     secrets = {
-      tokenFile = mkOption {
-        type = types.path;
-        description = ''
-          File containing the runner registration token.
-          Supplied by the consumer (sops / vault / systemd / ...).
-        '';
-      };
-
+      # Bot SSH key pair — optional. Set both to let jobs push back to git
+      # (e.g. the `fbot` bot). Omit both for build-only / test instances.
       sshPrivateKey = mkOption {
-        type = types.path;
-        description = "Bot SSH private key file (for pushing back to the git host).";
+        type = types.nullOr types.path;
+        default = null;
+        description = "Bot SSH private key file (for pushing back to the git host). Set together with `sshPublicKey`; null disables SSH push-back.";
       };
 
       sshPublicKey = mkOption {
-        type = types.path;
-        description = "Bot SSH public key file matching `sshPrivateKey`.";
+        type = types.nullOr types.path;
+        default = null;
+        description = "Bot SSH public key file matching `sshPrivateKey`. Set together with `sshPrivateKey`; null disables SSH push-back.";
       };
 
       cachePrivateKey = mkOption {
@@ -316,38 +376,52 @@ in
         assertion = cfg.store.path != "";
         message = "services.nixtache.forgejo-runner.store.path is mandatory and must not be empty (use \"/\" for the native /nix store).";
       }
+      {
+        # SSH keys must be both-set or both-unset.
+        assertion = cfg.secrets.sshPrivateKey == null -> cfg.secrets.sshPublicKey == null;
+        message = "services.nixtache.forgejo-runner.secrets: set both sshPrivateKey and sshPublicKey, or neither.";
+      }
     ];
 
     containers.${cfg.containerName} = {
       autoStart = true;
 
-      bindMounts = {
-        "forgejo-token" = {
-          mountPoint = "/var/secrets/forgejo-runner/token";
-          hostPath = cfg.secrets.tokenFile;
-          isReadOnly = true;
-        };
-        "ssh-private-key" = {
-          mountPoint = "/var/secrets/forgejo-runner/ssh_host_ed25519_key";
-          hostPath = cfg.secrets.sshPrivateKey;
-          isReadOnly = true;
-        };
-        "ssh-public-key" = {
-          mountPoint = "/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub";
-          hostPath = cfg.secrets.sshPublicKey;
-          isReadOnly = true;
-        };
-        "cache-private-key" = {
-          mountPoint = "/var/secrets/forgejo-runner/cache-private-key.pem";
-          hostPath = cfg.secrets.cachePrivateKey;
-          isReadOnly = true;
-        };
-        "srv-nix" = mkIf customStore {
-          mountPoint = cfg.store.path;
-          hostPath = cfg.store.hostBackup;
-          isReadOnly = false;
-        };
-      };
+      # Per-instance token mounts + shared key/cache mounts. The relocated-store
+      # mount and the (optional) SSH key mounts are added conditionally below.
+      bindMounts = mkMerge [
+        (listToAttrs (mapAttrsToList
+          (iname: i:
+            nameValuePair "forgejo-token-${iname}" {
+              mountPoint = "/var/secrets/forgejo-runner/${iname}/token";
+              hostPath = i.tokenFile;
+              isReadOnly = true;
+            })
+          enabledInstances))
+        (optionalAttrs sshEnabled {
+          "ssh-private-key" = {
+            mountPoint = "/var/secrets/forgejo-runner/ssh_host_ed25519_key";
+            hostPath = cfg.secrets.sshPrivateKey;
+            isReadOnly = true;
+          };
+          "ssh-public-key" = {
+            mountPoint = "/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub";
+            hostPath = cfg.secrets.sshPublicKey;
+            isReadOnly = true;
+          };
+        })
+        {
+          "cache-private-key" = {
+            mountPoint = "/var/secrets/forgejo-runner/cache-private-key.pem";
+            hostPath = cfg.secrets.cachePrivateKey;
+            isReadOnly = true;
+          };
+          "srv-nix" = mkIf customStore {
+            mountPoint = cfg.store.path;
+            hostPath = cfg.store.hostBackup;
+            isReadOnly = false;
+          };
+        }
+      ];
 
       # `system_version` / `system_features` are evaluated on the host and
       # propagated verbatim into the container.
@@ -393,17 +467,15 @@ in
           };
 
           services.gitea-actions-runner = {
-            package = pkgs.forgejo-runner;
-            instances.default = {
+            package = cfg.package;
+            # One instance per enabled entry; all share forgejoUrl, host packages,
+            # timeouts and log level. Each gets its own token mount + registration.
+            instances = mapAttrs (iname: i: {
               enable = true;
-              name = cfg.runnerName;
-
+              name = i.name;
               url = cfg.forgejoUrl;
-
-              tokenFile = "/var/secrets/forgejo-runner/token";
-
-              labels = cfg.labels;
-
+              tokenFile = "/var/secrets/forgejo-runner/${iname}/token";
+              labels = i.labels;
               settings = {
                 runner = {
                   timeout = cfg.runnerTimeout;
@@ -414,9 +486,8 @@ in
                   job_level = cfg.logLevel;
                 };
               };
-
               hostPackages = cfg.hostPackages;
-            };
+            }) enabledInstances;
           };
 
           services = {
@@ -433,105 +504,113 @@ in
             };
           };
 
-          systemd.services = {
-            # Working services: the relocated /nix bind + a hard dependency on
-            # the custom daemon are injected only when the store is relocated
-            # (store.path != "/"). When store.path == "/" these services run
-            # unchanged against the container's system nix-daemon.
-            gitea-runner-default = mkMerge [
-              {
-                serviceConfig.LoadCredential = [
-                  "ssh_private:/var/secrets/forgejo-runner/ssh_host_ed25519_key"
-                  "ssh_public:/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub"
-                ];
-              }
-              (mkIf customStore {
+          systemd.services = mkMerge [
+            # One `gitea-runner-<name>` service per enabled instance. Each gets
+            # the bot SSH credentials and, when the store is relocated
+            # (store.path != "/"), a BindPaths bind onto /nix + a hard dep on
+            # the custom daemon. When store.path == "/" they run unchanged
+            # against the container's system nix-daemon.
+            (mapAttrs'
+              (iname: _:
+                nameValuePair "gitea-runner-${iname}" (mkMerge [
+                  # Bot SSH credentials are only loaded when the key pair is
+                  # configured (null for build-only / test instances).
+                  (mkIf sshEnabled {
+                    serviceConfig.LoadCredential = [
+                      "ssh_private:/var/secrets/forgejo-runner/ssh_host_ed25519_key"
+                      "ssh_public:/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub"
+                    ];
+                  })
+                  (mkIf customStore {
+                    after = [ "nix-daemon-custom.service" ];
+                    requires = [ "nix-daemon-custom.service" ];
+                    serviceConfig.BindPaths = [ bindPath ];
+                  })
+                ]))
+              enabledInstances)
+
+            {
+              nix-serve = mkIf (cfg.cache.enable && customStore) {
                 after = [ "nix-daemon-custom.service" ];
                 requires = [ "nix-daemon-custom.service" ];
                 serviceConfig.BindPaths = [ bindPath ];
-              })
-            ];
+              };
 
-            nix-serve = mkIf (cfg.cache.enable && customStore) {
-              after = [ "nix-daemon-custom.service" ];
-              requires = [ "nix-daemon-custom.service" ];
-              serviceConfig.BindPaths = [ bindPath ];
-            };
+              # Look on my Works, ye Mighty, and despair!
+              # Custom nix-daemon bound to the relocated store. Only enabled
+              # when the store is relocated (store.path != "/").
+              nix-daemon-custom = mkIf customStore (
+                let
+                  nixDaemonCfg = config.systemd.services.nix-daemon;
+                in
+                {
+                  description = lib.mkForce "Nix Daemon with custom /nix bind mount";
 
-            # Look on my Works, ye Mighty, and despair!
-            # Custom nix-daemon bound to the relocated store. Only enabled when
-            # the store is relocated (store.path != "/").
-            nix-daemon-custom = mkIf customStore (
-              let
-                nixDaemonCfg = config.systemd.services.nix-daemon;
-              in
-              {
-                description = lib.mkForce "Nix Daemon with custom /nix bind mount";
+                  wantedBy = lib.mkForce [ "multi-user.target" ];
 
-                wantedBy = lib.mkForce [ "multi-user.target" ];
+                  environment = lib.filterAttrs (n: _v: n != "PATH") nixDaemonCfg.environment;
+                  inherit (nixDaemonCfg) unitConfig;
 
-                environment = lib.filterAttrs (n: _v: n != "PATH") nixDaemonCfg.environment;
-                inherit (nixDaemonCfg) unitConfig;
+                  after = [ "nix-daemon-storage.service" ];
+                  requires = [ "nix-daemon-storage.service" ];
 
-                after = [ "nix-daemon-storage.service" ];
-                requires = [ "nix-daemon-storage.service" ];
+                  serviceConfig = {
+                    ExecStart = "${config.nix.package}/bin/nix-daemon --daemon";
+                    KillMode = "process";
+                    BindPaths = [ bindPath ];
+                    CPUSchedulingPolicy = nixDaemonCfg.serviceConfig.CPUSchedulingPolicy;
+                    IOSchedulingClass = nixDaemonCfg.serviceConfig.IOSchedulingClass;
+                    IOSchedulingPriority = nixDaemonCfg.serviceConfig.IOSchedulingPriority;
+                    OOMScoreAdjust = "-999";
+                    OOMPolicy = "continue";
+                    Delegate = "yes";
+                    TasksMax = 1048576;
+                    LimitNOFILE = 1048576;
+                  };
+
+                  stopIfChanged = false;
+                }
+              );
+
+              # Seeds the relocated store by copying the live /nix into
+              # store.path. `nix copy --to <store.path>` reconstructs the /nix
+              # suffix itself, producing <store.path>/nix.
+              nix-daemon-storage = mkIf customStore {
+                description = "copy entire nix store and rebind from new location";
+
+                after = [
+                  "nix-daemon.service"
+                  "network.target"
+                ];
+                requires = [ "nix-daemon.service" ];
 
                 serviceConfig = {
-                  ExecStart = "${config.nix.package}/bin/nix-daemon --daemon";
-                  KillMode = "process";
-                  BindPaths = [ bindPath ];
-                  CPUSchedulingPolicy = nixDaemonCfg.serviceConfig.CPUSchedulingPolicy;
-                  IOSchedulingClass = nixDaemonCfg.serviceConfig.IOSchedulingClass;
-                  IOSchedulingPriority = nixDaemonCfg.serviceConfig.IOSchedulingPriority;
-                  OOMScoreAdjust = "-999";
-                  OOMPolicy = "continue";
-                  Delegate = "yes";
-                  TasksMax = 1048576;
-                  LimitNOFILE = 1048576;
+                  Environment = [
+                    "USER=root"
+                    "NIX_REMOTE=daemon"
+                  ];
+
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                  ExecStart = pkgs.writeShellScript "setup-nix-backup" ''
+                    ${pkgs.coreutils}/bin/echo "Starting nix copy loop as root..."
+                    until ${pkgs.nix}/bin/nix copy --no-check-sigs --all --to ${cfg.store.path} > /var/log/nix-copy-setup.log 2>&1; do
+                      ${pkgs.coreutils}/bin/echo "Copy failed (locked or RO), retrying in 5 seconds..."
+                      ${pkgs.coreutils}/bin/sleep 5
+                    done
+                  '';
+                  User = "root";
+                  Group = "root";
+                  KillSignal = "SIGINT";
+                  SendSIGKILL = "no";
+                  Nice = 19;
+                  IOSchedulingClass = "idle";
+                  TimeoutStartSec = lib.mkForce "1d";
                 };
-
-                stopIfChanged = false;
-              }
-            );
-
-            # Seeds the relocated store by copying the live /nix into
-            # store.path. `nix copy --to <store.path>` reconstructs the /nix
-            # suffix itself, producing <store.path>/nix.
-            nix-daemon-storage = mkIf customStore {
-              description = "copy entire nix store and rebind from new location";
-
-              after = [
-                "nix-daemon.service"
-                "network.target"
-              ];
-              requires = [ "nix-daemon.service" ];
-
-              serviceConfig = {
-                Environment = [
-                  "USER=root"
-                  "NIX_REMOTE=daemon"
-                ];
-
-                Type = "oneshot";
-                RemainAfterExit = true;
-                ExecStart = pkgs.writeShellScript "setup-nix-backup" ''
-                  ${pkgs.coreutils}/bin/echo "Starting nix copy loop as root..."
-                  until ${pkgs.nix}/bin/nix copy --no-check-sigs --all --to ${cfg.store.path} > /var/log/nix-copy-setup.log 2>&1; do
-                    ${pkgs.coreutils}/bin/echo "Copy failed (locked or RO), retrying in 5 seconds..."
-                    ${pkgs.coreutils}/bin/sleep 5
-                  done
-                '';
-                User = "root";
-                Group = "root";
-                KillSignal = "SIGINT";
-                SendSIGKILL = "no";
-                Nice = 19;
-                IOSchedulingClass = "idle";
-                TimeoutStartSec = lib.mkForce "1d";
+                wantedBy = [ "multi-user.target" ];
               };
-              wantedBy = [ "multi-user.target" ];
-            };
-          };
+            }
+          ];
 
           systemd.sockets.nix-daemon-custom = mkIf customStore {
             description = "Custom Nix Daemon Socket";

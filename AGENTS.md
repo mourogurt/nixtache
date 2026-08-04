@@ -60,9 +60,13 @@ project-specific. It declares **no** `sops.secrets` and stores **no** files.
 ```nix
 services.nixtache.forgejo-runner = {
   enable        = true;
-  forgejoUrl    = "http://localhost:3000";          # Forgejo instance URL
+  forgejoUrl    = "http://localhost:3000";          # Forgejo URL (shared by all instances)
   containerName = "forgejo-runner";                  # NixOS container name
-  labels        = [ "nixos:host" ];
+  package       = pkgs.forgejo-runner;               # forgejo-runner package (default)
+  instances     = {                                 # one gitea-runner-<name> per attr; each needs its own tokenFile
+    default = { name = "nixos-container-runner"; tokenFile = config.sops.secrets.runner-token-default.path; };
+    test    = { labels = [ "nixos:test" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
+  };
   cache = { enable = true; domain = "bincache.example.com"; port = 5000; };
   store.path = "/srv";                           # base dir; store lives at <path>/nix. "/" = system nix-daemon
   store.hostBackup = "/srv/bincache";            # host dir mounted at store.path
@@ -70,9 +74,10 @@ services.nixtache.forgejo-runner = {
   gitHost       = { name = "forgejo_ed25519"; hostNames = [ "git.example.com" "10.0.0.1" "localhost" ]; publicKey = "ssh-ed25519 AAAA..."; };
   extraKnownHosts = [ { name = "github_ed25519"; hostNames = [ "github.com" ]; publicKey = "ssh-ed25519 AAAA..."; } ];
   secrets = {
-    tokenFile       = config.sops.secrets.forgejo-token-env.path;   # sops
-    sshPrivateKey   = config.sops.secrets.forgejo-private-key.path;
-    sshPublicKey    = config.sops.secrets.forgejo-public-key.path;
+    # Shared across instances. The bot SSH key pair is OPTIONAL: omit both for
+    # build-only / test instances (no git push-back → no fbot wiring).
+    sshPrivateKey   = config.sops.secrets.forgejo-private-key.path;  # optional (null = disabled)
+    sshPublicKey    = config.sops.secrets.forgejo-public-key.path;   # optional (null = disabled)
     cachePrivateKey = config.sops.secrets.cache-private-key.path;
     # Any backend works: paths can come from sops, agenix, vault-agent,
     # systemd LoadCredential, etc. The module is backend-agnostic by design.
@@ -80,8 +85,10 @@ services.nixtache.forgejo-runner = {
 };
 ```
 
-Resource limits (`memoryMax`, `memoryHigh`, `timeoutStartSec`), runner name,
-host packages, timeouts, log level are all options with sensible defaults.
+The registration token is **per-instance** (`instances.<name>.tokenFile`), not
+global. Resource limits (`memoryMax`, `memoryHigh`, `timeoutStartSec`), runner
+package, host packages, timeouts, log level are all options with sensible
+defaults.
 
 ## Consumer pattern
 

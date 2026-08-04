@@ -1,14 +1,21 @@
 # Pure-evaluation tests for the forgejo-runner module.
 #
-# These verify the `store.path` contract WITHOUT running any container or VM:
+# The module is consumed by nixtache itself (dogfooding): each scenario imports
+# `self.nixosModules.forgejo-runner` and feeds it a per-instance `tokenFile`
+# pointing at nixtache's own (sops-encrypted) `secrets/runner.env`. These
+# checks verify the module WIRING without running any container/VM — the token
+# file is ciphertext, which is fine since the module never reads it at eval
+# time (a live deployment would decrypt it via sops-nix first).
 #
-#   - "/"    → reuse the container's system nix-daemon: no custom services,
-#              no BindPaths, no `srv` bind mount;
-#   - "/srv" → relocate the store to <path>/nix: run the custom nix-daemon +
-#              storage oneshot, inject a BindPaths bind onto /nix into the
-#              working services (gitea-runner, nix-serve), and wire
-#              `after/requires = nix-daemon-custom.service`;
-#   - ""     → the mandatory-path assertion must fire.
+#   - "/srv" → relocate the store to <path>/nix: custom nix-daemon + storage
+#              oneshot, BindPaths onto /nix injected into every runner service
+#              + nix-serve, `after/requires = nix-daemon-custom.service`;
+#   - "/"    → reuse the container's system nix-daemon (no custom services);
+#   - ""     → the mandatory-path assertion fires;
+#   - multi  → one `gitea-runner-<name>` per instance, each relocated-store
+#              wired, with its own token mount + name/labels;
+#   - ssh    → optional SSH key pair: absent = no LoadCredential / key mounts;
+#              present = LoadCredential + mounts wired; half-set = assertion.
 #
 # Exposed via the flake as `checks.<system>.forgejo-runner`.
 {
@@ -21,13 +28,17 @@ let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
 
-  # Dummy secret value shared by every scenario. The module only forwards
-  # secret paths as bind-mount hostPaths / LoadCredential, never reading them
-  # at eval time, so /dev/null is fine.
+  # Dummy secret for paths the module forwards but never reads at eval time.
   dummySecret = /dev/null;
 
-  # Minimal host + module config shared by every scenario. Only `store.path`
-  # varies between scenarios.
+  # nixtache's own (sops-encrypted) runner registration token — used as the
+  # per-instance `tokenFile` so the test consumes the module exactly like a
+  # real consumer would.
+  runnerToken = ../secrets/runner.env;
+
+  # Minimal host + module config shared by every scenario. One `default`
+  # instance, real token, cache key, and NO SSH keys (build-only / test — no
+  # fbot push-back). Only `store.path` (and the `extra` module) varies.
   baseModule = { ... }: {
     system.stateVersion = "24.11";
     services.nixtache.forgejo-runner = {
@@ -38,22 +49,20 @@ let
         domain = "bincache.test";
         port = 5000;
       };
-      secrets = {
-        tokenFile = dummySecret;
-        sshPrivateKey = dummySecret;
-        sshPublicKey = dummySecret;
-        cachePrivateKey = dummySecret;
-      };
+      instances.default.tokenFile = runnerToken;
+      secrets.cachePrivateKey = dummySecret;
+      # sshPrivateKey / sshPublicKey intentionally omitted (optional).
     };
   };
 
-  mkHost = storePath:
+  mkHost = storePath: extra:
     nixpkgs.lib.nixosSystem {
       inherit system;
       modules = [
         self.nixosModules.forgejo-runner
         baseModule
         { services.nixtache.forgejo-runner.store.path = storePath; }
+        extra
       ];
     };
 
@@ -61,13 +70,15 @@ let
   servicesOf = host: (containerCfg host).systemd.services;
   socketsOf = host: (containerCfg host).systemd.sockets;
   bindMountsOf = host: host.config.containers."forgejo-runner".bindMounts;
+  instancesOf = host: (containerCfg host).services.gitea-actions-runner.instances;
+  loadCred = svc: svc."gitea-runner-default".serviceConfig.LoadCredential or [ ];
   has = set: name: set ? ${name};
 
-  # --- scenario A: relocated store ----------------------------------------
-  hostSrv = mkHost "/srv";
+  # --- scenario A: relocated store, SSH off -------------------------------
+  hostSrv = mkHost "/srv" { };
   svcSrv = servicesOf hostSrv;
   scenarioSrv = {
-    name = "store.path=\"/srv\" runs the custom daemon and injects BindPaths";
+    name = "store.path=\"/srv\" relocates the store; SSH off → no key wiring";
     checks = {
       hasCustomDaemon = has svcSrv "nix-daemon-custom";
       hasStorage = has svcSrv "nix-daemon-storage";
@@ -79,11 +90,15 @@ let
       nixServeBindPaths = svcSrv."nix-serve".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
       socketPath = (socketsOf hostSrv)."nix-daemon-custom".listenStreams == [ "/srv/nix/var/nix/daemon-socket/socket" ];
       srvMountPoint = (bindMountsOf hostSrv)."srv-nix".mountPoint == "/srv";
+      # per-instance token mount present, SSH mounts / LoadCredential absent
+      tokenMount = (bindMountsOf hostSrv)."forgejo-token-default".mountPoint == "/var/secrets/forgejo-runner/default/token";
+      noSshPrivateMount = !(has (bindMountsOf hostSrv) "ssh-private-key");
+      noLoadCredential = loadCred svcSrv == [ ];
     };
   };
 
   # --- scenario B: native store -------------------------------------------
-  hostRoot = mkHost "/";
+  hostRoot = mkHost "/" { };
   svcRoot = servicesOf hostRoot;
   scenarioRoot = {
     name = "store.path=\"/\" reuses the system nix-daemon (no custom services)";
@@ -99,14 +114,68 @@ let
 
   # --- scenario C: empty path fires the assertion -------------------------
   # NixOS turns failed assertions into a `throw`, which `tryEval` catches.
-  # Forcing toplevel.outPath is what drives the assertion check.
-  tryEmpty = builtins.tryEval (mkHost "").config.system.build.toplevel.outPath;
+  tryEmpty = builtins.tryEval (mkHost "" { }).config.system.build.toplevel.outPath;
   scenarioEmpty = {
     name = "store.path=\"\" fires the mandatory-path assertion";
     checks = { refused = !tryEmpty.success; };
   };
 
-  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty ];
+  # --- scenario D: multiple instances share the relocated store -----------
+  hostMulti = mkHost "/srv" {
+    services.nixtache.forgejo-runner.instances = {
+      default.tokenFile = runnerToken;
+      test = { labels = [ "nixos:test" ]; tokenFile = runnerToken; };
+    };
+  };
+  svcMulti = servicesOf hostMulti;
+  scenarioMulti = {
+    name = "instances.<name>: one gitea-runner-<name> per instance, each wired, distinct token/name/labels";
+    checks = {
+      hasGiteaDefault = has svcMulti "gitea-runner-default";
+      hasGiteaTest = has svcMulti "gitea-runner-test";
+      defaultBindPaths = svcMulti."gitea-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+      testBindPaths = svcMulti."gitea-runner-test".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+      defaultLabels = (instancesOf hostMulti)."default".labels == [ "nixos:host" ];
+      testLabels = (instancesOf hostMulti)."test".labels == [ "nixos:test" ];
+      defaultName = (instancesOf hostMulti)."default".name == "default";
+      testName = (instancesOf hostMulti)."test".name == "test";
+      # distinct per-instance token mounts
+      defaultTokenMount = (bindMountsOf hostMulti)."forgejo-token-default".mountPoint == "/var/secrets/forgejo-runner/default/token";
+      testTokenMount = (bindMountsOf hostMulti)."forgejo-token-test".mountPoint == "/var/secrets/forgejo-runner/test/token";
+    };
+  };
+
+  # --- scenario E: SSH keys enabled → LoadCredential + key mounts ----------
+  hostSsh = mkHost "/srv" {
+    services.nixtache.forgejo-runner.secrets = {
+      sshPrivateKey = dummySecret;
+      sshPublicKey = dummySecret;
+    };
+  };
+  svcSsh = servicesOf hostSsh;
+  scenarioSsh = {
+    name = "secrets.ssh* set → bot key mounts + LoadCredential wired";
+    checks = {
+      loadCredential = loadCred svcSsh == [
+        "ssh_private:/var/secrets/forgejo-runner/ssh_host_ed25519_key"
+        "ssh_public:/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub"
+      ];
+      hasPrivateMount = (bindMountsOf hostSsh)."ssh-private-key".mountPoint == "/var/secrets/forgejo-runner/ssh_host_ed25519_key";
+      hasPublicMount = (bindMountsOf hostSsh)."ssh-public-key".mountPoint == "/var/secrets/forgejo-runner/ssh_host_ed25519_key.pub";
+    };
+  };
+
+  # --- scenario F: half-set SSH keys fires the assertion ------------------
+  tryHalfSsh = builtins.tryEval (mkHost "/srv" {
+    services.nixtache.forgejo-runner.secrets.sshPrivateKey = dummySecret;
+    # sshPublicKey left null
+  }).config.system.build.toplevel.outPath;
+  scenarioHalfSsh = {
+    name = "secrets: only one of sshPrivateKey/sshPublicKey set fires the assertion";
+    checks = { refused = !tryHalfSsh.success; };
+  };
+
+  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty scenarioMulti scenarioSsh scenarioHalfSsh ];
 
   failed = builtins.concatMap
     (s:
