@@ -18,11 +18,21 @@ nixtache.nixosModules.forgejo-runner   # (or .default alias)
 
 - **`nixosModules.forgejo-runner`** — `services.nixtache.forgejo-runner`:
   a NixOS container running `gitea-actions-runner` (forgejo-runner) with a
-  detached nix store (`/srv/nix`, custom `nix-daemon` + storage oneshot),
-  a `nix-serve-ng` binary cache, and an nginx vhost. All project-specific
-  values are options; **secrets are `types.path`, supplied by the consumer**.
+  configurable nix store location (`store.path`: `"/"` reuses the container's
+  system nix-daemon; any other base like `/srv` relocates the store to
+  `<path>/nix` via a custom `nix-daemon` + storage oneshot), a `nix-serve-ng`
+  binary cache, and an nginx vhost. All project-specific values are options;
+  **secrets are `types.path`, supplied by the consumer**.
+- **`checks.x86_64-linux.forgejo-runner`** (alias `.default`) — pure-evaluation
+  tests for the `store.path` contract (`/`, `/srv`, empty). Build with
+  `nix build .#checks.x86_64-linux.forgejo-runner`.
 - **`.forgejo/workflows/{nix-check,update-flake}.yml`** — reusable workflows
-  (`on: workflow_call`).
+  (`on: workflow_call`) for consumer repositories.
+- **`.forgejo/workflows/ci.yml`** — nixtache's **own** CI: on push/PR to
+  `main`, runs `nix flake check` (which builds `checks.*`, i.e. the module
+  tests) and prints the test report. Not reusable — nixtache has no
+  `nixosConfigurations`/`devShells`, so it deliberately does not call
+  `rebuild-configurations`/`rebuild-devshells`.
 - **`.forgejo/actions/{ssh-setup,flake-validation,rebuild-configurations,rebuild-devshells}`**
   — reusable composite actions.
 - **`doc/migration-plan.md`** — the migration plan + architectural decisions
@@ -54,7 +64,8 @@ services.nixtache.forgejo-runner = {
   containerName = "forgejo-runner";                  # NixOS container name
   labels        = [ "nixos:host" ];
   cache = { enable = true; domain = "bincache.example.com"; port = 5000; };
-  store.hostBackup = "/srv/bincache";                # host dir mounted as /srv
+  store.path = "/srv";                           # base dir; store lives at <path>/nix. "/" = system nix-daemon
+  store.hostBackup = "/srv/bincache";            # host dir mounted at store.path
   nixSettings   = { substituters = [...]; trusted-public-keys = [...]; max-jobs = 1; cores = 8; };
   gitHost       = { name = "forgejo_ed25519"; hostNames = [ "git.example.com" "10.0.0.1" "localhost" ]; publicKey = "ssh-ed25519 AAAA..."; };
   extraKnownHosts = [ { name = "github_ed25519"; hostNames = [ "github.com" ]; publicKey = "ssh-ed25519 AAAA..."; } ];
