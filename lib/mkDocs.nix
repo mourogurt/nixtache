@@ -75,6 +75,10 @@ let
     (name: eval:
       (pkgs.nixosOptionsDoc {
         options = scopedOptions eval;
+        # Consumer options may legitimately lack descriptions (e.g. submodule
+        # leaves like ensureUsers.<name>.email). Default is to fail the build
+        # on missing descriptions — downgrade to a build-log warning.
+        warningsAreErrors = false;
       }).optionsCommonMark)
     nixosConfigurations;
 
