@@ -78,25 +78,21 @@ let
       }).optionsCommonMark)
     nixosConfigurations;
 
-  # Combine per-machine docs into one markdown with headings.
-  configurationDocsCombined = pkgs.runCommand "configuration-docs.md"
-    {
-      docs = lib.attrValues configurationDocs;
-      names = lib.attrNames configurationDocs;
-      passAsFile = [ "names" ];
-    }
-    ''
-      touch $out
-      while IFS= read -r n; do
-        echo "# Configuration: $n" >> $out
-        echo >> $out
-      done <"$namesPath"
-      # The per-machine files are separate store paths; concatenate in order.
-      ${lib.concatStringsSep "\n" (lib.imap0 (i: _: ''
-        cat "${lib.elemAt (lib.attrValues configurationDocs) i}" >> $out || true
-        echo >> $out
-      '') (lib.attrValues configurationDocs))}
-    '';
+  # Combine per-machine option references into one markdown with headings.
+  # Each machine's docs file is interpolated directly into the script (the
+  # store path is forced + added as a dependency). Empty nixosConfigurations
+  # ⇒ no per-machine lines ⇒ empty output.
+  configurationDocsCombined = pkgs.runCommand "configuration-docs.md" { } ''
+    : > $out
+    ${lib.concatStringsSep "\n" (lib.mapAttrsToList
+      (name: doc: ''
+        echo "# Configuration: ${name}" >> $out
+        echo "" >> $out
+        cat ${doc} >> $out
+        echo "" >> $out
+      '')
+      configurationDocs)}
+  '';
 
   # --- devShell docs -----------------------------------------------------
   # Best-effort: list each shell's name + `meta.description` (set via
@@ -123,19 +119,18 @@ let
   hasConfigs = configurationDocs != { };
   hasShells = devShellDescriptions != [ ];
 
-  docs = pkgs.runCommand "nixtache-consumer-docs.md"
-    (lib.optionalAttrs hasConfigs { cfg = configurationDocsCombined; })
-    # devShellDocs is a store path either way (writeText always produces one).
-    { shell = devShellDocs; }
-    ''
-      {
-        echo "# Flake documentation"
-        echo
-        ${optionalString hasConfigs "cat \"$cfg\""}
-        ${optionalString hasShells "cat \"$shell\""}
-        ${optionalString (!hasConfigs && !hasShells) "echo \"_(no nixosConfigurations or devShells passed to mkDocs — nothing to document.)_\""}
-      } > $out
-    '';
+  # One runCommand = one attrs arg + one script arg (runCommand name attrs str).
+  # Interpolate store paths directly so they become dependencies AND the script
+  # sees concrete paths (avoids relying on derivation-valued env vars).
+  docs = pkgs.runCommand "nixtache-consumer-docs.md" { } ''
+    {
+      echo "# Flake documentation"
+      echo ""
+      ${optionalString hasConfigs "cat ${configurationDocsCombined}"}
+      ${optionalString hasShells "cat ${devShellDocs}"}
+      ${optionalString (!hasConfigs && !hasShells) "echo \"_(no nixosConfigurations or devShells passed to mkDocs — nothing to document.)_\""}
+    } > $out
+  '';
 
   # Browsable standalone HTML rendered from the combined `docs` markdown via
   # pandoc (self-contained, TOC). Like the NixOS manual page but for the
@@ -143,10 +138,9 @@ let
   docsHtml = pkgs.runCommand "nixtache-consumer-docs.html"
     {
       nativeBuildInputs = [ pkgs.pandoc ];
-      src = docs;
     }
     ''
-      pandoc "$src" \
+      pandoc ${docs} \
         --standalone --toc --toc-depth=3 \
         --metadata title="Flake documentation" \
         --metadata lang=en \
