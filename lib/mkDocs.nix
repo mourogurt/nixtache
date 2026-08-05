@@ -44,18 +44,32 @@ let
 
   # --- per-configuration option docs -------------------------------------
   # `pkgs.nixosOptionsDoc` walks the options tree via
-  # `lib.optionAttrSetToDocList`, so passing a SUBTREE documents only that
-  # subtree. When optionPrefixes is non-empty, keep only the matching top-level
-  # subtrees and merge them; otherwise pass the full `options`.
+  # `lib.optionAttrSetToDocList`, so passing a PRUNED subtree documents only
+  # the surviving options. When `optionPrefixes` is non-empty we prune the
+  # tree to options whose dotted location starts with one of the prefixes
+  # (string-prefix match, so "services.my-" catches my-forgejo, my-nextcloud,
+  # …; "services.monitoring" catches monitoring.grafana etc.); otherwise we
+  # pass the full `options` (≈6000 NixOS options — large but searchable).
+  keepMatching = prefixes: path: node:
+    if lib.isOption node then
+      (if lib.any (p: lib.hasPrefix p (lib.concatStringsSep "." path)) prefixes
+       then node else null)
+    else if lib.isAttrs node then
+      let
+        filtered = lib.mapAttrs (n: child: keepMatching prefixes (path ++ [ n ]) child) node;
+        nonNull = lib.filterAttrs (_: v: v != null) filtered;
+      in
+      if nonNull == { } then null else nonNull
+    else
+      null;
+
   scopedOptions =
     eval:
     if optionPrefixes == [ ] then
       eval.options
     else
-      lib.foldl' (acc: prefix:
-        let subtree = lib.attrByPath (lib.splitString "." prefix) null eval.options; in
-        if subtree == null then acc else acc // { __filtered = true; } // { ${prefix} = subtree; }
-      ) { } optionPrefixes;
+      let pruned = keepMatching optionPrefixes [ ] eval.options; in
+      if pruned == null then { } else pruned;
 
   configurationDocs = lib.mapAttrs
     (name: eval:
