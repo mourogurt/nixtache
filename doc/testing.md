@@ -1,0 +1,169 @@
+# Testing & coverage
+
+How nixtache is tested, what "coverage" means for a declarative NixOS module
+flake (spoiler: not line-coverage), and the rules every change must follow.
+
+> Implementation of the coverage gate itself is tracked separately — this
+> document fixes the **approach and contract** so the implementation has a
+> target to land against.
+
+---
+
+## Testing strategy: pure-evaluation scenarios
+
+nixtache's tests are **pure-evaluation** — they never boot a VM or container.
+Each scenario evaluates a `nixosSystem` (or calls a lib helper) with specific
+option values and asserts on the resulting `config.*` attributes (services
+present, envs wired, caps granted, mounts/BindPaths, assertions firing) or on
+the produced derivation's behaviour (build succeeds / fails).
+
+Why pure-eval: fast (no VM), deterministic, runs in `nix flake check`, and
+sufficient for a module whose job is to produce NixOS config attrsets. Runtime
+behaviour of the container (does `nix-daemon-custom` actually start?) is out of
+scope here and belongs to NixOS VM tests if ever needed.
+
+### Layout
+
+| File | Covers | Wired as |
+|---|---|---|
+| `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH, sandbox cap on/off, envs | `checks.<system>.runner` (`.default` alias) |
+| `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` 2×2 matrix (flag × all-documented) + prefix-filtering | `checks.<system>.mkDocs` |
+
+Every test file is a function `{ nixpkgs, self, system }:` returning a
+`pkgs.runCommand` derivation. Its builder prints a human-readable report (one
+`ok`/`FAIL` line per check) into `$out` and exits non-zero on any failure — so
+`nix build .#checks.<system>.<suite> && cat ./result` shows the whole matrix.
+
+A new test file MUST be registered in `flake.nix`:
+```nix
+checks.${system} = {
+  runner = import ./tests/runner.nix { inherit nixpkgs self system; };
+  mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
+};
+```
+
+### Scenario shape (runner tests)
+
+```nix
+# Build a host with specific options, then assert on its evaluated config.
+hostSrv = mkHost "/srv" { };
+svcSrv  = hostSrv.config.containers."runner".config.systemd.services;
+scenarioSrv = {
+  name = "store.path=\"/srv\" relocates the store; SSH off → no key wiring";
+  checks = {
+    hasCustomDaemon  = has svcSrv "nix-daemon-custom";
+    giteaBindPaths   = svcSrv."gitea-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+    noLoadCredential = loadCred svcSrv == [ ];
+    hasSandboxCap    = lib.elem "CAP_SYS_ADMIN" hostSrv.config.containers."runner".additionalCapabilities;
+  };
+};
+```
+A scenario is `{ name, checks }`; the suite is `scenarios = [ ... ]`; the runCommand
+fails iff any check is false.
+
+### Build-failure assertions (mkDocs tests)
+
+Pure-eval catches eval-time throws (e.g. failed assertions via `builtins.tryEval`)
+but NOT build-time failures. For cases that must FAIL TO BUILD (e.g.
+`docStrictMode = true` + an undocumented option rejects the `nixosOptionsDoc`
+build), the pattern is:
+
+- cases that **must build** → referenced as real deps of the test derivation
+  (their `outPath` is interpolated in the builder, forcing Nix to build them;
+  any failure fails the test);
+- the case that **must fail** → only its `.drvPath` is passed in (a string, not
+  a dep, so its build failure does not propagate); the test then verifies the
+  *preconditions* at eval time (the undocumented option exists) and documents
+  the expected build failure. The strict-build mechanism itself is independently
+  exercised by nixtache's own `packages.optionsMarkdown` (strict by default).
+
+---
+
+## Rules (also in AGENTS.md)
+
+1. **Every `mkOption` MUST have a `description`.** Enforced in CI:
+   `nixosOptionsDoc` for this flake's own `packages.optionsMarkdown`/`JSON`/`HTML`
+   runs with `warningsAreErrors = true`, so an undocumented option BREAKS the
+   docs build. (`mkEnableOption` auto-generates one, so it's exempt.) Consumers
+   opt into the same strictness via `nixtache.lib.mkDocs { docStrictMode = true; }`.
+
+2. **Every option MUST be covered by a test.** An option without a test is
+   unfinished. When you add an option or change behaviour, add/extend a
+   scenario in `tests/` and run `nix build .#checks.<system>.<suite>`.
+
+---
+
+## What "coverage" means for Nix
+
+Nix is a declarative, pure-functional config language — there is no runtime
+execution path, so **classic line-coverage (`coverage.py` / `gcov` / Istanbul)
+does not apply**. No tool measures "X% of Nix lines executed". Quoting a number
+like "85% line coverage" for a `.nix` module is meaningless.
+
+The meaningful analog for a NixOS module is **option-coverage** + **branch-coverage**:
+
+### Option-coverage
+
+> Fraction of declared `mkOption` paths exercised by at least one test scenario.
+
+- **Declared** = every option under `services.nixtache.runner.*` (and, for
+  `lib/`, every parameter of `mkDocs`), enumerated via
+  `lib.optionAttrSetToDocList <eval>.options`.
+- **Exercised** = some scenario sets the option to a non-default value AND/OR
+  asserts on the resulting `config.*` it influences. Tracked explicitly via a
+  `covers` list per scenario (accurate, needs annotation) or heuristically via
+  grepping option names across the test files (zero-annotation, less precise).
+
+### Branch-coverage
+
+> Each `mkIf` / `mkMerge` branch is taken by at least one scenario.
+
+For nixtache the meaningful branches: `store.path == "/"` vs relocated;
+`enableSandbox` true/false; `flakeSshCreds`/`updateSshCreds` null vs set;
+`instances` single vs multi; `cache.enable` true/false. Most of these are
+already scenario-paired in `tests/runner.nix`.
+
+### Threshold & gate (target, implementation tracked separately)
+
+- A `checks.<system>.coverage` derivation computes
+  `|∪ scenario.covers| / |declared options|`, prints uncovered options, and
+  fails when the ratio is below the threshold.
+- Threshold: start at whatever the current explicit-coverage yields, ratchet up
+  toward ≥ 85% as scenarios gain `covers` annotations. Never lower it.
+- Uncovered options are reported by name so the gap is actionable, not just a
+  failing percentage.
+
+This is an **option-coverage** gate, honestly named — not a line-coverage claim.
+
+---
+
+## Running tests
+
+```bash
+# Everything (evaluates + builds all checks + packages):
+nix flake check --show-trace --all-systems
+
+# One suite, with the printed report:
+nix build .#checks.x86_64-linux.runner && cat ./result
+nix build .#checks.x86_64-linux.mkDocs && cat ./result
+
+# (future) coverage report:
+nix build .#checks.x86_64-linux.coverage && cat ./result
+```
+
+In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then
+`nix build .#checks.x86_64-linux.runner` prints the report to the job log.
+
+---
+
+## Adding a new option or test — checklist
+
+1. **Declare** the option with a `description` (mandatory — CI enforces it).
+2. **Add a scenario** in the relevant `tests/*.nix` that sets the option to a
+   non-default value and asserts on the resulting `config.*`. Add the opposite
+   value too if the option has a meaningful off-branch.
+3. **Annotate** the scenario's `covers = [ "services.nixtache.runner.<opt>" ]`
+   (once the coverage gate lands) so the option counts toward coverage.
+4. **Run** `nix build .#checks.<system>.<suite>` and read the report.
+5. If the option belongs to a new area, create a new `tests/<area>.nix` and
+   wire it into `flake.nix` `checks.<system>`.

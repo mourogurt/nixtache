@@ -310,6 +310,20 @@ Consumers are not bound to this strictness: `nixtache.lib.mkDocs` accepts
 `docStrictMode ? false` — a consumer may opt into the same enforcement by
 passing `docStrictMode = true` to its `packages.<system>.<mkDocs call>`.
 
+### Every option MUST be covered by a test
+
+**Rule:** every consumer-facing `mkOption` (and each meaningful behaviour of
+its `config`) gets at least one assertion in `tests/`. Options without tests
+are considered unfinished. The existing pattern to follow is
+`tests/runner.nix` (pure-evaluation scenarios: each builds a `nixosSystem`
+with specific option values and asserts on `config.*` attributes — services
+present, envs wired, caps granted, mounts/BindPaths, assertions firing).
+`tests/mkDocs.nix` is the analogous suite for `lib/mkDocs.nix`.
+
+Add new tests whenever you add an option or change behaviour; run them locally
+with `nix build .#checks.x86_64-linux.<suite>` and read the printed report.
+New test files MUST be wired into `flake.nix` `checks.<system>`.
+
 ## TODO / out of scope here
 
 - **Secret provider implementations.** The provider abstraction

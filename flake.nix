@@ -32,12 +32,12 @@
       lib.mkDocs = import ./lib/mkDocs.nix;
 
       # --- Tests -----------------------------------------------------------
-      # Pure-evaluation tests for the runner module (see tests/runner.nix).
-      # Build with:
-      #   nix build .#checks.x86_64-linux.runner
-      checks = forAllSystems (system: rec {
+      # Pure-evaluation tests. Build one with:
+      #   nix build .#checks.x86_64-linux.<suite>
+      # See doc/testing.md for the strategy + the docStrictMode matrix.
+      checks = forAllSystems (system: {
         runner = import ./tests/runner.nix { inherit nixpkgs self system; };
-        default = runner;
+        mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
       });
 
       # --- This flake's own option docs -----------------------------------
