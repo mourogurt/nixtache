@@ -67,10 +67,16 @@
           ownDocs = pkgs.nixosOptionsDoc {
             options = fullEval.options.services.nixtache;
           };
+          # `ownDocs.optionsJSON` is a directory tree (share/doc/nixos/options.json
+          # + brotli + hydra metadata); wrap it into a flat file so the artifact
+          # and consumers get a clean `optionsJSON.json`.
+          flatOptionsJSON = pkgs.runCommand "options.json" { } ''
+            cp ${ownDocs.optionsJSON}/share/doc/nixos/options.json $out
+          '';
         in
         {
           optionsMarkdown = ownDocs.optionsCommonMark;
-          optionsJSON = ownDocs.optionsJSON;
+          optionsJSON = flatOptionsJSON;
           default = self.packages.${system}.optionsMarkdown;
         });
     };

@@ -46,17 +46,29 @@ runs:
         # Build each requested attribute; stage its output under $OUT_DIR/<attr>.
         # `--print-out-paths` gives the store path; we copy it so the artifact
         # is browsable even after the store path is GC'd.
+        #
+        # Output may be a FILE (most: optionsMarkdown.md, mkDocs docs.md,
+        # devShellDocs.md) or a DIRECTORY (e.g. nixosOptionsDoc.optionsJSON,
+        # which yields a tree share/doc/nixos/options.json). Handle both.
         for attr in $ATTRS; do
           echo "::group::Building .#${attr}"
           out=$(nix build --no-link --print-out-paths $SANDBOX_FLAG ".#${attr}")
-          # Preserve the attr name in the staged filename; detect extension.
-          case "$out" in
-            *.md)   dst="${OUT_DIR}/${attr}.md" ;;
-            *.json) dst="${OUT_DIR}/${attr}.json" ;;
-            *)      dst="${OUT_DIR}/${attr}" ;;
-          esac
-          cp "$out" "$dst"
-          echo "Staged ${attr} → ${dst}"
+          if [ -d "$out" ]; then
+            # Directory output: stage the whole tree under OUT_DIR/<attr>/.
+            mkdir -p "${OUT_DIR}/${attr}"
+            cp -r "$out"/. "${OUT_DIR}/${attr}"/
+            echo "Staged ${attr} (directory) → ${OUT_DIR}/${attr}/"
+          else
+            # File output: keep the attr name, reuse the store extension.
+            case "$out" in
+              *.md)   dst="${OUT_DIR}/${attr}.md" ;;
+              *.json) dst="${OUT_DIR}/${attr}.json" ;;
+              *.html) dst="${OUT_DIR}/${attr}.html" ;;
+              *)      dst="${OUT_DIR}/${attr}" ;;
+            esac
+            cp "$out" "$dst"
+            echo "Staged ${attr} → ${dst}"
+          fi
           echo "::endgroup::"
         done
 
