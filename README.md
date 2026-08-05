@@ -278,7 +278,7 @@ outputs = { self, nixpkgs, nixtache, ... }: {
 ```
 
 This exposes:
-- `packages.<system>.configurationDocs.<machine>` — per-machine option
+- `packages.<system>.configurationDocs-<machine>` — per-machine option
   reference (CommonMark, via `pkgs.nixosOptionsDoc`, scoped by `optionPrefixes`).
 - `packages.<system>.devShellDocs` — markdown listing each devShell + its
   `meta.description` (set `meta.description` on your `mkShell` calls).

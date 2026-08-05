@@ -58,7 +58,7 @@ let
     };
 
   # mkDocs call with a single synthetic machine. Returns
-  # { configurationDocs.machine, devShellDocs, docs, docsHtml, default }.
+  # { configurationDocs-machine, devShellDocs, docs, docsHtml, default }.
   docsFor = { docStrictMode, fullyDocumented }:
     mkDocs {
       inherit lib pkgs docStrictMode;

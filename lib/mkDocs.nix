@@ -21,9 +21,13 @@
 #   };
 #
 # Result attrs:
-#   configurationDocs.<machine>  — optionsMarkdown per machine (scoped by
+#   configurationDocs-<machine>  — optionsMarkdown per machine (scoped by
 #                                  `optionPrefixes` when given, else the full
-#                                  NixOS reference for that machine).
+#                                  NixOS reference for that machine). One
+#                                  top-level package attr per machine
+#                                  (flattened, not nested: every
+#                                  `packages.<system>.*` must be a derivation
+#                                  or `nix flake check` rejects it).
 #   devShellDocs                 — markdown listing each devShell + its
 #                                  `meta.description` (best-effort package
 #                                  list when introspectable).
@@ -159,8 +163,20 @@ let
         --metadata lang=en \
         -o $out
     '';
+
+  # Flatten per-machine docs (configurationDocs.<machine>) into top-level
+  # `configurationDocs-<machine>` package attrs. Every direct child of a
+  # flake's `packages.<system>` MUST be a derivation — a nested attrset here
+  # fails `nix flake check` with "flake attribute
+  # 'packages.<system>.configurationDocs' is not a derivation". The flattened
+  # form is also what the reusable docs workflow + generate-docs action build
+  # (`.#configurationDocs-<name>`, see .forgejo/workflows/docs.yml).
+  configurationDocsFlattened =
+    lib.mapAttrs'
+      (name: doc: lib.nameValuePair "configurationDocs-${name}" doc)
+      configurationDocs;
 in
-{
-  inherit configurationDocs devShellDocs docs docsHtml;
+configurationDocsFlattened // {
+  inherit devShellDocs docs docsHtml;
   default = docs;
 }

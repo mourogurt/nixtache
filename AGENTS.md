@@ -35,7 +35,7 @@ nixtache.lib.mkDocs             # consumer docs helper (configurations + devShel
   `providers` is an extensible attrset (ssh/forgejo/vault/systemd roadmap,
   any combination). Today the runner consumes direct path options; `vars` is
   the target providers write into. See modules/secrets.nix.
-- **`lib.mkDocs`** — consumer docs helper. Generates `configurationDocs.<machine>`
+- **`lib.mkDocs`** — consumer docs helper. Generates `configurationDocs-<machine>`
   (via `nixosOptionsDoc`, scoped by `optionPrefixes`) + `devShellDocs` + a
   combined `docs` artifact. Consumers expose it under `packages.<system>` and
   build via the reusable `docs.yml` workflow. See README "Documenting your flake".
