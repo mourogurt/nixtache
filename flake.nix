@@ -66,9 +66,9 @@
           };
           ownDocs = pkgs.nixosOptionsDoc {
             options = fullEval.options.services.nixtache;
-            # Defensive: nixtache's own options all have descriptions, but don't
-            # let a future undocumented option break the docs build.
-            warningsAreErrors = false;
+            # Strict by default (warningsAreErrors = true): any nixtache option
+            # WITHOUT a description fails the docs build. This enforces the
+            # "every mkOption must be documented" rule from AGENTS.md in CI.
           };
           # `ownDocs.optionsJSON` is a directory tree (share/doc/nixos/options.json
           # + brotli + hydra metadata); wrap it into a flat file so the artifact

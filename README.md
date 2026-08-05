@@ -269,6 +269,10 @@ outputs = { self, nixpkgs, nixtache, ... }: {
     # Scope each machine's option reference to the given top-level paths.
     # Omit for the full NixOS option reference (large but searchable).
     optionPrefixes = [ "services.nixtache" "services.myapp" ];
+    # Optional: fail the docs build on any option without a `description`
+    # (same policy nixtache applies to itself). Default false — missing
+    # descriptions are then build-log warnings.
+    docStrictMode = true;
   };
 };
 ```

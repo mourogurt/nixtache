@@ -296,6 +296,20 @@ files, camelCase vars, `{ config, lib, pkgs, ... }:` signature, `mkIf`/
 `mkMerge`/`mkOption` with `defaultText`, `lib.literalMD`/`lib.literalExpression`
 for non-trivial defaults.
 
+### Every `mkOption` MUST have a `description` (enforced in CI)
+
+**Rule:** never commit an `mkOption` / `mkEnableOption` without a `description`
+(also covers submodule `options` like the ones in `modules/runner/types.nix`).
+This is enforced: `nixosOptionsDoc` for this flake's own
+`packages.optionsMarkdown`/`optionsJSON`/`optionsHTML` runs with
+`warningsAreErrors = true` (the default), so an undocumented option BREAKS the
+docs build in `ci.yml`. `mkEnableOption` auto-generates a description, so it's
+fine — but plain `mkOption { type = ...; }` with no `description` will fail CI.
+
+Consumers are not bound to this strictness: `nixtache.lib.mkDocs` accepts
+`docStrictMode ? false` — a consumer may opt into the same enforcement by
+passing `docStrictMode = true` to its `packages.<system>.<mkDocs call>`.
+
 ## TODO / out of scope here
 
 - **Secret provider implementations.** The provider abstraction

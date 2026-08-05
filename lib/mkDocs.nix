@@ -35,9 +35,17 @@
 # attr paths you actually want documented (e.g. your own module namespaces +
 # `services.nixtache.*`). Omit it for the full NixOS option reference (useful
 # as a searchable offline manual, large).
+#
+# `docStrictMode` (default `false`): when `true`, `nixosOptionsDoc` is called
+# with `warningsAreErrors = true`, so any option without a `description` FAILS
+# the docs build (same policy nixtache applies to its own options). Use it to
+# enforce "every mkOption must be documented" in your repo. When `false`
+# (default), missing descriptions are downgraded to build-log warnings —
+# convenient for flakes that have legitimately undescribed submodule leaves.
 { lib, pkgs, nixosConfigurations ? { }
 , devShells ? { }
 , optionPrefixes ? [ ]
+, docStrictMode ? false
 }:
 let
   inherit (lib) optionalString;
@@ -75,10 +83,11 @@ let
     (name: eval:
       (pkgs.nixosOptionsDoc {
         options = scopedOptions eval;
-        # Consumer options may legitimately lack descriptions (e.g. submodule
-        # leaves like ensureUsers.<name>.email). Default is to fail the build
-        # on missing descriptions — downgrade to a build-log warning.
-        warningsAreErrors = false;
+        # docStrictMode (consumer-controlled): when true, missing descriptions
+        # fail the build (enforces "every option documented"); when false
+        # (default), they're build-log warnings. nixtache's own docs are always
+        # strict (see flake.nix ownDocs + AGENTS.md).
+        warningsAreErrors = docStrictMode;
       }).optionsCommonMark)
     nixosConfigurations;
 
