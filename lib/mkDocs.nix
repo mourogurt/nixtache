@@ -122,8 +122,24 @@ let
         ${optionalString (!hasConfigs && !hasShells) "echo \"_(no nixosConfigurations or devShells passed to mkDocs — nothing to document.)_\""}
       } > $out
     '';
+
+  # Browsable standalone HTML rendered from the combined `docs` markdown via
+  # pandoc (self-contained, TOC). Like the NixOS manual page but for the
+  # consumer's own configurations + devShells.
+  docsHtml = pkgs.runCommand "nixtache-consumer-docs.html"
+    {
+      nativeBuildInputs = [ pkgs.pandoc ];
+      src = docs;
+    }
+    ''
+      pandoc "$src" \
+        --standalone --toc --toc-depth=3 \
+        --metadata title="Flake documentation" \
+        --metadata lang=en \
+        -o $out
+    '';
 in
 {
-  inherit configurationDocs devShellDocs docs;
+  inherit configurationDocs devShellDocs docs docsHtml;
   default = docs;
 }

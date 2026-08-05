@@ -73,10 +73,25 @@
           flatOptionsJSON = pkgs.runCommand "options.json" { } ''
             cp ${ownDocs.optionsJSON}/share/doc/nixos/options.json $out
           '';
+          # Browsable standalone HTML (like the NixOS manual). nixosOptionsDoc
+          # emits CommonMark + AsciiDoc only; render the CommonMark to a
+          # self-contained HTML page with pandoc (TOC + syntax highlighting).
+          optionsHtml = pkgs.runCommand "options.html"
+            {
+              nativeBuildInputs = [ pkgs.pandoc ];
+            }
+            ''
+              pandoc ${ownDocs.optionsCommonMark} \
+                --standalone --toc --toc-depth=3 \
+                --metadata title="nixtache - option reference" \
+                --metadata lang=en \
+                -o $out
+            '';
         in
         {
           optionsMarkdown = ownDocs.optionsCommonMark;
           optionsJSON = flatOptionsJSON;
+          optionsHTML = optionsHtml;
           default = self.packages.${system}.optionsMarkdown;
         });
     };
