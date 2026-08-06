@@ -35,6 +35,23 @@ let
 in
 {
   options.services.nixtache.runner = {
+    # Internal aggregator: sub-modules (e.g. `deploy.nix`) append per-job env
+    # keys here; this module folds them into `runner.envs` below alongside the
+    # hardcoded `NIXTACHE_*` / `HAS_SANDBOX_CAP` keys. Lets a sub-module export
+    # its own job-visible variable (like `NIXTACHE_DEPLOY_TARGETS`) without
+    # touching this file and without duplicating the envs plumbing. Internal —
+    # not part of the public contract; consumers set `deploy.targets`, not this.
+    _extraRunnerEnvs = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      internal = true;
+      description = ''
+        Internal: extra env keys merged into act_runner `runner.envs` from
+        sibling sub-modules. Not a public option — set `deploy.targets` etc.
+        instead.
+      '';
+    };
+
     # Bot identity (Forgejo account) that owns CI-generated commits. Its KEY is
     # `updateSshCreds`; `name`/`email` are the commit author. Exported to jobs
     # as NIXTACHE_BOT_NAME / NIXTACHE_BOT_EMAIL.
@@ -114,7 +131,7 @@ in
                 NIXTACHE_BOT_NAME = cfg.bot.name;
                 NIXTACHE_BOT_EMAIL = cfg.bot.email;
                 HAS_SANDBOX_CAP = if cfg.enableSandbox then "1" else "0";
-              };
+              } // cfg._extraRunnerEnvs;
             };
             log = {
               level = cfg.logLevel;

@@ -21,6 +21,7 @@
       #   inputs.nixtache.nixosModules.default     # = .runner
       nixosModules = {
         runner = import ./modules/runner;
+        deploy-target = import ./modules/deploy-target;
         secrets = import ./modules/secrets.nix;
         default = self.nixosModules.runner;
       };
@@ -37,6 +38,7 @@
       # See doc/testing.md for the strategy + the docStrictMode matrix.
       checks = forAllSystems (system: {
         runner = import ./tests/runner.nix { inherit nixpkgs self system; };
+        deploy-target = import ./tests/deploy-target.nix { inherit nixpkgs self system; };
         mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
       });
 

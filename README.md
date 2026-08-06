@@ -95,6 +95,13 @@ document consumer flakes. Any project can consume it **without forking**.
 Reference consumer: `codemaster/nixos-configuration`
 (`server/services/forgejo-runner.nix` is the instance).
 
+> **Role model (vendor-agnostic).** nixtache не фиксирует роли машин.
+> **Infra-машина** — та, что крутит Forgejo Actions runner
+> (`services.nixtache.runner`); **таргет-машины** — те, куда деплоит фича
+> deploy (`doc/specs/0001-direct-deploy.md`). В этом reference workspace
+> infra = `server`, таргеты = `desktop`/`laptop`/`server`; `server`/`desktop`/
+> `laptop` ниже — **примеры**, не роли.
+
 ---
 
 ## Architecture
@@ -110,9 +117,10 @@ Reference consumer: `codemaster/nixos-configuration`
    reusable workflows,  │   server)       │
    actions)             └─────────────────┘
                                  │
-                                 ▼  runs on the Forgejo Actions runner
-                            (the runner itself is declared via the
-                             nixtache runner module, consumed by `server`)
+                                  ▼  runs on the Forgejo Actions runner
+                             (the runner is declared via the nixtache runner
+                              module, consumed by the infra machine — in this
+                              reference workspace: `server`)
 ```
 
 **Module layout** (`modules/runner/` — split by responsibility, all

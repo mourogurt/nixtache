@@ -217,6 +217,14 @@ nix build .#optionsMarkdown && cat ./result
 
 ## Bootstrap & deploy: the chicken-and-egg (future task)
 
+> **Realized & superseded by `doc/specs/0001-direct-deploy.md`** (ouroboros:
+> two host-level deployers on the nixtache infra machine; multi-tier auto-
+> rollback; least-privilege deploy user). This section is the original sketch —
+> kept for context. Below, "the server" = "the machine running the nixtache
+> runner" (the infra machine); `desktop`/`laptop` = target machines. These are
+> **examples** from the reference workspace, not fixed roles — nixtache is
+> vendor-agnostic.
+
 **Problem.** The Forgejo CI runner is itself declared in the server's NixOS
 config (`services.nixtache.runner` in nixos-configuration). When that config
 changes in a way that affects how CI runs — the runner module contract

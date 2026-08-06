@@ -263,7 +263,145 @@ self.nixosModules.runner
     };
   };
 
-  scenarios = [ scenarioSrv scenarioRoot scenarioEmpty scenarioMulti scenarioSsh scenarioFlakeOnly scenarioEnvs scenarioSandboxOn scenarioNoSandbox ];
+  # --- deploy map scenarios (Batch A: services.nixtache.runner.deploy.targets)
+  # Base host has no targets → NIXTACHE_DEPLOY_TARGETS="{}" (empty map), no
+  # deploy bind-mounts, no deploy LoadCredential on the runner service.
+  envsNoTargets = (instancesOf hostSrv)."default".settings.runner.envs;
+  scenarioNoTargets = {
+    name = "deploy.targets empty → NIXTACHE_DEPLOY_TARGETS=\"{}\", no deploy mounts/creds";
+    checks = {
+      emptyMapEnv = envsNoTargets.NIXTACHE_DEPLOY_TARGETS or null == "{}";
+      noDeployMount = !(has (bindMountsOf hostSrv) "deploy_ssh_default");
+      noDeployCred =
+        !(lib.elem "deploy_ssh_default:/var/secrets/runner/deploy/default/id_ed25519"
+          (loadCred svcSrv));
+    };
+  };
+
+  # Two targets WITH keys → both serialised (hasKey=true), 2 bind-mounts +
+  # per-service LoadCredential. buildHost MUST be absent (S4).
+  hostTargets = mkHost "/srv" {
+    services.nixtache.runner.deploy.targets = {
+      desktop = {
+        host = "10.13.37.3";
+        sshUser = "nixos-deploy";
+        sshPrivateKey = dummySecret;
+        tags = [ "lan" "vpn" ];
+      };
+      laptop = {
+        host = "10.13.37.2";
+        sshUser = "nixos-deploy";
+        sshPrivateKey = dummySecret;
+      };
+    };
+  };
+  svcTargets = servicesOf hostTargets;
+  envsTargets = (instancesOf hostTargets)."default".settings.runner.envs;
+  parsedTargets = builtins.fromJSON envsTargets.NIXTACHE_DEPLOY_TARGETS;
+  scenarioTargets = {
+    name = "deploy.targets with keys → env JSON has both (hasKey=true), 2 mounts + LoadCreds, no buildHost";
+    checks = {
+      hasDesktop = parsedTargets ? desktop;
+      hasLaptop = parsedTargets ? laptop;
+      desktopHasKey = parsedTargets.desktop.hasKey == true;
+      desktopHost = parsedTargets.desktop.host == "10.13.37.3";
+      desktopTags = parsedTargets.desktop.tags == [ "lan" "vpn" ];
+      noBuildHostDesktop = !(parsedTargets.desktop ? buildHost);
+      # secret path must NOT leak into the env JSON
+      noSecretLeak = !(builtins.elem (toString dummySecret)
+        (lib.concatLists (map (t: builtins.attrValues t) (builtins.attrValues parsedTargets))));
+      desktopMount = (bindMountsOf hostTargets)."deploy_ssh_desktop".mountPoint == "/var/secrets/runner/deploy/desktop/id_ed25519";
+      laptopMount = (bindMountsOf hostTargets)."deploy_ssh_laptop".mountPoint == "/var/secrets/runner/deploy/laptop/id_ed25519";
+      desktopMountHostPath = (bindMountsOf hostTargets)."deploy_ssh_desktop".hostPath == toString dummySecret;
+      desktopMountReadOnly = (bindMountsOf hostTargets)."deploy_ssh_desktop".isReadOnly == true;
+      hasDesktopCred = lib.elem "deploy_ssh_desktop:/var/secrets/runner/deploy/desktop/id_ed25519" (loadCred svcTargets);
+      hasLaptopCred = lib.elem "deploy_ssh_laptop:/var/secrets/runner/deploy/laptop/id_ed25519" (loadCred svcTargets);
+    };
+  };
+
+  # sshPrivateKey=null → hasKey:false in env, NO bind-mount, NO LoadCredential
+  # (target declared but no credential → action skips it, R1 optionality).
+  hostNoKey = mkHost "/srv" {
+    services.nixtache.runner.deploy.targets.keyless = {
+      host = "10.13.37.9";
+      sshUser = "nixos-deploy";
+      # sshPrivateKey omitted → null
+    };
+  };
+  svcNoKey = servicesOf hostNoKey;
+  parsedNoKey = builtins.fromJSON
+    ((instancesOf hostNoKey)."default".settings.runner.envs.NIXTACHE_DEPLOY_TARGETS);
+  scenarioNoKey = {
+    name = "deploy.targets.<name> with sshPrivateKey=null → hasKey=false, no mount/cred";
+    checks = {
+      hasKeyless = parsedNoKey ? keyless;
+      keylessHasKeyFalse = parsedNoKey.keyless.hasKey == false;
+      noKeylessMount = !(has (bindMountsOf hostNoKey) "deploy_ssh_keyless");
+      noKeylessCred = !(lib.elem "deploy_ssh_keyless:/var/secrets/runner/deploy/keyless/id_ed25519" (loadCred svcNoKey));
+    };
+  };
+
+  # method="ab-image" serialises correctly; the action's ab-image branch is
+  # Batch E — here we only assert the field reaches the env intact.
+  hostAbImage = mkHost "/srv" {
+    services.nixtache.runner.deploy.targets.server = {
+      host = "10.13.37.1";
+      sshUser = "nixos-deploy";
+      sshPrivateKey = dummySecret;
+      method = "ab-image";
+    };
+  };
+  parsedAb = builtins.fromJSON
+    ((instancesOf hostAbImage)."default".settings.runner.envs.NIXTACHE_DEPLOY_TARGETS);
+  scenarioAbImage = {
+    name = "deploy.targets.<name>.method=\"ab-image\" → field in env JSON intact";
+    checks = {
+      abMethod = parsedAb.server.method == "ab-image";
+      abHasKey = parsedAb.server.hasKey == true;
+      # transport field MUST be absent (removed in V2 — single activation path).
+      noTransport = !(parsedAb.server ? transport);
+    };
+  };
+
+  # method defaults to "live" (V2: was "deploy-rs"); assert the default +
+  # transport is gone from a default-target entry too.
+  parsedDefault = parsedTargets.desktop;
+  scenarioLiveDefault = {
+    name = "deploy.targets.<name>.method defaults to \"live\"; transport field absent";
+    checks = {
+      liveDefault = parsedDefault.method == "live";
+      noTransport = !(parsedDefault ? transport);
+    };
+  };
+
+  # _extraRunnerEnvs aggregator proof: NIXTACHE_DEPLOY_TARGETS flows from
+  # deploy.nix → instances.nix envs (the S1 refactor). Covered structurally by
+  # the scenarios above (they read it from instancesOf.*.envs), but assert it
+  # explicitly once.
+  scenarioExtraEnvsAggregated = {
+    name = "_extraRunnerEnvs aggregator: deploy.nix key reaches runner.envs (S1)";
+    checks = {
+      envKeyPresent = envsTargets ? NIXTACHE_DEPLOY_TARGETS;
+    };
+  };
+
+  scenarios = [
+    scenarioSrv
+    scenarioRoot
+    scenarioEmpty
+    scenarioMulti
+    scenarioSsh
+    scenarioFlakeOnly
+    scenarioEnvs
+    scenarioSandboxOn
+    scenarioNoSandbox
+    scenarioNoTargets
+    scenarioTargets
+    scenarioNoKey
+    scenarioAbImage
+    scenarioLiveDefault
+    scenarioExtraEnvsAggregated
+  ];
 
   failed = builtins.concatMap
     (s:

@@ -35,6 +35,7 @@ in
     ./sandbox.nix
     ./known-hosts.nix
     ./instances.nix
+    ./deploy.nix
   ];
 
   options.services.nixtache.runner = {

@@ -87,6 +87,148 @@ in
     };
   };
 
+  # A single direct-deploy target. The attribute name MUST match the consumer's
+  # `nixosConfigurations.<name>` — the discovery step of the `deploy-target`
+  # action matches configs to targets by that name. Only the non-secret subset
+  # of each target is serialized into the job env (`NIXTACHE_DEPLOY_TARGETS`);
+  # the private key is bind-mounted via LoadCredential (`deploy_ssh_<name>`),
+  # mirroring the `flake_ssh_*` / `update_ssh_*` pattern.
+  #
+  # See doc/specs/direct-deploy/01-map-contract.md.
+  deployTargetType = types.submodule {
+    options = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Whether this target is eligible for direct deploy. `false` = the
+          target is declared in the map but temporarily excluded (the action
+          skips it with a warning). Absence from the map entirely means "not a
+          deploy target at all".
+        '';
+      };
+
+      host = mkOption {
+        type = types.str;
+        example = "10.13.37.3";
+        description = ''
+          Address of the target machine: LAN/VPN/public IP or DNS name. This is
+          the `config → host` leg of the map; the action SSHes here as
+          `sshUser@host` on `sshPort`.
+        '';
+      };
+
+      sshUser = mkOption {
+        type = types.str;
+        default = "nixos-deploy";
+        description = ''
+          SSH transport user for deploy. MUST match `deployUser.name` of the
+          receiving module (`nixosModules.deploy-target`) on that target, since
+          the deploy user is who the action authenticates as and (for
+          `transport = "sudo"`) who activates via NOPASSWD sudo. Use `root` if
+          the target is deployed via root SSH without sudo.
+        '';
+      };
+
+      sshPort = mkOption {
+        type = types.port;
+        default = 22;
+        description = "Non-standard SSH port for the target.";
+      };
+
+      method = mkOption {
+        type = types.enum [ "live" "ab-image" ];
+        default = "live";
+        description = ''
+          How the target is updated.
+
+          - `live` (default): push the built closure over SSH (`nix copy`) and
+            activate it in place via the root-owned `nixtache-apply.service`
+            (polkit-triggered by the deploy user, probe+rollback inside — see
+            the receiving module `nixtache.nixosModules.deploy-target`). Use for
+            targets whose activation does not kill the deployer (desktop/laptop).
+          - `ab-image`: write a new image into the inactive A/B slot via
+            `systemd-sysupdate` and reboot. Required for the chicken-and-egg
+            runner host (its live-switch would restart the container the job
+            runs in) and needs consumer prep (repart/UKI/sysupdate/boot-counting)
+            — see doc/specs/direct-deploy/06-ab-image.md.
+        '';
+      };
+
+      # `transport` was removed in V2: activation is always the root
+      # `nixtache-apply.service` + polkit (no sudo/doas/run0 selection).
+      # `method = "ab-image"` has its own path (sysupdate); `live` always uses
+      # the apply unit.
+
+      sshPrivateKey = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Path to the deploy private key for this target (the `host → creds` leg
+          of the map). Required for BOTH methods — `deploy-rs` authenticates the
+          SSH activation, `ab-image` SSH-triggers sysupdate. `null` = no
+          credential, the action skips this target (optionality by construction).
+          Supplied by the consumer (sops/agenix/vault/systemd — any backend
+          yielding a path).
+        '';
+      };
+
+      sshPublicKey = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Optional path to the deploy public key matching `sshPrivateKey` (for
+          `known_hosts` / verification). `null` = not provided.
+        '';
+      };
+
+      system = mkOption {
+        type = types.nullOr (types.enum [
+          "x86_64-linux"
+          "aarch64-linux"
+          "i686-linux"
+          "aarch64-darwin"
+          "x86_64-darwin"
+        ]);
+        default = null;
+        description = ''
+          Target architecture. `null` (default) = derive from
+          `nixosConfigurations.<name>.config.nixpkgs.hostPlatform` at deploy
+          time. Cross-arch builds rely on `boot.binfmt.emulatedSystems` on the
+          runner host (see doc/specs/direct-deploy/07-cross-arch.md).
+        '';
+      };
+
+      extraOptions = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Extra flags appended to the `nixos-rebuild` / deploy-rs invocation for
+          this target (e.g. `[ "--no-substitute-on-target" ]`).
+        '';
+      };
+
+      tags = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = ''
+          Free-form labels for grouping/filtering targets (documentation,
+          selective deploy via `workflow_dispatch`). Not interpreted by the
+          action.
+        '';
+      };
+
+      timeout = mkOption {
+        type = types.ints.positive;
+        default = 240;
+        description = ''
+          Per-target timeout (minutes) for build + activation. The action aborts
+          a target that exceeds it.
+        '';
+      };
+    };
+  };
+
   # Default GitHub known hosts (generic, reusable).
   defaultExtraKnownHosts = [
     {
