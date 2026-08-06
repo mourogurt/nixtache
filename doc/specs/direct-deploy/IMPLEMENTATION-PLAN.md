@@ -115,7 +115,7 @@ combined с nix-check (`build.uses: nix-check.yml` + `deploy.uses: deploy.yml` +
 |---|---|
 | `server/services/deploy-keys.nix` | **НОВОЕ**: sops `deploy-key-{desktop,laptop}`, наполнение `services.nixtache.runner.deploy.targets` (адреса из `common_secrets.network.amneziawg.nodes.*`) |
 | `secrets/deploy-keys/{desktop,laptop}.ed25519` | **НОВОЕ** (age-encrypted) |
-| `common/deploy-target.nix` | **НОВОЕ**: `imports = [ nixtache.nixosModules.deploy-target ]` + universal `criticalUnits=[amneziawg-wg0]` + `deployUser` |
+| `common/deploy-target.nix` | **НОВОЕ**: `imports = [ nixtache.nixosModules.deploy-target ]` + universal `criticalUnits` (consumer's choice — в reference workspace `wireguard-awg0.service`) + `deployUser` |
 | `desktop/...`, `laptop/...` | правка: import `common/deploy-target.nix`, per-target overrides |
 | `flake.nix` (nixos-configuration) | правка: `deploy = nixtache.lib.mkDeployNodes { deployLib = deploy-rs.lib.${system}; inherit (self) nixosConfigurations; targets = <map>; };` + `inputs.deploy-rs` |
 | `server/services/forgejo-runner.nix` | правка: `hostPackages += [ deploy-rs ]` |

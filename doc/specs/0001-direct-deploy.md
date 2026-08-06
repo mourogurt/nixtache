@@ -420,9 +420,12 @@ Forgejo крутится в одном экземпляре на сервере 
 Восстановление управляется **списком критичных юнитов** (`criticalUnits`) —
 настраиваемым per-target. Если хоть один не поднялся после boot/switch → откат.
 Список живёт в **конфиге самого таргета** (единый источник правды), а не в карте
-раннера. AmneziaWG — канонический обязательный элемент для всех машин («все
-точно должны амнезию поднять»); поверх него каждая машина докидает своё
-(forgejo/контейнер на хосте nixtache, и т.п.).
+раннера. **nixtache нейтрален к составу `criticalUnits`** — дефолт `[]`,
+потребитель сам решает, какие юниты критичны для каждой машины. В reference
+workspace (`codemaster/nixos-configuration`) во все машины добавляют
+`wireguard-awg0.service` (AmneziaWG-mesh) как universal — но это **выбор того
+consumer'а** под его инфру, не требование фреймворка. Поверх universal каждая
+машина докидает своё (forgejo/контейнер на хосте nixtache, и т.п.).
 
 **Приёмный модуль `nixtache.nixosModules.deploy-target`** (новый, импортируется
 в конфиг **каждого** таргета):
@@ -431,7 +434,9 @@ Forgejo крутится в одном экземпляре на сервере 
 services.nixtache.deploy-target = {
   healthCheckTimeout = 300;           # сек (5 мин) — некоторые машины грузятся долго; настраивается per-target
   criticalUnits = [
-    "amneziawg-wg0.service"           # универсально — для всех машин
+    # ПРИМЕР — состав libre от consumer'а (nixtache дефолт [], нейтрален).
+    # В reference workspace во все машины добавляют AmneziaWG-mesh:
+    "wireguard-awg0.service"
     # на хосте nixtache добавляются потребителем:
     # "forgejo.service" "nixos-container@runner.service"
   ];
@@ -567,7 +572,8 @@ services.nixtache.deploy-target.deployUser = {
 Tier-0 `boot-complete.target` gated по `criticalUnits` + Tier-1 живой откат
 внутри `nixtache-apply.service` (set+switch → probe → `nix-env --set <prev>` при
 fail); плюс bootCounting как consumer-side опция (N1) для boot-breaking случаев.
-Список критичных юнитов (AmneziaWG — обязательный для всех + per-target)
+Список критичных юнитов (nixtache-нейтрален: дефолт `[]`; consumer добавляет
+universal — в reference workspace это `wireguard-awg0.service` — + per-target)
 настраивается через приёмный модуль `nixtache.nixosModules.deploy-target`.
 
 **Ручной fallback** (когда авто не сработало / точечный откат):

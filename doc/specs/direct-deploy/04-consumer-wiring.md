@@ -56,7 +56,7 @@
 
   services.nixtache.deploy-target = {
     healthCheckTimeout = 300;                          # сек (Tier-0 + Tier-1 окно)
-    criticalUnits      = [ "amneziawg-wg0.service" ];  # universal — для всех машин
+    criticalUnits      = [ "wireguard-awg0.service" ];  # пример universal — добавь что критично для твоих машин (nixtache-нейтрален, дефолт [])
     deployUser = {
       name          = "nixos-deploy";
       authorizedKey = "ssh-ed25519 AAAA…";             # соответствующий приватному из §A

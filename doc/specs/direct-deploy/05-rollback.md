@@ -22,10 +22,12 @@
 
 ## `criticalUnits` — единый вход обоих tier'ов
 
-Список systemd-юнитов, которые **должны** быть активны после boot/switch (AmneziaWG
-универсально + per-target: forgejo/контейнер на runner-host, и т.п.). Живёт в конфиге
-**таргета** (`services.nixtache.deploy-target.criticalUnits`) → оба tier'а читают
-его напрямую из приёмного модуля (никакого `nix eval` дублирования, никакого второго
+Список systemd-юнитов, которые **должны** быть активны после boot/switch (состав
+выбирает consumer — nixtache дефолт `[]`, нейтрален; в reference workspace
+добавляют `wireguard-awg0.service` (AmneziaWG-mesh) как universal + per-target
+forgejo/контейнер на runner-host, и т.п.). Живёт в конфиге **таргета**
+(`services.nixtache.deploy-target.criticalUnits`) → оба tier'а читают его
+напрямую из приёмного модуля (никакого `nix eval` дублирования, никакого второго
 источника). HTTP-probes отложены (N2).
 
 ## Tier 0 — boot-time health-check (приёмный модуль)
