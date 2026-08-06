@@ -1,0 +1,138 @@
+name: "Deploy to targets"
+description: |
+  V2 direct-deploy: for each `nixosConfigurations.<name>` in the flake that has an
+  entry in the deploy map (`$NIXTACHE_DEPLOY_TARGETS`, exported by the nixtache
+  runner module), discover → SSH-probe → activate. Activation is systemd-native:
+  `method=live` builds the toplevel, `nix copy --to` pushes the closure, drops a
+  pointer file and triggers the target's root-owned `nixtache-apply.service`
+  (probe + rollback live inside that unit). No deploy-rs, no sudo/doas/run0.
+  `method=ab-image` is a stub until Batch E. Offline / unmapped / keyless targets
+  are skipped with a warning (R1/R5) — they never fail the whole job.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Discover → probe → activate
+      shell: bash
+      env:
+        # Make the map + sandbox cap explicit (the runner module exports both,
+        # but env-pin so the step fails loudly if they're absent on a non-nixtache
+        # runner).
+        NIXTACHE_DEPLOY_TARGETS: ${{ env.NIXTACHE_DEPLOY_TARGETS }}
+        HAS_SANDBOX_CAP: ${{ env.HAS_SANDBOX_CAP }}
+      run: |
+        set -uo pipefail
+        mkdir -p artifacts
+
+        # --- mode from branch (§7.1): PR → dry-activate; main → switch ---------
+        if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          mode=dry-activate
+        elif [ "$(basename "$GITHUB_REF")" = "main" ]; then
+          mode=switch
+        else
+          mode=dry-activate
+        fi
+        echo "deploy-target: mode=$mode (event=$GITHUB_EVENT_NAME ref=$GITHUB_REF)"
+
+        if [ -z "${NIXTACHE_DEPLOY_TARGETS:-}" ]; then
+          echo "::warning::NIXTACHE_DEPLOY_TARGETS is empty — no deploy targets configured (services.nixtache.runner.deploy.targets). Nothing to deploy."
+          exit 0
+        fi
+
+        # HAS_SANDBOX_CAP: 1 = sandbox-capable; 0/unset = --no-sandbox (mirrors rebuild-configurations).
+        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then SANDBOX_FLAG=""; else SANDBOX_FLAG="--no-sandbox"; fi
+
+        cred_dir="${CREDENTIALS_DIRECTORY:-}"
+        configs=$(nix flake show --json | jq -r '.nixosConfigurations | keys[]')
+        if [ -z "$configs" ]; then
+          echo "::warning::no nixosConfigurations in this flake — nothing to deploy."
+          exit 0
+        fi
+
+        # --- per-target activate -------------------------------------------------
+        # _liveApply cfg t mode key: build toplevel → copy → trigger apply-unit
+        _liveApply() {
+          local cfg="$1" t="$2" mode="$3" key="$4"
+          local user host port extra
+          user=$(jq -r .sshUser <<<"$t"); host=$(jq -r .host <<<"$t"); port=$(jq -r .sshPort <<<"$t")
+          extra=$(jq -r '.extraOptions[]?' <<<"$t")
+
+          echo "→ $cfg: live (mode=$mode) — building toplevel…"
+          # stdout (--print-out-paths) = the store path; stderr (build log) → artifact.
+          local P
+          P=$(nix build --no-link --print-out-paths $SANDBOX_FLAG .#nixosConfigurations.$cfg.config.system.build.toplevel 2>&1)
+          # keep only the last /nix/store/... line (nix prints the path to stdout,
+          # warnings/errors to stderr — merged above; the store path is the signal).
+          P=$(grep -E '^/nix/store/' <<<"$P" | tail -n1)
+          if [ -z "$P" ]; then
+            echo "::error::$cfg: toplevel build failed (no store path in output)"; return 1
+          fi
+
+          if [ "$mode" = "dry-activate" ]; then
+            echo "→ $cfg: dry-activate (no mutation)"
+            # dry-activate uses nixos-rebuild --use-remote-sudo (diff-only, OK without the apply unit)
+            nixos-rebuild dry-activate --flake .#$cfg \
+              --target-host "$user@$host" --use-remote-sudo $SANDBOX_FLAG $extra \
+              || { echo "::error::$cfg: dry-activate failed"; return 1; }
+            return 0
+          fi
+
+          # switch: copy closure, drop pointer, trigger root apply-unit (polkit).
+          # NIX_SSHOPTS so `nix copy --to ssh://` uses the deploy key + port.
+          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          export NIX_SSHOPTS="$ssh_opts"
+          echo "→ $cfg: nix copy closure → $user@$host"
+          nix copy --to "ssh://$user@$host" "$P" $extra || { echo "::error::$cfg: nix copy failed"; return 1; }
+
+          echo "→ $cfg: trigger nixtache-apply.service (pointer + systemctl start)"
+          # `systemctl start` for Type=oneshot is synchronous: blocks until the
+          # unit finishes, exit code = unit result (probe+rollback inside).
+          ssh $ssh_opts "$user@$host" "echo '$P' > /var/lib/nixtache/pending-system && systemctl start nixtache-apply.service" \
+            || { echo "::error::$cfg: nixtache-apply.service failed (probe/rollback) — see target journal: journalctl -u nixtache-apply.service"; return 1; }
+          echo "✓ $cfg: activated $P"
+        }
+
+        # _abImage cfg t mode — stub until Batch E (server chicken-and-egg).
+        _abImage() {
+          local cfg="$1" mode="$2"
+          echo "::warning::$cfg: method=ab-image not implemented yet (Batch E) — skipping. Server self-update falls back to system.autoUpgrade in the meantime."
+          return 0
+        }
+
+        for cfg in $configs; do
+          echo ""
+          echo "=== target: $cfg ==="
+          t=$(echo "$NIXTACHE_DEPLOY_TARGETS" | jq -e --arg n "$cfg" '.[$n]') || { echo "skip: no map entry for $cfg"; continue; }
+          [ "$(jq -r .hasKey <<<"$t")" = "true" ] || { echo "skip: $cfg has no deploy key (sshPrivateKey=null)"; continue; }
+          [ "$(jq -r .enable <<<"$t")"  = "true" ] || { echo "skip: $cfg enable=false"; continue; }
+
+          key="$cred_dir/deploy_ssh_${cfg}"
+          if [ -z "$cred_dir" ] || [ ! -f "$key" ]; then
+            echo "::error::$cfg: deploy key $key not found in \$CREDENTIALS_DIRECTORY (LoadCredential deploy_ssh_${cfg} absent)."; exit 1
+          fi
+
+          # probe (R5): short SSH ping with the same key; skip+warn if down.
+          user=$(jq -r .sshUser <<<"$t"); host=$(jq -r .host <<<"$t"); port=$(jq -r .sshPort <<<"$t")
+          if ! ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+                  -i "$key" -p "$port" "$user@$host" true 2>>"artifacts/deploy_${cfg}.log"; then
+            echo "::warning::$cfg: host $host unreachable (probe failed) — skipping, not failing CI."; continue
+          fi
+
+          method=$(jq -r .method <<<"$t")
+          case "$method" in
+            live)     _liveApply "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1 \
+                        || { echo "::error::$cfg: live deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; } ;;
+            ab-image) _abImage "$cfg" "$mode" >>"artifacts/deploy_${cfg}.log" 2>&1 ;;
+            *) echo "::error::$cfg: unknown method '$method'"; exit 1 ;;
+          esac
+        done
+
+        echo ""
+        echo "deploy-target: done (mode=$mode)."
+
+    - name: Upload deploy logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: deploy-logs
+        path: artifacts/

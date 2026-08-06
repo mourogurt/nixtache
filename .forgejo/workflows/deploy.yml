@@ -1,0 +1,45 @@
+# Reusable direct-deploy workflow: activate the caller's nixosConfigurations
+# on their targets via the `deploy-target` action (V2: nix copy + systemd-unit).
+#
+# The consumer invokes it either:
+#   (a) standalone — `.forgejo/workflows/deploy.yml` in the consumer:
+#         jobs.deploy.uses: nixops/nixtache/.forgejo/workflows/deploy.yml@main
+#       triggered by `on.workflow_run` on nix-check success; OR
+#   (b) combined with nix-check — the consumer's ci.yml has:
+#         jobs.build.uses: nixops/nixtache/.forgejo/workflows/nix-check.yml@main
+#         jobs.deploy.uses: nixops/nixtache/.forgejo/workflows/deploy.yml@main
+#         jobs.deploy.needs: build
+#
+# Runs in the CALLER's checkout context (so `nix flake show` sees the caller's
+# nixosConfigurations); we additionally check out nixtache into `.nixtache/` to
+# resolve our own composite action (robust against Forgejo cross-repo action
+# path resolution). In the Forgejo UI a reusable call renders as two jobs
+# (`deploy` 0s caller + `deploy-1` work) — expected.
+#
+# Mode is derived from the branch INSIDE the action (§7.1): PR → dry-activate,
+# main → switch. The workflow itself takes no inputs (the gate is PR review/merge).
+name: Direct Deploy
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: nixos
+    timeout-minutes: 4600
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Checkout nixtache (for the reusable action)
+        uses: actions/checkout@v4
+        with:
+          repository: nixops/nixtache
+          path: .nixtache
+          ref: main
+
+      - name: Deploy to targets
+        uses: ./.nixtache/.forgejo/actions/deploy-target

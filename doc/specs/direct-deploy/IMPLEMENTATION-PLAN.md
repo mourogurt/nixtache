@@ -83,22 +83,25 @@ provisioning. **Никакого sudo/doas/run0** (V2). Независим от 
 
 ---
 
-## Батч C — action `deploy-target` + workflow `deploy.yml` (V2, упрощён)
+## Батч C — action `deploy-target` + workflow `deploy.yml` (V2, упрощён)  ✅ РЕАЛИЗОВАН
 
 **Скоуп:** action делает discovery → probe → `nix build toplevel` →
 `nix copy --to ssh://deploy-user@host` → write pointer →
 `ssh systemctl start nixtache-apply.service` (Tier-1 probe уже внутри юнита — B).
 **Нет deploy-rs, нет mkDeployNodes, нет deploy-rs flake input.** Workflow —
-вариант (b) combined (`build.uses: nix-check.yml` + `deploy.needs: build`).
+reusable (`on: workflow_call`); consumer зовёт через (a) standalone или (b)
+combined с nix-check (`build.uses: nix-check.yml` + `deploy.uses: deploy.yml` +
+`needs: build`).
 
 | Файл | Действие | Что |
 |---|---|---|
-| `.forgejo/actions/deploy-target/action.yml` | **новый** | composite: discovery (`nix flake show --json`) → SSH-probe (R5) → `_liveApply` (nix copy + pointer + `systemctl start`); `_abImage` branch — stub до E; `HAS_SANDBOX_CAP`→`--no-sandbox` (M3) |
-| `.forgejo/workflows/deploy.yml` | **новый** | reusable `on: workflow_call` + combined (b): `build.uses: nix-check.yml@main` + `deploy.needs: build` |
+| `.forgejo/actions/deploy-target/action.yml` | ✅ **новый** | composite: mode по event/branch → discovery (`nix flake show --json`) → опциональность-filters → SSH-probe (R5) → `_liveApply` (build+copy+pointer+`systemctl start`) / `_abImage` stub (до E); `HAS_SANDBOX_CAP`→`--no-sandbox` (M3); `NIX_SSHOPTS` для nix copy; artifacts-upload |
+| `.forgejo/workflows/deploy.yml` | ✅ **новый** | reusable `on: workflow_call` + `workflow_dispatch`; job `deploy` → checkout caller + nixtache → `deploy-target` action |
 
-**Verify:** smoke на disposable-таргете после D.
+**Verify:** `python3 yaml.safe_load` ✓ оба файла; `bash -n` ✓ встроенный скрипт;
+`nix flake check` зелёный. End-to-end smoke — после Batch D (consumer wiring).
 
-**Deps:** A (карта/env) + B (apply-юнит + polkit на таргете).
+**Deps:** A (карта/env) ✅ + B (apply-юнит + polkit на таргете) ✅.
 
 ---
 
