@@ -37,6 +37,9 @@ jobs:
           git-host: code.zinzaguras.ru
           creds: flake
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        uses: ./.nixtache/.forgejo/actions/sandbox-probe
+
       - name: Verify flake metadata
         run: nix flake metadata
 

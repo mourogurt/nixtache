@@ -34,13 +34,13 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p "$OUT_DIR"
-        # HAS_SANDBOX_CAP is exported by the nixtache runner module (1 = the
+        # SANDBOX_OK is exported by the nixtache runner module (1 = the
         # container has CAP_SYS_ADMIN and sandboxes; 0 = legacy/unprivileged).
         # Docs generation is pure, but respect the flag for consistency.
-        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+        if [ "${SANDBOX_OK:-0}" = "1" ]; then
           SANDBOX_FLAG=""
         else
-          echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+          echo "SANDBOX_OK!=1 → --no-sandbox (legacy/unprivileged runner)"
           SANDBOX_FLAG="--no-sandbox"
         fi
         # Build each requested attribute; stage its output under $OUT_DIR/<attr>.

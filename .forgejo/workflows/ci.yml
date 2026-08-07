@@ -36,15 +36,17 @@ jobs:
       - name: Validate flake (evaluates modules + builds checks)
         uses: ./.forgejo/actions/flake-validation
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        uses: ./.forgejo/actions/sandbox-probe
+
       - name: Run module tests
         run: |
           set -euo pipefail
-          # HAS_SANDBOX_CAP is exported by the runner module (1 = sandbox-capable,
-          # 0 = legacy/unprivileged). Fall back to --no-sandbox only in the 0 case.
-          if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+          # SANDBOX_OK is set by sandbox-probe (1 = sandbox works, 0/unset = broken).
+          if [ "${SANDBOX_OK:-0}" = "1" ]; then
             SANDBOX_FLAG=""
           else
-            echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+            echo "SANDBOX_OK!=1 → --no-sandbox"
             SANDBOX_FLAG="--no-sandbox"
           fi
           out=$(nix build --no-link --print-out-paths --print-build-logs $SANDBOX_FLAG .#checks.x86_64-linux.runner)

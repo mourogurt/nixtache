@@ -41,5 +41,8 @@ jobs:
           path: .nixtache
           ref: main
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        uses: ./.nixtache/.forgejo/actions/sandbox-probe
+
       - name: Deploy to targets
         uses: ./.nixtache/.forgejo/actions/deploy-target

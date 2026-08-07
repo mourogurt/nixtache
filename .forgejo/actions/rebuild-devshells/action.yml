@@ -15,13 +15,13 @@ runs:
       run: |
         set -uo pipefail
 
-        # HAS_SANDBOX_CAP is exported by the nixtache runner module (1 =
-        # sandbox-capable; 0 = legacy/unprivileged). Append --no-sandbox only
+        # SANDBOX_OK is set by the sandbox-probe action (1 = sandbox works here;
+        # 0/unset = broken or off). Append --no-sandbox only in the 0 case. Append --no-sandbox only
         # in the 0 case.
-        if [ "${HAS_SANDBOX_CAP:-0}" = "1" ]; then
+        if [ "${SANDBOX_OK:-0}" = "1" ]; then
           SANDBOX_FLAG=""
         else
-          echo "HAS_SANDBOX_CAP!=1 → --no-sandbox (legacy/unprivileged runner)"
+          echo "SANDBOX_OK!=1 → --no-sandbox (legacy/unprivileged runner)"
           SANDBOX_FLAG="--no-sandbox"
         fi
 
