@@ -85,12 +85,46 @@ in
       additionalCapabilities =
         cfg.additionalCapabilities ++ optional cfg.enableSandbox "CAP_SYS_ADMIN";
 
-      config = { lib, ... }: {
-        # Owned by enableSandbox. Forced so it tracks the cap granted to the
-        # container 1:1 (sandbox without the cap fails; cap without sandbox is
-        # a pointless privilege).
-        nix.settings.sandbox = lib.mkForce cfg.enableSandbox;
-      };
+      config = { lib, pkgs, ... }:
+        let
+          # The /proc remount fix, applied to every nix daemon in the container
+          # that runs builds. See the long comment below for why.
+          procFix = {
+            serviceConfig.PrivateMounts = true;
+            serviceConfig.ExecStartPre = "${lib.getExe' pkgs.util-linux "mount"} proc -t proc /proc";
+          };
+        in
+        {
+          # Owned by enableSandbox. Forced so it tracks the cap granted to the
+          # container 1:1 (sandbox without the cap fails; cap without sandbox is
+          # a pointless privilege).
+          nix.settings.sandbox = lib.mkForce cfg.enableSandbox;
+
+          # Make the Nix sandbox ACTUALLY work under systemd-nspawn. nspawn
+          # over-mounts /proc subdirs (/proc/sys, /proc/bus, /proc/fs, …) read-only,
+          # which the kernel "locks" (mounts inherited from a more privileged mount
+          # namespace are locked together). When the Nix sandbox later tries to
+          # overmount /proc with a fresh procfs inside its child USER namespace,
+          # the locked-mount logic blocks it with EPERM → "this system does not
+          # support the kernel namespaces that are required for sandboxing".
+          # CAP_SYS_ADMIN alone does NOT fix this (the lock is a mount-namespace
+          # property, not a capability gate).
+          #
+          # Fix: give each nix daemon its own mount namespace (PrivateMounts) and
+          # remount /proc fresh there before the daemon starts. The fresh proc
+          # mount is made by root in the container's user namespace → NOT locked
+          # → the sandbox's child-user-ns /proc overmount succeeds. PrivateMounts
+          # keeps this isolated (the container's own /proc is untouched).
+          # Ref: https://github.com/NixOS/nixpkgs/issues/405256
+          #
+          # Applied to BOTH daemons: the system `nix-daemon` AND the relocated-store
+          # `nix-daemon-custom` (store.nix creates the latter when store.path != "/";
+          # CI builds go through it when the store is relocated, so it needs the
+          # same fix).
+          systemd.services.nix-daemon = lib.mkIf cfg.enableSandbox procFix;
+          systemd.services.nix-daemon-custom =
+            lib.mkIf (cfg.enableSandbox && cfg.store.path != "/") procFix;
+        };
     };
   };
 }

@@ -246,12 +246,18 @@ self.nixosModules.runner
     services.nixtache.runner.additionalCapabilities = [ "CAP_NET_ADMIN" ];
   };
   scenarioSandboxOn = {
-    name = "enableSandbox=true (explicit): CAP_SYS_ADMIN granted, daemon sandbox on, HAS_SANDBOX_CAP=1, extra caps merged";
+    name = "enableSandbox=true (explicit): CAP_SYS_ADMIN, sandbox on, HAS_SANDBOX_CAP=1, /proc fix on BOTH daemons";
     checks = {
       hasSysAdmin = lib.elem "CAP_SYS_ADMIN" hostSandboxOn.config.containers."runner".additionalCapabilities;
       hasExtraCap = lib.elem "CAP_NET_ADMIN" hostSandboxOn.config.containers."runner".additionalCapabilities;
       daemonSandboxOn = (containerCfg hostSandboxOn).nix.settings.sandbox == true;
       sandboxEnvOn = (instancesOf hostSandboxOn)."default".settings.runner.envs.HAS_SANDBOX_CAP == "1";
+      # /proc locked-mount fix (nixpkgs#405256): PrivateMounts on the system daemon…
+      nixDaemonPrivateMounts = (servicesOf hostSandboxOn)."nix-daemon".serviceConfig.PrivateMounts or false == true;
+      # …and on the relocated-store daemon (store.path="/srv" → nix-daemon-custom
+      # exists; CI builds go through it, so it needs the same fix):
+      hasCustomDaemon = has (servicesOf hostSandboxOn) "nix-daemon-custom";
+      customDaemonPrivateMounts = (servicesOf hostSandboxOn)."nix-daemon-custom".serviceConfig.PrivateMounts or false == true;
     };
   };
 
