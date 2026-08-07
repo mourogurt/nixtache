@@ -102,7 +102,7 @@ services.nixtache.runner = {
   store.path = "/srv";                           # base dir; store lives at <path>/nix. "/" = system nix-daemon
   store.hostBackup = "/srv/bincache";            # host dir mounted at store.path
   nixSettings   = { substituters = [...]; trusted-public-keys = [...]; max-jobs = 1; cores = 8; };
-  enableSandbox = true;                           # grant CAP_SYS_ADMIN so Nix's build sandbox works inside nspawn (default)
+  enableSandbox = false;                          # default — nix sandbox is unreliable in nspawn (CAP_SYS_ADMIN alone insufficient); container is the isolation boundary. true = opt-in if verified.
   additionalCapabilities = [ "CAP_NET_ADMIN" ];   # extra caps merged on top of the sandbox one (optional)
   gitHost       = { name = "forgejo_ed25519"; hostNames = [ "git.example.com" "10.0.0.1" "localhost" ]; publicKey = "ssh-ed25519 AAAA..."; };
   extraKnownHosts = [ { name = "github_ed25519"; hostNames = [ "github.com" ]; publicKey = "ssh-ed25519 AAAA..."; } ];

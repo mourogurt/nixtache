@@ -1,18 +1,21 @@
 # Build sandboxing inside the runner container.
 #
 # NixOS enables `nix.settings.sandbox` by default, but systemd-nspawn drops
-# CAP_SYS_ADMIN from the container's bounding set, so the daemon inside cannot
-# create the user/mount namespaces the sandbox needs — every `nix build` /
-# `nix flake check` then fails with "this system does not support the kernel
-# namespaces that are required for sandboxing". These two options make the
-# trade-off explicit: enableSandbox=true (default) grants the cap and keeps the
-# sandbox on; enableSandbox=false keeps the container unprivileged at the cost
-# of unsandboxed builds (the CI actions detect this via HAS_SANDBOX_CAP and
-# fall back to --no-sandbox).
+# CAP_SYS_ADMIN from the container's bounding set AND restricts the
+# clone(CLONE_NEWUSER|CLONE_NEWNS) syscalls the sandbox needs (seccomp /
+# private-users). The result: every `nix build` / `nix flake check` fails with
+# "this system does not support the kernel namespaces that are required for
+# sandboxing". Crucially, granting CAP_SYS_ADMIN alone does NOT fix this on most
+# nspawn setups — so the default is `enableSandbox = false` (working CI, builds
+# run unsandboxed inside the container which is itself the isolation boundary).
+# `enableSandbox = true` is opt-in for setups where the sandbox has been
+# verified to work (host sysctl, no private-users conflict, seccomp allows the
+# clone flags). HAS_SANDBOX_CAP env (instances.nix) tells the reusable actions
+# whether to keep sandboxing on (1) or append --no-sandbox (0).
 #
 # This module is the SOLE owner of `containers.<name>.additionalCapabilities`
 # (a list, which doesn't auto-merge across modules) and the forced
-# `nix.settings.sandbox`. HAS_SANDBOX_CAP env is set by instances.nix.
+# `nix.settings.sandbox`.
 {
   config,
   lib,
@@ -30,21 +33,26 @@ in
     # --- Build sandboxing ---------------------------------------------------
     enableSandbox = mkOption {
       type = types.bool;
-      default = true;
+      default = false;
       description = ''
         Whether Nix builds inside the container run sandboxed.
 
-        - `true` (default): grants `CAP_SYS_ADMIN` to the container (required
-          for the Nix build sandbox under systemd-nspawn), forces
-          `nix.settings.sandbox = true`, and exports `HAS_SANDBOX_CAP=1` to
-          every CI job so the reusable actions keep sandboxing on.
-        - `false`: keeps the container unprivileged (no `CAP_SYS_ADMIN`), forces
-          `nix.settings.sandbox = false`, and exports `HAS_SANDBOX_CAP=0`; the
-          CI actions then append `--no-sandbox` (legacy/relaxed mode).
-
-        Use `false` only if your threat model forbids granting `CAP_SYS_ADMIN`
-        (a powerful capability) to the runner container. The default gives a
-        working sandbox out of the box.
+        - `false` (default): keeps the container unprivileged (no
+          `CAP_SYS_ADMIN`), forces `nix.settings.sandbox = false`, and exports
+          `HAS_SANDBOX_CAP=0` so the reusable CI actions append `--no-sandbox`.
+          This is the default because systemd-nspawn restricts the
+          `clone(CLONE_NEWUSER|CLONE_NEWNS)` the Nix sandbox needs — granting
+          `CAP_SYS_ADMIN` alone (the `true` case) is NOT enough on most nspawn
+          setups, and `true` produces broken CI ("this system does not support
+          the kernel namespaces required for sandboxing"). The runner container
+          itself is the isolation boundary, so unsandboxed builds inside it are
+          acceptable.
+        - `true`: grants `CAP_SYS_ADMIN` to the container, forces
+          `nix.settings.sandbox = true`, exports `HAS_SANDBOX_CAP=1` (actions
+          keep sandboxing on). Opt-in ONLY if you have verified the Nix sandbox
+          actually works in your nspawn setup (e.g. host sysctl
+          `kernel.unprivileged_userns_clone=1`, no `--private-users` conflict,
+          seccomp allows the clone flags). Otherwise leave `false`.
       '';
     };
 

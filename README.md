@@ -191,25 +191,32 @@ warning). The bot's commit identity is separate (`bot.*`).
 The runner is a NixOS `systemd-nspawn` container. NixOS sets
 `nix.settings.sandbox = true` by default, **but nspawn drops `CAP_SYS_ADMIN`
 from the container's bounding set**, so `nix-daemon` inside cannot create the
-user/mount namespaces + bind-mounts the sandbox needs. Two options make the
-trade-off explicit:
+user/mount namespaces + bind-mounts the sandbox needs. Worse: even when
+`CAP_SYS_ADMIN` is granted back, nspawn's seccomp / private-users restrict the
+`clone(CLONE_NEWUSER|CLONE_NEWNS)` the Nix sandbox needs — so the cap alone is
+**not** sufficient on most nspawn setups, and `enableSandbox = true` produces
+broken CI ("this system does not support the kernel namespaces required for
+sandboxing"). The default is therefore `false` (working CI; the runner container
+itself is the isolation boundary). Two options make the trade-off explicit:
 
 | option | default | effect |
 |---|---|---|
-| `enableSandbox` | `true` | grants `CAP_SYS_ADMIN` to the container, forces `nix.settings.sandbox = true`, exports `HAS_SANDBOX_CAP=1` to every job |
+| `enableSandbox` | `false` | unprivileged container, `nix.settings.sandbox = false`, `HAS_SANDBOX_CAP=0` → actions append `--no-sandbox`. Working CI out of the box. |
+| `enableSandbox` | `true` (opt-in) | grants `CAP_SYS_ADMIN`, forces `nix.settings.sandbox = true`, `HAS_SANDBOX_CAP=1`. Use ONLY if you've verified the Nix sandbox works in your nspawn (host sysctl `kernel.unprivileged_userns_clone=1`, no `--private-users` conflict, seccomp allows the clone flags). |
 | `additionalCapabilities` | `[]` | extra caps merged on top (e.g. `CAP_NET_ADMIN` for tunnel setup) |
 
-`enableSandbox = false` keeps the container **unprivileged** (no `CAP_SYS_ADMIN`)
-at the cost of unsandboxed builds. The CI actions (`flake-validation`,
-`rebuild-configurations`, `rebuild-devshells`, `generate-docs`) read
-`HAS_SANDBOX_CAP`: `1` → build normally; `0`/unset → append `--no-sandbox`
-(legacy fallback). A runner deployed without the cap still passes CI; a runner
-with the cap builds properly sandboxed.
+The CI actions (`flake-validation`, `rebuild-configurations`, `rebuild-devshells`,
+`generate-docs`, `deploy-target`) read `HAS_SANDBOX_CAP`: `1` → build normally;
+`0`/unset → append `--no-sandbox`.
 
-> **Deploy chicken-and-egg:** the cap is granted only after the server is
-> rebuilt with the updated module, so a first-time rollout needs one manual
-> `nixos-rebuild switch` on the server. Until then jobs run in the
-> `--no-sandbox` fallback — they don't break, they just don't sandbox.
+> **Sandbox-in-nspawn is a known hard problem.** The default `false` trades
+> build-level isolation for reliability. Making `true` actually work requires
+> host-side setup (sysctl, nspawn flags) that nixtache does not yet automate —
+> tracked as a follow-up (important for cross-compile purity via binfmt).
+
+> **Deploy chicken-and-egg:** any change to `enableSandbox` / caps applies only
+> after the server is rebuilt with the updated module, so a first-time rollout
+> needs one manual `nixos-rebuild switch` on the server.
 
 ---
 
