@@ -24,6 +24,7 @@
         deploy-target = import ./modules/deploy-target;
         ab-image = import ./modules/ab-image;
         overlay-nix = import ./modules/overlay-nix;
+        auto-update = import ./modules/auto-update;
         secrets = import ./modules/secrets.nix;
         default = self.nixosModules.runner;
       };
@@ -113,6 +114,11 @@
         # Transfer.Verify=yes target accepts the correctly-signed image (full
         # action.yml run) and rejects wrong-key/tampered/unsigned staging. KVM.
         ab-deploy-verify-vm = import ./tests/ab-deploy-verify-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # Auto-update module (spec 09 + TEST-SPECS-AUTO-UPDATE.md):
+        # auto-update is pure-eval (AU-1…AU-25, fast); auto-update-vm is
+        # runNixOSTest (AU-F1…F4, AU-A1…A5; KVM).
+        auto-update = import ./tests/auto-update.nix { inherit nixpkgs self system; };
+        auto-update-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
       });
 
       # --- This flake's own option docs -----------------------------------
