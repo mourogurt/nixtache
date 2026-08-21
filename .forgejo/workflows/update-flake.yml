@@ -55,12 +55,9 @@ jobs:
         # Bot identity (commit author) from the runner module (NIXTACHE_BOT_*),
         # signing key = the update SSH key loaded above.
         if: steps.guard.outputs.enabled == 'true'
-        env:
-          BOT_NAME: ${NIXTACHE_BOT_NAME:-fbot}
-          BOT_EMAIL: ${NIXTACHE_BOT_EMAIL:-fbot@localhost}
         run: |
-          git config --local user.name "$BOT_NAME"
-          git config --local user.email "$BOT_EMAIL"
+          git config --local user.name "${NIXTACHE_BOT_NAME:-fbot}"
+          git config --local user.email "${NIXTACHE_BOT_EMAIL:-fbot@localhost}"
           git config --local user.signingkey "${{ steps.ssh.outputs.key-path }}"
           git config --local gpg.format ssh
 
@@ -89,12 +86,10 @@ jobs:
         # NIXTACHE_UPDATE_GIT_USER = server RUN_USER (from updateSshCreds.user);
         # host derived from GITHUB_SERVER_URL; repo/ref from GitHub-compat env.
         if: steps.guard.outputs.enabled == 'true'
-        env:
-          GIT_USER: ${NIXTACHE_UPDATE_GIT_USER}
         run: |
           set -euo pipefail
           host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
-          url="ssh://${GIT_USER}@${host}/${GITHUB_REPOSITORY}"
+          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${host}/${GITHUB_REPOSITORY}"
           echo "Setting origin to $url"
           git remote set-url origin "$url"
           echo "Pushing to ${GITHUB_REF_NAME}"
