@@ -5,7 +5,22 @@
 > (runner-host self-update) и удалённых. Решает chicken-and-egg сервера + не рвёт
 > бегущие джобы (local-self: idle-gated reboot).
 > База: nixcademy «Immutable A/B system partitions with NixOS for OTA updates» +
-> `applicative-systems/nixos-appliance-ota-update`. **Статус:** 📝 черновик.
+> `applicative-systems/nixos-appliance-ota-update`.
+>
+> **Статус:** nixtache-сторона ✅ реализована (Batch E: `modules/runner/ab.nix` +
+> `modules/deploy-target/ab.nix` + action `_abImage` + тесты); consumer-сторона 📝
+> (gated, требует bump nixtache + reinstall server). См. `IMPLEMENTATION-PLAN.md`.
+
+> ### Сверено с `sysupdate.d(5)` (применено в реализации)
+> - **Верификация — только GPG/OpenPGP** (захардкожено в апстриме systemd через
+>   gpgme). age/sops/minisign/cosign как подпись **невозможны** — `Verify` ждёт
+>   detached-сигнатуру `SHA256SUMS.gpg`. age допустим только для ХРАНЕНИЯ
+>   приватного GPG-ключа (sops-encrypted секрет → импорт временным GNUPGHOME в CI).
+> - **`[Source] Path` СТАТИЧЕН** — `@v` живёт **только** в `MatchPattern=`. sysupdate
+>   тянет `<Path>/SHA256SUMS` (+ `.gpg`), парсит версии из имён по `MatchPattern`.
+> - **`[Transfer] Verify` по умолчанию `yes`**. Публичный keyring —
+>   `/usr/lib/systemd/import-pubring.pgp` или `/etc/systemd/import-pubring.pgp`.
+> - **Один `SHA256SUMS` на `<Path>`** (per-cfg dir в central staging).
 
 ## Почему не `method = "live"` (root-юнит)
 
@@ -104,6 +119,15 @@ sysupdate на каждом таргете **сам** выбирает стар�
      `reboot.enable = true` (sysupdate сканит HTTPS autoindex'ом — нужен `autoindex on`, см. nixtache-side);
    - общий: `MatchPattern` `<id>_@v.nix-store.raw` / `<id>_@v.efi`, `InstancesMax = 2`.
 4. **`system.image.id`** (фикс.) + **`system.image.version`** (per build).
+   **Версия назначается в РАНТАЙМЕ, не декларативно:** consumer коммитит файл
+   `image-version` (содержимое `0`) и ставит
+   `services.nixtache.ab-image.imageVersionFile = ./image-version;` — deploy
+   action перезаписывает файл вычисленной версией (UTC calver
+   `YYYYMMDDHHMMSS`, монотонен под strverscmp; override —
+   `NIXTACHE_AB_VERSION`) прямо перед `nix build` (+ `git add -f`: flake
+   читает git index). Тогда os-release = UKI = staged-имена = GPT label —
+   все несут одну runtime-версию, а flake остаётся pure. Явный
+   `imageVersion = "…"` в конфиге — для тестов/разового bootstrap.
 5. **Boot counting** (N1): `systemd-boot.bootCounting.enable = true`, `boot.uki.tries = 3`
    + Tier-0 `criticalUnits`.
 6. **Подпись образа** (рекомендуется) + `Transfer.Verify`.

@@ -1,0 +1,174 @@
+# QEMU (pexpect) BEHAVIORAL CONTRACT for the not-yet-implemented module
+# `services.nixtache.overlay-nix.*` (spec 08 §6): a Nix `local-overlay-store`
+# layered over the read-only squashFS /nix/store of an A/B appliance.
+#
+# Boots a REAL A/B appliance image (built with the REAL deploy-target + ab-image
+# modules + the FUTURE overlay-nix module) in QEMU and asserts the overlay comes
+# up: an OverlayFS mount exists, the overlay daemon is active, and a write
+# through the merged store lands in the upper dir while the lower stays ro.
+#
+# The test FAILS NOW (overlay-nix module absent → appliance image build refuses)
+# and turns green once an implementing agent creates
+# `modules/overlay-nix/default.nix` (+ wires `nixosModules.overlay-nix` in flake.nix).
+#
+# Offline constraint: the appliance VM has no internet, so `nix-env -i`/`nix shell`
+# (which fetch from a registry) are NOT exercised here — the read-only+overlay
+# COW mechanism at the filesystem level IS (the user's stated priority). The
+# nix-command tests (O2/O3) are deferred to a networked integration run; see
+# TEST-SPECS.md §5 / review §11.4 (merged mountpoint ambiguity).
+#
+# Needs KVM (requiredSystemFeatures). Covers TEST-SPECS.md §5: O1, O7.
+{ nixpkgs, self, system ? "x86_64-linux" }:
+
+let
+  lib = nixpkgs.lib;
+  pkgs = nixpkgs.legacyPackages.${system};
+
+  # Local appliance builder = ab-fixture mkAppliance + the FUTURE overlay-nix
+  # module + its config. (ab-fixture.nix mkAppliance doesn't take extra modules,
+  # so we replicate its thin consumer layer and add overlay-nix. Do NOT edit
+  # ab-fixture.nix — other tests depend on it unchanged.)
+  mkApplianceOverlay =
+    { version ? "1"
+    , upperDir ? "/var/lib/nix-overlay/upper"
+    , workDir ? "/var/lib/nix-overlay/work"
+    }:
+    nixpkgs.lib.nixosSystem {
+      inherit system;
+      modules = [
+        # --- REAL nixtache modules (code under test / appliance base) ----------
+        self.nixosModules.deploy-target
+        self.nixosModules.ab-image
+        # --- FUTURE overlay-nix module (absent until implemented) ---------------
+        (self.nixosModules.overlay-nix or ({ ... }: { }))
+
+        # --- thin consumer settings -------------------------------------------
+        (
+          { config, lib, pkgs, ... }:
+          {
+            system.stateVersion = config.system.nixos.release;
+            networking.hostName = "abtest-overlay";
+            nixpkgs.hostPlatform = system;
+
+            services.nixtache.ab-image = {
+              enable = true;
+              imageId = "abtest";
+              imageVersion = version;
+              storeSize = "512M";
+            };
+            services.nixtache.deploy-target = {
+              enable = true;
+              ab.enable = true;
+              ab.gating = false;
+            };
+
+            # The FUTURE overlay-nix config (spec 08 §6). Refuses eval until the
+            # module exists — that is the intended red state.
+            services.nixtache.overlay-nix = {
+              enable = true;
+              inherit upperDir workDir;
+            };
+
+            # test conveniences
+            services.getty.autologinUser = "root";
+            users.users.root.initialPassword = "";
+            environment.systemPackages = with pkgs; [ util-linux gawk findutils ];
+            environment.etc."image-version".text = version;
+          }
+        )
+      ];
+    };
+
+  v1 = mkApplianceOverlay { };
+  v1Image = "${v1.config.system.build.image}/abtest_1.raw";
+
+  # pexpect driver (mirrors tests/ab-vm.nix): spawn QEMU with the appliance image,
+  # wait for the autologin root shell on ttyS0, run query commands via sentinel
+  # framing, print RESULT_* lines asserted by the wrapper.
+  driver = pkgs.writers.writePython3Bin "overlay-nix-vm-driver" {
+    libraries = with pkgs.python3Packages; [ pexpect ];
+    flakeIgnore = [ "E501" "W503" "E401" "E302" "E231" "E305" "E303" "E265" "W391" "E402" "E702" "F811" ];
+  } ''
+    import pexpect, sys, time
+    image = sys.argv[1]
+    qemu = "${pkgs.qemu_kvm}/bin/qemu-system-x86_64"
+    args = ["-machine", "q35", "-accel", "kvm", "-accel", "tcg",
+            "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
+            "-hda", image, "-snapshot",
+            "-m", "2048", "-smp", "4",
+            "-display", "none", "-serial", "stdio", "-monitor", "none"]
+    p = pexpect.spawn(qemu, args, encoding="utf-8", timeout=240)
+    p.expect(r"Welcome to NixOS|login:", timeout=240)
+    time.sleep(6)
+    p.sendline("echo ABTEST_READY_$$")
+    p.expect(r"ABTEST_READY_\d+", timeout=90)
+    p.sendline("stty -echo")
+    time.sleep(1)
+    p.sendline("echo SYNC_$$")
+    p.expect(r"SYNC_\d+", timeout=30)
+
+    def run(cmd):
+        p.sendline("echo __B__; " + cmd + "; echo __E__$?")
+        p.expect(r"__E__\d+", timeout=180)
+        return p.before.split("__B__", 1)[-1].strip()
+
+    # Give the overlay daemon time to come up after boot.
+    run("for i in $(seq 1 30); do systemctl is-active --quiet nix-daemon-overlay 2>/dev/null || systemctl is-active --quiet nix-daemon-overlay-mount 2>/dev/null && break; sleep 2; done")
+
+    # --- O1: an OverlayFS mount + the overlay daemon active --------------------
+    print("RESULT_OVERLAY_MOUNT_COUNT=" + run("mount | grep -ci overlay"))
+    print("RESULT_OVERLAY_DAEMON=" + run("systemctl is-active nix-daemon-overlay nix-daemon-overlay-mount 2>/dev/null | grep -m1 active || echo inactive"))
+    print("RESULT_UPPER_DIR=" + run("test -d /var/lib/nix-overlay/upper && echo yes || echo no"))
+    print("RESULT_WORK_DIR=" + run("test -d /var/lib/nix-overlay/work && echo yes || echo no"))
+
+    # --- The read-only + overlay COW proof (user's priority) -------------------
+    # Detect the overlay's merged mountpoint (spec §6 mountpoint is ambiguous —
+    # review §11.4 — so detect from `mount` rather than assume). Then write a
+    # probe THROUGH the merged view and confirm it lands in the upper dir while
+    # the lower squashFS stays read-only. Single-line: the pexpect serial driver
+    # cannot handle multi-line `\` continuations (the shell hangs waiting for
+    # the rest of the command).
+    cow = run("merged=$(mount | grep '/var/lib/nix-overlay/upper' | head -1 | awk '{print $3}'); [ -z \"$merged\" ] && merged=/mnt/nix-overlay/nix/store; probe=probe-$$; if touch \"$merged/$probe\" 2>/dev/null; then find /var/lib/nix-overlay/upper -name \"$probe\" >/dev/null 2>&1 && echo COW_OK || echo COW_NOT_IN_UPPER; else echo COW_WRITE_FAILED; fi")
+    print("RESULT_COW=" + cow)
+
+    # Lower is read-only: /nix/store mount options contain 'ro' (the squashFS).
+    print("RESULT_LOWER_RO=" + run("mount | grep ' /nix/store ' | grep -o 'ro' | head -1 || echo no"))
+
+    # --- INFO (human visibility) -----------------------------------------------
+    print("INFO_MOUNTS=" + run("mount | grep -E 'overlay|/nix/store' | head -20"))
+    print("INFO_LSBLK=" + run("lsblk -o NAME,PARTLABEL,FSTYPE,RO,MOUNTPOINT"))
+
+    p.sendline("poweroff")
+    time.sleep(5)
+    p.close(force=True)
+  '';
+in
+pkgs.runCommand "overlay-nix-vm-test"
+  {
+    deps = [ v1.config.system.build.image ];
+    nativeBuildInputs = [ driver pkgs.coreutils pkgs.gnugrep pkgs.findutils ];
+    requiredSystemFeatures = [ "kvm" ];
+  }
+  ''
+    set -uo pipefail
+    mkdir -p $out
+    FAIL=0
+    pass() { echo "  ok    $1"; echo "ok    $1" >> $out/report; }
+    fail() { echo "  FAIL  $1"; echo "FAIL  $1" >> $out/report; FAIL=1; }
+
+    echo "=== overlay-nix-vm (appliance + FUTURE overlay-nix module) ==="
+    overlay-nix-vm-driver ${v1Image} > driver.out 2>driver.err || true
+    echo "--- driver output ---"; cat driver.out
+    if [ -s driver.err ]; then echo "--- driver stderr (tail) ---"; tail -5 driver.err; fi
+
+    val() { grep -aoE "^RESULT_$1=.*" driver.out | head -1; }
+
+    [ "$(val OVERLAY_MOUNT_COUNT)" != "RESULT_OVERLAY_MOUNT_COUNT=0" ] && pass "O1: an OverlayFS mount exists" || fail "O1: no overlay mount ($(val OVERLAY_MOUNT_COUNT))"
+    echo "$(val OVERLAY_DAEMON)" | grep -q active && pass "O1: overlay daemon active" || fail "O1: overlay daemon not active ($(val OVERLAY_DAEMON))"
+    [ "$(val UPPER_DIR)" = "RESULT_UPPER_DIR=yes" ] && pass "O1: upperDir created (tmpfiles)" || fail "O1: upperDir missing ($(val UPPER_DIR))"
+    [ "$(val COW)" = "RESULT_COW=COW_OK" ] && pass "read-only+overlay: write through merged lands in upper (COW)" || fail "read-only+overlay COW failed ($(val COW))"
+    echo "$(val LOWER_RO)" | grep -q ro && pass "lower /nix/store is read-only" || fail "lower /nix/store not ro ($(val LOWER_RO))"
+
+    cat $out/report
+    [ "$FAIL" = "0" ] || exit 1
+  ''

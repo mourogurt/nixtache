@@ -2,8 +2,9 @@
 #
 # The runner authenticates to the target as this user to do exactly TWO things:
 #   1. `nix copy --to ssh://<user>@<host>` — push the built closure into the
-#      target's nix store (works for any user under NixOS's default
-#      `nix.settings.allowed-users = ["*"]`);
+#      target's nix store. The store is served as this user, so the nix-daemon
+#      must trust it to import unsigned paths (`nixTrust` adds it to
+#      `nix.settings.trusted-users`);
 #   2. drop a pointer file at `/var/lib/nixtache/pending-system` and
 #      `systemctl start nixtache-apply.service` — trigger the root-owned apply
 #      unit. File write is via `nixtache-deploy` group membership; the unit
@@ -56,6 +57,10 @@ in
         extraGroups = [ "nixtache-deploy" ];
       })
     ];
+
+    # `nix copy --to ssh://` serves the store as the deploy user; the daemon
+    # imports unsigned closure paths only for trusted users.
+    nix.settings.trusted-users = mkIf du.nixTrust [ du.name ];
 
     assertions = mkIf (!du.autoProvision) [
       {

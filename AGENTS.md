@@ -286,13 +286,18 @@ one-time **manual** `nixos-rebuild switch` on the server, and CI-driven
 deploys handle only non-runner-breaking changes. Cheaper, but every contract
 change needs a human deploy and there is no auto-rollback.
 
-**Open sub-decisions (when this is picked up):**
-- deploy tool: `nixos-rebuild --target-host` vs `deploy-rs` vs `colmena`;
-- deploy-key scope (dedicated `nixos-deploy` user with passwordless
-  `nixos-rebuild` sudo, or root);
-- where the deploy runner lives (host-level `deploy` instance vs external
-  machine);
-- whether `deploy.yml` gates `nix-check` (`needs:`) or runs independently.
+**Open sub-decisions (all resolved in `doc/specs/0001-direct-deploy.md`):**
+- deploy tool: **decided — none.** Activation is the root systemd unit
+  `nixtache-apply.service` + polkit (V2). No deploy-rs / colmena / sudo / doas /
+  run0 — the escalation-tool zoo is gone entirely.
+- deploy-key scope: dedicated `nixos-deploy` user, least-privilege (SSH +
+  `nixtache-deploy` group for the pointer dir + polkit on `start` of the one
+  apply unit — no sudo).
+- where the deploy runner lives: the existing runner instances (no separate
+  bootstrap runner); `method = "ab-image"` (systemd-sysupdate) solves the
+  server self-update chicken-and-egg instead.
+- whether `deploy.yml` gates `nix-check`: yes — combined pipeline, `deploy`
+  job `needs: build` (variant b).
 
 See also `doc/migration-plan.md` "Контракт деплоя" for the original deploy
 contract stubs.
@@ -303,6 +308,13 @@ Follows the workspace conventions (`../AGENTS.md`): 2-space indent, kebab-case
 files, camelCase vars, `{ config, lib, pkgs, ... }:` signature, `mkIf`/
 `mkMerge`/`mkOption` with `defaultText`, `lib.literalMD`/`lib.literalExpression`
 for non-trivial defaults.
+
+**No changelog comments in code** (Nix, YAML workflows/actions, bash alike) —
+applies workspace-wide. Explanations of *why a line was added / removed /
+changed* (e.g. `# X removed upstream …`, `# renamed from Y`) go in the
+**commit message**, never inline; inline comments document non-obvious *logic*
+only, and a deletion stays a deletion (no tombstone comments). See workspace
+`AGENTS.md` → "Comments & commit messages".
 
 ### Every `mkOption` MUST have a `description` (enforced in CI)
 

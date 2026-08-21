@@ -30,8 +30,11 @@ reference workspace (`codemaster/nixos-configuration`) infra = `server`,
 | [`03-workflow.md`](03-workflow.md) | 3. Workflow `deploy.yml` (mode по ветке, без inputs) | 📝 |
 | [`04-consumer-wiring.md`](04-consumer-wiring.md) | 4. Consumer: deploy-keys + приёмный модуль (apply-юнит + polkit) | 📝 |
 | [`05-rollback.md`](05-rollback.md) | 7. Auto-rollback Tier 0/1 (probe+rollback внутри `nixtache-apply.service`) | 📝 |
-| [`06-ab-image.md`](06-ab-image.md) | 8. Server A/B image (systemd-sysupdate, chicken-and-egg) | 📝 |
+| [`06-ab-image.md`](06-ab-image.md) | 8. Server A/B image (systemd-sysupdate, chicken-and-egg) | 📝 nixtache ✅ / consumer |
 | [`07-cross-arch.md`](07-cross-arch.md) | 9. Cross-arch (binfmt на runner-host) | 📝 |
+| [`08-ab-provisioning.md`](08-ab-provisioning.md) | 10. A/B partition provisioning (init, migration, resize) | 📝 |
+| [`09-auto-update.md`](09-auto-update.md) | 11. Unified auto-update (flake ↔ ab-image, замена system.autoUpgrade) | 📝 spec |
+| [`TEST-SPECS-AUTO-UPDATE.md`](TEST-SPECS-AUTO-UPDATE.md) | 11-тесты. Auto-update conformance-тесты (AU-*) | 📝 spec |
 
 Tier-1 (probe `criticalUnits` + rollback) — внутри root-юнита
 `nixtache-apply.service` (см. [`05-rollback.md`](05-rollback.md) Tier-1),

@@ -95,6 +95,20 @@ with lib;
               exists.
             '';
           };
+          nixTrust = mkOption {
+            type = types.bool;
+            default = true;
+            description = ''
+              Whether to add the deploy user to `nix.settings.trusted-users`.
+              The `live` deploy path pushes the built closure with
+              `nix copy --to ssh://…`, which serves the store as this user, and
+              the target's nix-daemon only imports unsigned store paths for
+              trusted users — without trust the push is rejected. Trusted
+              status also lets the user pass arbitrary nix options to the
+              daemon, so set `false` only if you manage nix trust (or closure
+              signing) out-of-band.
+            '';
+          };
         };
       });
       default = null;

@@ -6,8 +6,11 @@ description: |
   `method=live` builds the toplevel, `nix copy --to` pushes the closure, drops a
   pointer file and triggers the target's root-owned `nixtache-apply.service`
   (probe + rollback live inside that unit). No deploy-rs, no sudo/doas/run0.
-  `method=ab-image` is a stub until Batch E. Offline / unmapped / keyless targets
-  are skipped with a warning (R1/R5) — they never fail the whole job.
+  `method=ab-image` (Batch E) builds the `sysupdate-package`, stages it into the
+  central A/B store, GPG-signs the manifest, and signals the target's
+  `systemd-sysupdate` (idle-gated on the runner host; immediate on remote
+  targets). Offline / unmapped / keyless targets are skipped with a warning
+  (R1/R5) — they never fail the whole job.
 
 runs:
   using: "composite"
@@ -20,6 +23,11 @@ runs:
         # they're absent on a non-nixtache runner.
         NIXTACHE_DEPLOY_TARGETS: ${{ env.NIXTACHE_DEPLOY_TARGETS }}
         SANDBOX_OK: ${{ env.SANDBOX_OK }}
+        # ab-image support (Batch E): only exported when the runner host has
+        # services.nixtache.runner.deploy.ab.enable = true. Empty when disabled —
+        # _abImage fails clearly in that case.
+        NIXTACHE_AB_STAGE: ${{ env.NIXTACHE_AB_STAGE }}
+        NIXTACHE_RUNNER_HOST: ${{ env.NIXTACHE_RUNNER_HOST }}
       run: |
         set -uo pipefail
         mkdir -p artifacts
@@ -92,11 +100,82 @@ runs:
           echo "✓ $cfg: activated $P"
         }
 
-        # _abImage cfg t mode — stub until Batch E (server chicken-and-egg).
+        # _abImage cfg t mode key — A/B image via systemd-sysupdate (Batch E).
+        # This is the SINGLE source of the ab-image deploy: the VM test
+        # (tests/ab-vm.nix) PARSES this very action.yml, extracts this `run`,
+        # sets the module-provided env (NIXTACHE_AB_STAGE, NIXTACHE_RUNNER_HOST,
+        # CREDENTIALS_DIRECTORY/sysupdate_signing_key, SANDBOX_FLAG) and runs it
+        # host→target — so CI and test can never drift. Do NOT move this logic
+        # out to a script (that would break the dynamic parsing).
         _abImage() {
-          local cfg="$1" mode="$2"
-          echo "::warning::$cfg: method=ab-image not implemented yet (Batch E) — skipping. Server self-update falls back to system.autoUpgrade in the meantime."
-          return 0
+          local cfg="$1" t="$2" mode="$3" key="$4"
+          local user host port
+          user=$(jq -r .sshUser <<<"$t"); host=$(jq -r .host <<<"$t"); port=$(jq -r .sshPort <<<"$t")
+          local stage_root="${NIXTACHE_AB_STAGE:?NIXTACHE_AB_STAGE unset (runner host has services.nixtache.runner.deploy.ab.enable=false)}"
+          local stage="$stage_root/$cfg"
+          mkdir -p "$stage"
+
+          echo "→ $cfg: ab-image (mode=$mode) — assigning runtime version…"
+          # Runtime versioning: the version is assigned HERE, at CI build time
+          # (after the config evaluated, before the image builds) — NOT
+          # hardcoded in the consumer config. Default: UTC calver
+          # YYYYMMDDHHMMSS (monotonic under strverscmp → sysupdate's "newest"
+          # resolution works; stateless — no counter to persist).
+          # NIXTACHE_AB_VERSION overrides it (tests, manual replays).
+          # The value enters the build via the repo's `image-version` file
+          # (consumers point services.nixtache.ab-image.imageVersionFile at
+          # it); `git add -f` because flakes read the git index. Everything
+          # downstream (os-release, UKI name, staged filenames, GPT label)
+          # then carries the SAME runtime version.
+          local version="${NIXTACHE_AB_VERSION:-$(date -u +%Y%m%d%H%M%S)}"
+          echo "→ $cfg: assigning runtime version $version (image-version file)"
+          echo "$version" > image-version
+          git add -f image-version 2>/dev/null || true
+
+          echo "→ $cfg: ab-image (mode=$mode) — building sysupdate-package…"
+          local img
+          img=$(nix build --no-link --print-out-paths ${SANDBOX_FLAG:-} .#nixosConfigurations.$cfg.config.system.build.sysupdate-package 2>&1)
+          img=$(grep -E '^/nix/store/' <<<"$img" | tail -n1)
+          if [ -z "$img" ] || [ ! -d "$img" ]; then
+            echo "::error::$cfg: sysupdate-package build failed (no store path, or the config has no system.build.sysupdate-package — wire the consumer A/B prep, see doc/specs/direct-deploy/06-ab-image.md)"; return 1
+          fi
+
+          echo "→ $cfg: staging image files into $stage (version $version)"
+          cp "$img"/* "$stage"/ || { echo "::error::$cfg: stage copy failed"; return 1; }
+          ( cd "$stage" && sha256sum *.raw *.efi > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS ) \
+            || { echo "::error::$cfg: SHA256SUMS regeneration failed"; return 1; }
+
+          # Sign the manifest if a signing key is provisioned. systemd-sysupdate
+          # verifies ONLY OpenPGP/GPG; the key is age-encrypted at rest (sops),
+          # exposed here via LoadCredential `sysupdate_signing_key`.
+          local sign_key="${CREDENTIALS_DIRECTORY:-/nonexistent}/sysupdate_signing_key"
+          if [ -f "$sign_key" ]; then
+            echo "→ $cfg: signing SHA256SUMS (OpenPGP/GPG)"
+            local GNUPGHOME; GNUPGHOME=$(mktemp -d); export GNUPGHOME
+            gpg --batch --import "$sign_key" 2>/dev/null
+            ( cd "$stage" && gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS ) \
+              || { rm -rf "$GNUPGHOME"; echo "::error::$cfg: GPG signing failed"; return 1; }
+            rm -rf "$GNUPGHOME"
+          else
+            echo "::warning::$cfg: no sysupdate_signing_key — SHA256SUMS left unsigned (targets MUST set Transfer.Verify=no)"
+          fi
+
+          if [ "$mode" = "dry-activate" ]; then
+            echo "✓ $cfg: staged (dry-activate, no apply)"; return 0
+          fi
+
+          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          if [ "$host" = "${NIXTACHE_RUNNER_HOST:-}" ]; then
+            echo "→ $cfg: local-self ab-image — signal nixtache-ab-apply (idle-gated sysupdate on runner host)"
+            ssh $ssh_opts "$user@$host" \
+              "mkdir -p /var/lib/nixtache && touch /var/lib/nixtache/ab-pending && systemctl start nixtache-ab-apply.service" \
+              || { echo "::error::$cfg: nixtache-ab-apply trigger failed"; return 1; }
+          else
+            echo "→ $cfg: remote ab-image — trigger target systemd-sysupdate"
+            ssh $ssh_opts "$user@$host" "systemctl start systemd-sysupdate.service" \
+              || echo "::warning::$cfg: remote systemd-sysupdate trigger failed (target will apply on its own timer)"
+          fi
+          echo "✓ $cfg: ab-image staged + apply signalled"
         }
 
         for cfg in $configs; do
@@ -122,7 +201,8 @@ runs:
           case "$method" in
             live)     _liveApply "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1 \
                         || { echo "::error::$cfg: live deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; } ;;
-            ab-image) _abImage "$cfg" "$mode" >>"artifacts/deploy_${cfg}.log" 2>&1 ;;
+            ab-image) _abImage "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1 \
+                        || { echo "::error::$cfg: ab-image deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; } ;;
             *) echo "::error::$cfg: unknown method '$method'"; exit 1 ;;
           esac
         done

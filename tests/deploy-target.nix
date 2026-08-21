@@ -43,6 +43,24 @@ let
       ];
     };
 
+  # Variant that ALSO imports the runner module — used by ab-image scenarios that
+  # touch `gating = true`: the gating unit reads `services.nixtache.runner.forgejoPort`
+  # (the runner-host self-update host runs BOTH modules). The runner module is
+  # left `enable = false` here; we only need its OPTION surface (forgejoPort) to
+  # exist so the gating script evaluates. forgejoUrl is set so the forgejoPort
+  # default (parsed from it) resolves to 3000.
+  mkHostAb = extra:
+    nixpkgs.lib.nixosSystem {
+      inherit system;
+      modules = [
+        self.nixosModules.deploy-target
+        self.nixosModules.runner
+        baseModule
+        { services.nixtache.runner.forgejoUrl = "http://localhost:3000"; }
+        extra
+      ];
+    };
+
   servicesOf = host: host.config.systemd.services;
   has = set: name: set ? ${name};
 
@@ -76,6 +94,23 @@ let
       deployUserInGroup =
         lib.elem "nixtache-deploy"
           (hostApply.config.users.users.nixos-deploy.extraGroups or [ ]);
+      deployUserTrusted =
+        lib.elem "nixos-deploy" hostApply.config.nix.settings.trusted-users;
+    };
+  };
+
+  # --- scenario A2: nixTrust=false → deploy user stays untrusted ------------
+  hostNoTrust = mkHost {
+    services.nixtache.deploy-target.deployUser = {
+      name = "nixos-deploy";
+      authorizedKey = "ssh-ed25519 AAAA...test";
+      nixTrust = false;
+    };
+  };
+  scenarioNoTrust = {
+    name = "deployUser.nixTrust=false → deploy user NOT in nix.settings.trusted-users";
+    checks = {
+      notTrusted = !(lib.elem "nixos-deploy" hostNoTrust.config.nix.settings.trusted-users);
     };
   };
 
@@ -141,12 +176,121 @@ let
     checks = { refused = !tryAutoOff.success; };
   };
 
+  # --- scenario E2: deployUser=null (timer-only target) → group + dir exist -
+  # The pointer dir's tmpfiles rule references the `nixtache-deploy` group; it
+  # must exist even without a deploy user (auto-update-only targets).
+  hostNoUser = mkHost {
+    services.nixtache.deploy-target.deployUser = null;
+  };
+  scenarioNoUser = {
+    name = "deployUser=null → nixtache-deploy group + pointer dir still provisioned";
+    checks = {
+      groupExists = hostNoUser.config.users.groups ? nixtache-deploy;
+      tmpfilesStateDir =
+        lib.any (r: lib.hasInfix "/var/lib/nixtache" r)
+          hostNoUser.config.systemd.tmpfiles.rules;
+      applyStillPresent = has (servicesOf hostNoUser) "nixtache-apply";
+    };
+  };
+
+  # --- ab-image scenarios (Batch E: services.nixtache.deploy-target.ab.*) ----
+  # ab.enable wires a polkit rule authorizing the deploy user to start the two
+  # ab-image units (systemd-sysupdate + nixtache-ab-apply). Requires the consumer
+  # to have enabled systemd.sysupdate + bootCounting (asserted).
+  hostAb = mkHost {
+    services.nixtache.deploy-target.ab.enable = true;
+    systemd.sysupdate.enable = true;
+    boot.loader.systemd-boot.bootCounting.enable = true;
+  };
+  polkitAbRule = hostAb.config.environment.etc."polkit-1/rules.d/49-nixtache-ab.rules".text or "";
+  scenarioAb = {
+    name = "ab.enable=true (+sysupdate+bootCounting) → ab polkit rule authorizes sysupdate + nixtache-ab-apply (start only)";
+    checks = {
+      polkitAbPresent = polkitAbRule != "";
+      polkitAbSysupdate = lib.hasInfix "\"systemd-sysupdate.service\"" polkitAbRule;
+      polkitAbApply = lib.hasInfix "\"nixtache-ab-apply.service\"" polkitAbRule;
+      polkitAbStartOnly = lib.hasInfix "\"start\"" polkitAbRule;
+      # gating off (default) → no nixtache-ab-apply path/service provisioned
+      noAbPath = !(hostAb.config.systemd.paths ? "nixtache-ab-apply");
+      noAbService = !(hostAb.config.systemd.services ? "nixtache-ab-apply");
+    };
+  };
+
+  # ab.gating=true (runner-host self-update) → idle-gated nixtache-ab-apply
+  # path + service wired: watches ab-pending, polls Forgejo runner idle, then
+  # triggers systemd-sysupdate.
+  hostAbGating = mkHostAb {
+    services.nixtache.deploy-target.deployUser = {
+      name = "nixos-deploy";
+      authorizedKey = "ssh-ed25519 AAAA...test";
+    };
+    services.nixtache.deploy-target.ab = {
+      enable = true;
+      gating = true;
+      forgejoApiTokenFile = /dev/null;
+      idleWaitTimeout = 600;
+    };
+    systemd.sysupdate.enable = true;
+    boot.loader.systemd-boot.bootCounting.enable = true;
+  };
+  svcAbGating = hostAbGating.config.systemd;
+  abApplyScript = svcAbGating.services."nixtache-ab-apply".script;
+  scenarioAbGating = {
+    name = "ab.gating=true → nixtache-ab-apply path+service wired, idle-poll + forgejoPort + sysupdate trigger in script";
+    checks = {
+      hasAbPath = svcAbGating.paths ? "nixtache-ab-apply";
+      abPathWatches = svcAbGating.paths."nixtache-ab-apply".pathConfig.PathExists or null == "/var/lib/nixtache/ab-pending";
+      hasAbService = svcAbGating.services ? "nixtache-ab-apply";
+      abServiceOneshot = svcAbGating.services."nixtache-ab-apply".serviceConfig.Type == "oneshot";
+      # forgejoPort (3000, parsed from the runner module's forgejoUrl) reaches the script
+      scriptHasForgejoPort = lib.hasInfix ":3000/api/v1/actions/runners" abApplyScript;
+      # idle-poll loop + sysupdate trigger present
+      scriptPollsBusy = lib.hasInfix "busy" abApplyScript;
+      scriptTriggersSysupdate = lib.hasInfix "systemctl start systemd-sysupdate.service" abApplyScript;
+      # idleWaitTimeout propagates into the script (600s set above)
+      scriptHasTimeout = lib.hasInfix "600" abApplyScript;
+      # Forgejo API token mounted via LoadCredential
+      scriptLoadsToken = lib.hasInfix "forgejo-api" (lib.concatStringsSep ","
+        (svcAbGating.services."nixtache-ab-apply".serviceConfig.LoadCredential or [ ]));
+    };
+  };
+
+  # ab.enable without systemd.sysupdate → eval refuses.
+  tryAbNoSysupdate = builtins.tryEval
+    (mkHost { services.nixtache.deploy-target.ab.enable = true; })
+      .config.system.build.toplevel.outPath;
+  scenarioAbAssertNoSysupdate = {
+    name = "ab.enable without systemd.sysupdate.enable → eval refuses (assertion)";
+    checks = { refused = !tryAbNoSysupdate.success; };
+  };
+
+  # ab.gating=true without forgejoApiTokenFile → eval refuses.
+  tryAbGatingNoToken = builtins.tryEval
+    (mkHostAb {
+      services.nixtache.deploy-target.ab = {
+        enable = true;
+        gating = true;
+      };
+      systemd.sysupdate.enable = true;
+      boot.loader.systemd-boot.bootCounting.enable = true;
+    }).config.system.build.toplevel.outPath;
+  scenarioAbGatingAssertNoToken = {
+    name = "ab.gating=true without forgejoApiTokenFile → eval refuses (assertion)";
+    checks = { refused = !tryAbGatingNoToken.success; };
+  };
+
   scenarios = [
     scenarioApply
+    scenarioNoTrust
     scenarioCritical
     scenarioNoCritical
     scenarioDefaultTimeout
     scenarioAutoOffAssert
+    scenarioNoUser
+    scenarioAb
+    scenarioAbGating
+    scenarioAbAssertNoSysupdate
+    scenarioAbGatingAssertNoToken
   ];
 
   failed = builtins.concatMap

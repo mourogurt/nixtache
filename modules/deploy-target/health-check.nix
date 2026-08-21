@@ -10,8 +10,8 @@
 #
 # `RequiredBy` (not `WantedBy`) makes the gating strong: boot-complete cannot
 # reach "active" while this service is failed. Without bootCounting, Tier-0
-# merely withholds blessing; the live Tier-1 (deploy-rs, Batch C) or a manual
-# `nixos-rebuild --rollback` is then the safety net.
+# merely withholds blessing; the live Tier-1 (`nixtache-apply.service`, Batch B)
+# or a manual `nixos-rebuild --rollback` is then the safety net.
 #
 # See doc/specs/direct-deploy/05-rollback.md Tier-0.
 {

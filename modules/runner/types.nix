@@ -123,10 +123,11 @@ in
         default = "nixos-deploy";
         description = ''
           SSH transport user for deploy. MUST match `deployUser.name` of the
-          receiving module (`nixosModules.deploy-target`) on that target, since
-          the deploy user is who the action authenticates as and (for
-          `transport = "sudo"`) who activates via NOPASSWD sudo. Use `root` if
-          the target is deployed via root SSH without sudo.
+          receiving module (`nixosModules.deploy-target`) on that target: the
+          action SSHes in as this user to push the closure (`nix copy --to`),
+          write the apply pointer, and trigger `nixtache-apply.service` via
+          polkit (no sudo/doas/run0 — V2). Use `root` only if the target is
+          deployed via root SSH without the receiving module.
         '';
       };
 
@@ -165,11 +166,11 @@ in
         default = null;
         description = ''
           Path to the deploy private key for this target (the `host → creds` leg
-          of the map). Required for BOTH methods — `deploy-rs` authenticates the
-          SSH activation, `ab-image` SSH-triggers sysupdate. `null` = no
-          credential, the action skips this target (optionality by construction).
-          Supplied by the consumer (sops/agenix/vault/systemd — any backend
-          yielding a path).
+          of the map). Required for BOTH methods — `live` SSH-authenticates the
+          `nix copy` + apply-unit trigger, `ab-image` SSH-triggers sysupdate.
+          `null` = no credential, the action skips this target (optionality by
+          construction). Supplied by the consumer (sops/agenix/vault/systemd —
+          any backend yielding a path).
         '';
       };
 
@@ -203,8 +204,8 @@ in
         type = types.listOf types.str;
         default = [ ];
         description = ''
-          Extra flags appended to the `nixos-rebuild` / deploy-rs invocation for
-          this target (e.g. `[ "--no-substitute-on-target" ]`).
+          Extra flags appended to the deploy invocation for this target
+          (e.g. `[ "--no-substitute-on-target" ]` for `nix copy`).
         '';
       };
 

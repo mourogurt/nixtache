@@ -36,6 +36,7 @@ in
     ./known-hosts.nix
     ./instances.nix
     ./deploy.nix
+    ./ab.nix
   ];
 
   options.services.nixtache.runner = {
@@ -50,6 +51,27 @@ in
         (shared by all `instances.*`). Typically `http://localhost:<port>`
         when Forgejo runs on the same host.
       '';
+    };
+
+    # Numeric Forgejo port, derived from `forgejoUrl` by default. Consumed
+    # cross-module by `services.nixtache.deploy-target.ab` (the runner-host's
+    # ab-image gating unit polls `/api/v1/actions/runners` here to wait for
+    # runner idle before rebooting). S2 (doc/specs/direct-deploy/06-ab-image.md).
+    forgejoPort = mkOption {
+      type = types.port;
+      description = ''
+        Numeric Forgejo port, used by the ab-image gating unit
+        (`services.nixtache.deploy-target.ab`) to poll runner idle state over
+        the local API. Defaults to the port embedded in `forgejoUrl`
+        (443 for `https://` without an explicit port, 80 otherwise).
+      '';
+      default =
+        let
+          m = builtins.match "[a-zA-Z]+://[^/]*:([0-9]+).*" cfg.forgejoUrl;
+          isHttps = builtins.match "https://.*" cfg.forgejoUrl != null;
+        in
+        if m != null then lib.toInt (builtins.head m) else if isHttps then 443 else 80;
+      defaultText = lib.literalMD "parsed from `forgejoUrl` (explicit port suffix; 443 for `https://`, else 80)";
     };
 
     # --- Runner identity & behaviour ---------------------------------------

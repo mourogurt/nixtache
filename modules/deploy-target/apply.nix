@@ -48,8 +48,10 @@ in
     # apply unit. Force it on (the whole transport depends on it).
     security.polkit.enable = true;
 
-    # Pointer dir: writable by the deploy user via the `nixtache-deploy` group
-    # (created in user.nix). The unit reads + removes the pointer file.
+    # Pointer dir: writable by the deploy user via the `nixtache-deploy` group.
+    # The group lives here (not user.nix): the dir/unit exist whenever the
+    # target is enabled, even with deployUser = null (timer-only targets).
+    users.groups.nixtache-deploy = { };
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0770 root nixtache-deploy -"
     ];

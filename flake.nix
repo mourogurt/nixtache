@@ -22,6 +22,8 @@
       nixosModules = {
         runner = import ./modules/runner;
         deploy-target = import ./modules/deploy-target;
+        ab-image = import ./modules/ab-image;
+        overlay-nix = import ./modules/overlay-nix;
         secrets = import ./modules/secrets.nix;
         default = self.nixosModules.runner;
       };
@@ -32,6 +34,18 @@
       # README "Documenting your flake" section.
       lib.mkDocs = import ./lib/mkDocs.nix;
 
+      # --- Dogfood A/B test configs (used by tests/ab-deploy.nix so the action's
+      # `nix build .#nixosConfigurations.abtest-remote…` resolves inside nixtache
+      # itself — no separate consumer flake). NOT for real deployment.
+      nixosConfigurations.abtest-remote =
+        (import ./tests/ab-fixture.nix { inherit nixpkgs self; system = "x86_64-linux"; }).mkAppliance {
+          version = "2";          # the version the action deploys (the update)
+          signVerify = true;      # target verifies with the test pubring
+          dataPartition = true;   # T6: data mount must survive the slot swap
+          stagingPath = "http://deployer/ab-stage/abtest-remote"; # deployer's nginx
+          deployKeyPub = (import ./tests/ab-fixture.nix { inherit nixpkgs self; system = "x86_64-linux"; }).deployKeyPub;
+        };
+
       # --- Tests -----------------------------------------------------------
       # Pure-evaluation tests. Build one with:
       #   nix build .#checks.x86_64-linux.<suite>
@@ -39,7 +53,66 @@
       checks = forAllSystems (system: {
         runner = import ./tests/runner.nix { inherit nixpkgs self system; };
         deploy-target = import ./tests/deploy-target.nix { inherit nixpkgs self system; };
+        # ab-image module pure-eval: fixed vs max-disk sizing + Verify (fast, no KVM).
+        ab-image = import ./tests/ab-image.nix { inherit nixpkgs self system; };
+        # ab-deploy server-side (runNixOSTest: real runner module nginx + staging
+        # + signing) + action.yml parser. Needs KVM.
+        ab-deploy = import ./tests/ab-deploy.nix { inherit nixpkgs self system; };
+        # ab-deploy-e2e: full combat scenario via runNixOSTest (deployer+target VMs,
+        # action.yml parsed → sysupdate writes slot B). Heavy — needs KVM.
+        ab-deploy-e2e = import ./tests/ab-deploy-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-anywhere-vm: full OTA lifecycle in one test — nixos-anywhere
+        # install (kexec → disko A/B → UKI boot from the installed disk) then
+        # a signed v2 sysupdate onto slot B. Heaviest suite; needs KVM.
+        ab-anywhere-vm = import ./tests/ab-anywhere-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
+        # A/B image VM integration tests (Batch E). Heavy — builds real A/B disk
+        # images + runs QEMU. `requiredSystemFeatures = ["kvm"]` (set inside)
+        # makes nix skip it on non-KVM hosts (e.g. the nixtache CI runner in a
+        # nspawn container), so it never breaks routine `nix flake check`; run it
+        # explicitly on a KVM box: `nix build .#checks.x86_64-linux.ab-vm`.
+        ab-vm = import ./tests/ab-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+
+        # ── Conformance / contract tests for spec 06 + 08.
+        # See doc/specs/direct-deploy/TEST-SPECS.md. Pure-eval suites are fast
+        # (no KVM); the `*-vm` suites are runNixOSTest/pexpect (heavy — KVM
+        # `requiredSystemFeatures` set inside → skipped on non-KVM hosts, so a
+        # routine `nix flake check` stays green).
+        #   ab-existing  : pure-eval against ALREADY-IMPLEMENTED code → green now.
+        #   ab-contract  : pure-eval CONTRACTS for the new modules → intentionally
+        #                   red until ab-provision / overlay-nix / store.mode land.
+        ab-existing = import ./tests/ab-existing.nix { inherit nixpkgs self system; };
+        ab-contract = import ./tests/ab-contract.nix { inherit nixpkgs self system; };
+        # QEMU (KVM) behavioral contracts for the new modules — red until impl:
+        ab-provision-vm = import ./tests/ab-provision-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        overlay-nix-vm = import ./tests/overlay-nix-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # overlay-nix-install-vm: O2/O3 contract — fetch hello from a binary cache
+        # (deployer node running nix-serve-ng) through the local-overlay store →
+        # runs + lands in the upper layer. Hermetic (no internet). Red until impl.
+        overlay-nix-install-vm = import ./tests/overlay-nix-install-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # overlay-nix-ab-swap-vm: O9 — overlay upper survives an A/B slot swap:
+        # boot v1 appliance → install vim into upper → sysupdate to v2 → reboot
+        # into v2 → vim still works + v2 lower visible. 2-boot, heavy. KVM.
+        overlay-nix-ab-swap-vm = import ./tests/overlay-nix-ab-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-runner-compat-vm: R1/R2 (TEST-SPECS §4) — runner clone/build on an
+        # appliance-style container (no system nix-daemon, §11.3) + the
+        # non-appliance mode. KVM.
+        ab-runner-compat-vm = import ./tests/ab-runner-compat-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-compression-vm targets EXISTING ab-image compression → green on a KVM box:
+        ab-compression-vm = import ./tests/ab-compression-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-staging-vm: REAL run of the retain-GC (§11.1) — pre-stage 3 versions +
+        # signed manifest → systemctl start nixtache-ab-gc → asserts v1 deleted,
+        # v2/v3 kept, SHA256SUMS regenerated, .gpg re-signed + verifies. Green on KVM.
+        ab-staging-vm = import ./tests/ab-staging-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-deploy-self-vm: self-deploy + gating (B1–B4, TEST-SPECS §1а.3–§1а.6) —
+        # local staging, direct sysupdate + idle/busy/forced nixtache-ab-apply
+        # against a mocked Forgejo API. KVM.
+        ab-deploy-self-vm = import ./tests/ab-deploy-self-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-deploy-verify-vm: signature verification (C1–C4, TEST-SPECS §1а.7) —
+        # Transfer.Verify=yes target accepts the correctly-signed image (full
+        # action.yml run) and rejects wrong-key/tampered/unsigned staging. KVM.
+        ab-deploy-verify-vm = import ./tests/ab-deploy-verify-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
       });
 
       # --- This flake's own option docs -----------------------------------

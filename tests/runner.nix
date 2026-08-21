@@ -96,6 +96,9 @@ self.nixosModules.runner
       giteaRequires = lib.elem "nix-daemon-custom.service" (svcSrv."gitea-runner-default".requires or [ ]);
       giteaAfter = lib.elem "nix-daemon-custom.service" (svcSrv."gitea-runner-default".after or [ ]);
       nixServeBindPaths = svcSrv."nix-serve".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+      # clone on a nix-enabled container: storage seeds through the system daemon
+      storageRequiresSystemDaemon = lib.elem "nix-daemon.service" (svcSrv."nix-daemon-storage".requires or [ ]);
+      storageDaemonEnv = lib.elem "NIX_REMOTE=daemon" (svcSrv."nix-daemon-storage".serviceConfig.Environment or [ ]);
       socketPath = (socketsOf hostSrv)."nix-daemon-custom".listenStreams == [ "/srv/nix/var/nix/daemon-socket/socket" ];
       srvMountPoint = (bindMountsOf hostSrv)."srv-nix".mountPoint == "/srv";
       # per-instance token mount present, SSH mounts / LoadCredential absent
@@ -403,6 +406,104 @@ self.nixosModules.runner
     };
   };
 
+  # --- ab-image staging scenarios (Batch E: services.nixtache.runner.deploy.ab)
+  # ab.enable=true wires the central staging store: bind-mount into the
+  # container, nginx location on the cache vhost, runner-host/staging envs, the
+  # retain-GC timer+service, gnupg in the container, and (when a signing key is
+  # supplied) a LoadCredential on every gitea-runner service.
+  hostAb = mkHost "/srv" {
+    services.nixtache.runner.deploy.ab = {
+      enable = true;
+      runnerHost = "bincache.test";
+      signingKeyFile = dummySecret;
+    };
+  };
+  envsAb = (instancesOf hostAb)."default".settings.runner.envs;
+  scenarioAbStage = {
+    name = "deploy.ab.enable=true → staging bind-mount + nginx autoindex location + envs + gc + gnupg";
+    checks = {
+      # central staging dir bind-mounted into the container (rw)
+      stageMount = (bindMountsOf hostAb)."ab-stage".hostPath == "/var/lib/nixtache/ab-stage";
+      stageMountPoint = (bindMountsOf hostAb)."ab-stage".mountPoint == "/var/lib/nixtache/ab-stage";
+      stageMountRW = (bindMountsOf hostAb)."ab-stage".isReadOnly == false;
+      # staging dir created on the host via tmpfiles
+      stageTmpfiles = lib.any (r: lib.hasInfix "/var/lib/nixtache/ab-stage" r) hostAb.config.systemd.tmpfiles.rules;
+      # nginx serves the staging store on the cache vhost with autoindex on
+      nginxLocation = hostAb.config.services.nginx.virtualHosts."bincache.test".locations ? "/ab-stage/";
+      nginxAutoindex = lib.hasInfix "autoindex on"
+        (hostAb.config.services.nginx.virtualHosts."bincache.test".locations."/ab-stage/".extraConfig or "");
+      # runner-host identity + staging destination exported to every job
+      envRunnerHost = envsAb.NIXTACHE_RUNNER_HOST == "bincache.test";
+      envAbStage = envsAb.NIXTACHE_AB_STAGE == "/var/lib/nixtache/ab-stage";
+      # retain-GC timer + service present on the host
+      hasAbGcService = hostAb.config.systemd.services ? "nixtache-ab-gc";
+      hasAbGcTimer = hostAb.config.systemd.timers ? "nixtache-ab-gc";
+      # gnupg available in the container (the action signs SHA256SUMS with it)
+      gnupgInContainer = lib.any (p: lib.hasInfix "gnupg" (p.name or ""))
+        (containerCfg hostAb).environment.systemPackages;
+      # GPG signing key exposed via LoadCredential on the runner service
+      hasSigningCred = lib.hasPrefix "sysupdate_signing_key:"
+        (lib.concatStringsSep "," (loadCred (servicesOf hostAb)));
+    };
+  };
+
+  # forgejoPort default parses the port out of forgejoUrl (S2). baseModule uses
+  # "http://localhost:3000" → 3000.
+  scenarioForgejoPort = {
+    name = "runner.forgejoPort default = port parsed from forgejoUrl (3000 here, S2)";
+    checks = {
+      forgejoPort3000 = hostAb.config.services.nixtache.runner.forgejoPort == 3000;
+    };
+  };
+
+  # ab.enable=true with a custom stagingPath whose basename matches the default
+  # nginx.location basename → fine. Mismatched basename → eval refuses.
+  hostAbMismatch = mkHost "/srv" {
+    services.nixtache.runner.deploy.ab = {
+      enable = true;
+      runnerHost = "bincache.test";
+      stagingPath = "/var/lib/nixtache/elsewhere"; # basename "elsewhere" ≠ "ab-stage"
+    };
+  };
+  tryAbMismatch = builtins.tryEval hostAbMismatch.config.system.build.toplevel.outPath;
+  scenarioAbBasenameAssert = {
+    name = "deploy.ab: stagingPath basename ≠ nginx.location basename → eval refuses";
+    checks = { refused = !tryAbMismatch.success; };
+  };
+
+  # --- scenario J: clone on an appliance-style container (nix.enable=false) --
+  # On an A/B appliance there is no system nix-daemon, so nix-daemon-storage
+  # must not require it and must clone from the local store directly (no
+  # NIX_REMOTE=daemon), while nix-daemon-custom runs standalone (spec §11.3).
+  hostApplianceClone = mkHost "/srv" {
+    services.nixtache.runner.enableSandbox = false;
+    containers.runner.config = {
+      nix.enable = false;
+      # nixpkgs asserts nix.gc.automatic → nix.enable, so the GC timer goes
+      # with the daemon.
+      nix.gc.automatic = false;
+    };
+  };
+  svcAppliance = servicesOf hostApplianceClone;
+  scenarioApplianceClone = {
+    name = "clone on appliance container (nix.enable=false): storage standalone, custom daemon standalone (§11.3)";
+    checks = {
+      hasStorage = has svcAppliance "nix-daemon-storage";
+      storageNoRequires = (svcAppliance."nix-daemon-storage".requires or [ ]) == [ ];
+      storageNoDaemonEnv = !(lib.elem "NIX_REMOTE=daemon"
+        (svcAppliance."nix-daemon-storage".serviceConfig.Environment or [ ]));
+      noSystemDaemon = !(has svcAppliance "nix-daemon");
+      hasCustomDaemon = has svcAppliance "nix-daemon-custom";
+      customDaemonStandalone =
+        (svcAppliance."nix-daemon-custom".requires or [ ]) == [ "nix-daemon-storage.service" ];
+      # No nixbld build users exist without the system nix module — the
+      # daemon builds as root via NIX_CONF.
+      customDaemonBuildsAsRoot =
+        lib.hasInfix "build-users-group ="
+          (svcAppliance."nix-daemon-custom".environment.NIX_CONF or "");
+    };
+  };
+
   scenarios = [
     scenarioSrv
     scenarioRoot
@@ -419,6 +520,10 @@ self.nixosModules.runner
     scenarioAbImage
     scenarioLiveDefault
     scenarioExtraEnvsAggregated
+    scenarioAbStage
+    scenarioForgejoPort
+    scenarioAbBasenameAssert
+    scenarioApplianceClone
   ];
 
   failed = builtins.concatMap

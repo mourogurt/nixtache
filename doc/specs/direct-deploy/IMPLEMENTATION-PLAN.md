@@ -105,46 +105,69 @@ combined с nix-check (`build.uses: nix-check.yml` + `deploy.uses: deploy.yml` +
 
 ---
 
-## Батч D — consumer wiring (nixos-configuration) — end-to-end
+## Батч D — consumer wiring (nixos-configuration) — end-to-end  ✅ РЕАЛИЗОВАН
 
 **Скоуп:** реальный integration. sops deploy-ключи, наполнение карты из
-`common_secrets.network`, импорт приёмного модуля на desktop/laptop, тонкая
-обёртка workflow. **Первый end-to-end smoke.**
+`common_secrets.network`, импорт приёмного модуля на desktop/laptop, combined
+pipeline (вариант b — `deploy` job в `nix-check.yml`, `needs: check-flake`).
+**Никакого deploy-rs** (V2): карта + приёмный модуль + action `deploy-target`
+уже делают всё через `nix copy` + root-юнит + polkit. **End-to-end smoke готов.**
 
-| Файл (nixos-configuration) | Действие |
-|---|---|
-| `server/services/deploy-keys.nix` | **НОВОЕ**: sops `deploy-key-{desktop,laptop}`, наполнение `services.nixtache.runner.deploy.targets` (адреса из `common_secrets.network.amneziawg.nodes.*`) |
-| `secrets/deploy-keys/{desktop,laptop}.ed25519` | **НОВОЕ** (age-encrypted) |
-| `common/deploy-target.nix` | **НОВОЕ**: `imports = [ nixtache.nixosModules.deploy-target ]` + universal `criticalUnits` (consumer's choice — в reference workspace `wireguard-awg0.service`) + `deployUser` |
-| `desktop/...`, `laptop/...` | правка: import `common/deploy-target.nix`, per-target overrides |
-| `flake.nix` (nixos-configuration) | правка: `deploy = nixtache.lib.mkDeployNodes { deployLib = deploy-rs.lib.${system}; inherit (self) nixosConfigurations; targets = <map>; };` + `inputs.deploy-rs` |
-| `server/services/forgejo-runner.nix` | правка: `hostPackages += [ deploy-rs ]` |
-| `.forgejo/workflows/deploy.yml` | **НОВОЕ**: thin wrapper `jobs.deploy.uses: nixops/nixtache/.forgejo/workflows/deploy.yml@main` |
+| Файл (nixos-configuration) | Действие | Статус |
+|---|---|---|
+| `server/services/deploy-keys.nix` | **НОВОЕ**: sops `deploy-key-{desktop,laptop}` (binary, `secrets/deploy-key-*.enc`) + наполнение `services.nixtache.runner.deploy.targets` (адреса из `common_secrets.network.amneziawg.nodes.*`) | ✅ |
+| `secrets/deploy-key-{desktop,laptop}.enc` | **НОВОЕ** (age-encrypted via `.sops.yaml`) | ✅ |
+| `common/deploy-target.nix` | **НОВОЕ**: `imports = [ nixtache.nixosModules.deploy-target ]` + universal `criticalUnits = [ "wireguard-awg0.service" ]` + `healthCheckTimeout = 300` | ✅ |
+| `desktop/services/deploy-target.nix`, `laptop/services/deploy-target.nix` | **НОВОЕ**: per-host `deployUser` (своя keypair на машину, реальный pubkey) + `autoProvision = true` | ✅ |
+| `.forgejo/workflows/nix-check.yml` | правка: **combined pipeline (вариант b)** — добавлен `jobs.deploy` (`needs: check-flake`, `uses: nixops/nixtache/.forgejo/workflows/deploy.yml@main`) вместо отдельного `deploy.yml` | ✅ |
+| `{desktop,laptop,server}/hardware.nix` | `boot.loader.systemd-boot.bootCounting.enable = true` (consumer-side N1, подготовлено для Tier-0/ab-image) | ✅ |
+
+> **deploy-rs НЕ используется:** в V2 его нет (ни `inputs.deploy-rs`, ни
+> `hostPackages += [ deploy-rs ]`, ни `nixtache.lib.mkDeployNodes`). Активация —
+> через root-юнит `nixtache-apply.service` + polkit на цели. См. `REVIEW-ISSUES.md`
+> §«V2-пивот».
 
 **Verify (end-to-end smoke):**
-1. PR → `dry-activate` автофайрится → desktop/laptop показывают diff без мутации.
-2. merge в `main` → `switch` автофайрится → desktop/laptop активируются.
-3. (rollback smoke) сломать `criticalUnits` в PR → Tier-1 probe ловит → revert.
+1. PR → `dry-activate` автофайрится (deploy job `needs: check-flake`) → desktop/laptop показывают diff без мутации.
+2. merge в `main` → `switch` автофайрится → desktop/laptop активируются (deploy-юзер провижен, ключи в sops, polkit на старте apply-юнита).
+3. (rollback smoke) сломать `criticalUnits` в PR → Tier-1 probe ловит внутри `nixtache-apply.service` → revert.
 
-**Deps:** A + B + C.
+**Deps:** A + B + C. ✅
 
 ---
 
-## Батч E — ab-image (server chicken-and-egg)
+## Батч E — ab-image (server chicken-and-egg) — nixtache ✅ / consumer 📝
 
 **Скоуп:** `method = "ab-image"` для server. CI stage'ит образ → host
 `systemd-sysupdate` пишет неактивный слот → idle-gated reboot. Самый объёмный.
 
-| Группа | Что |
-|---|---|
-| **nixtache runner-модуль** | `services.nixtache.runner.deploy.ab.*` (`enable`, `stagingPath`, `runnerHost`, `nginx.location`, `retain`); `forgejoPort` опция (S2); nginx vhost reuse `cache.domain`; `nixtache-ab-gc.{timer,service}` |
-| **nixtache приёмный модуль** | `services.nixtache.deploy-target.ab.*` (`enable`, `gating`, `idleWaitTimeout`, `forceAfterTimeout`, `forgejoApiTokenFile`); gating-unit `nixtache-ab-apply.{path,service}` с `pathConfig.PathExists` (S3, исправлено) |
-| **nixtache action** | `_abImage` ветка: build sysupdate-package → central-stage → apply по топологии (local-self vs remote) |
-| **consumer (server)** | repart-слоты (`imports += [ "${nixpkgs}/nixos/modules/image/repart.nix" ]`, M2) + UKI + `systemd.sysupdate` transfers + boot-counting + `system.image.{id,version}` + подпись + Forgejo API token |
-| **тесты** | `tests/runner.nix`: `ab.enable`→staging/nginx wired; `tests/deploy-target.nix`: `ab.gating`→gating-unit, assert sysupdate+bootCounting |
+**Статус:** nixtache-сторона (модули + action + тесты) — ✅ реализована, `nix flake check`
+зелёный, все ab-сценарии проходят. consumer-сторона (`nixos-configuration`) — 📝
+написана, gated (`enable`/`buildAb`/`abReady` = false по умолчанию, inert), требует:
+bump nixtache → `nixos-rebuild build` верификации → переустановки server с A/B-образа
+(`nixos-anywhere`, деструктивно) → flip флагов → smoke. См. runbook в заголовке
+`nixos-configuration/server/ab-image.nix`.
 
-**Open decisions (на checkpoint E):** подпись образов (gpg/cosign/sigstore),
-retain-политика GC, idle-wait таймауты.
+**Решения (checkpoint E, применены):**
+- **Подпись:** GPG/OpenPGP (systemd-sysupdate верифит **только** GPG — захардкожено в
+  апстриме, age/sops как подпись невозможны). Приватный ключ — age-encrypted sops-секрет
+  (`ab.signingKeyFile`), CI подписывает `SHA256SUMS` → `SHA256SUMS.gpg` временным
+  GNUPGHOME. Публичный ключ — `/etc/systemd/import-pubring.pgp` на таргете,
+  `Transfer.Verify = yes`.
+- **retain = 5**, **idleWaitTimeout = 1800**, **forceAfterTimeout = false** (дефолты).
+
+| Группа | Что | Статус |
+|---|---|---|
+| **nixtache runner-модуль** | `modules/runner/ab.nix`: `services.nixtache.runner.deploy.ab.*` (`enable`, `stagingPath`, `runnerHost`, `nginx.location`, `retain`, `signingKeyFile`); `forgejoPort` опция (S2, default из `forgejoUrl`); staging bind-mount + nginx location (`autoindex on`) на cache-vhost + `nixtache-ab-gc.{timer,service}` + LoadCredential `sysupdate_signing_key` + gnupg в контейнере + env `NIXTACHE_RUNNER_HOST`/`NIXTACHE_AB_STAGE` | ✅ |
+| **nixtache приёмный модуль** | `modules/deploy-target/ab.nix`: `services.nixtache.deploy-target.ab.*` (`enable`, `gating`, `idleWaitTimeout`, `forceAfterTimeout`, `forgejoApiTokenFile`); assert ab.enable→sysupdate+bootCounting, ab.gating→token; polkit на `start systemd-sysupdate`/`nixtache-ab-apply`; gating-unit `nixtache-ab-apply.{path,service}` (`pathConfig.PathExists`, S3) — idle-poll Forgejo API → sysupdate | ✅ |
+| **nixtache action** | `_abImage` ветка: build `sysupdate-package` → central-stage (regen SHA256SUMS) → GPG-sign → apply по топологии (local-self: `touch ab-pending`+`start nixtache-ab-apply`; remote: `start systemd-sysupdate`) | ✅ |
+| **тесты** | `tests/runner.nix`: +3 (ab staging/nginx/env/gc/gnupg/signing, forgejoPort, basename-assert); `tests/deploy-target.nix`: +4 (ab polkit, ab.gating path+service+script, assert no-sysupdate, assert gating-no-token) | ✅ |
+| **consumer (server)** | `server/services/deploy-ab.nix` (runner-host staging + sops signing key + forgejo token, gated `enable`); `server/ab-image.nix` (repart A/B слоты + UKI + `systemd.sysupdate` transfers + `sysupdate-package` + `system.image.{id,version}` + pubring + deploy-target.ab + map entry, gated `buildAb`/`abReady`) | 📝 написан, gated, требует верификации + reinstall |
+
+**Verify:** smoke на disposable server (или VM с A/B-слотами) — после bump nixtache +
+reinstall. nixtache-тесты зелёные сейчас.
+
+**Deps:** D (нужна рабочая CI-deploy инфраструктура) ✅.
 
 **Verify:** smoke на disposable server (или VM с A/B-слотами).
 
@@ -154,19 +177,19 @@ retain-политика GC, idle-wait таймауты.
 
 ## Батч F — cross-arch
 
-**Скоуп:** non-`x86_64` цели. binfmt-эмуляция на runner-host (приоритет) + опц.
-`deploy.nodes.<name>.remoteBuild = true` для native-сборки на цели. `--build-host`
-убран (S4).
+**Скоуп:** non-`x86_64` цели. binfmt-эмуляция на runner-host (единственный
+механизм — V2 убрал `buildHost`/`--build-host`/`remoteBuild` и deploy-rs).
+`nix build` (им пользуются и `_liveApply` для toplevel, и `_abImage` для
+sysupdate-package) собирает cross-arch деривации в sandbox через QEMU-user.
 
 | Файл | Действие |
 |---|---|
-| consumer runner-host | `boot.binfmt.emulatedSystems = [ "aarch64-linux" ]` |
-| `lib/mkDeployNodes.nix` | правка: проброс опц. `remoteBuild` per-node |
-| `tests/runner.nix` | цель `system="aarch64-linux"`; assert `buildHost` **отсутствует** в JSON |
+| consumer runner-host | `boot.binfmt.emulatedSystems = [ "aarch64-linux" ]` (в reference workspace уже на server) |
+| `tests/runner.nix` | цель `system="aarch64-linux"`; assert `buildHost`/`transport` **отсутствуют** в JSON |
 
 **Verify:** smoke на aarch64-таргете (напр. RPi).
 
-**Deps:** C (mkDeployNodes). Реально — отложить до появления aarch64-цели.
+**Deps:** нет (V2 — deploy-rs/mkDeployNodes убраны, cross-arch целиком через binfmt). Реально — отложить до появления aarch64-цели.
 
 ---
 
@@ -176,7 +199,7 @@ retain-политика GC, idle-wait таймауты.
 |---|---|---|---|---|
 | A | 1 (`deploy.nix`) | 3 (`types`, `instances`, `default`, `tests`) | nixtache | нет (только tests) |
 | B | 4 (`deploy-target/*`) | 2 (`flake`, `tests`) | nixtache | нет (только tests) |
-| C | 3 (`mkDeployNodes`, action, workflow) | 1 (`flake`) | nixtache | нет (нужен consumer) |
+| C | 2 (action, workflow) | 1 (`flake`) | nixtache | нет (нужен consumer) |
 | D | 4 (consumer) | 3 | nixos-configuration | **да** (desktop/laptop) |
 | E | ~3 + consumer prep | ~5 | оба | да (server) |
 | F | 0–1 | 2 | оба | да (aarch64) |

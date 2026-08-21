@@ -15,9 +15,8 @@
 #      mirroring the `flake_ssh_*` / `update_ssh_*` pattern in ssh.nix.
 #
 # Secret paths never leave the host eval: only `hasKey: bool` ships in the env.
-# The map is the single source of truth for both the job env AND the
-# `deploy.nodes` flake output (which `nixtache.lib.mkDeployNodes` derives from
-# it — see doc/specs/direct-deploy/05-rollback.md).
+# The map is the single source of truth for the job env; the `deploy-target`
+# action reads it directly (V2 — no `deploy.nodes` flake output, no deploy-rs).
 {
   config,
   lib,
