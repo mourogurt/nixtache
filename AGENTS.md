@@ -342,7 +342,11 @@ present, envs wired, caps granted, mounts/BindPaths, assertions firing).
 
 Add new tests whenever you add an option or change behaviour; run them locally
 with `nix build .#checks.x86_64-linux.<suite>` and read the printed report.
-New test files MUST be wired into `flake.nix` `checks.<system>`.
+New test files MUST be wired into `flake.nix`: pure-eval suites into
+`checks.<system>` (built by every `nix flake check`, so they must stay
+build-cheap), KVM/runNixOSTest suites into `vmTests.x86_64-linux` (NOT a
+checked output — `nix flake check` skips it; run explicitly on a KVM host
+with `nix build .#vmTests.x86_64-linux.<suite>`).
 
 ## TODO / out of scope here
 

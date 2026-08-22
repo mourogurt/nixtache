@@ -103,7 +103,10 @@ let
   # --- scenario 4: imageVersionFile — runtime version contract with CI --------
   # The deploy action writes the computed version into the repo file before
   # `nix build`; the module default reads it. No file → fallback "0".
-  versionFile = pkgs.writeText "image-version" "20260809120000\n";
+  # builtins.toFile, not pkgs.writeText: imageVersionFile is read at eval time
+  # (IFD in the module's imageVersion default) — a derivation here makes every
+  # foreign-system flake check demand a build it cannot run.
+  versionFile = builtins.toFile "image-version" "20260809120000\n";
   hostVersionFile = mkHost {
     services.nixtache.ab-image = {
       enable = true;
