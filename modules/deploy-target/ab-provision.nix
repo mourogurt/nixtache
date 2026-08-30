@@ -164,9 +164,11 @@ let
   };
 
   # Slot submodule: type + storage + label. Both slots share the same submodule
-  # type; an assert below enforces slot_a.type == slot_b.type (sysupdate requires
-  # a uniform Target.Type across all instances of one transfer).
-  slotSubmod = types.submodule {
+  # shape, parameterized only by the default GPT label (slot A conventionally
+  # `nix-store_1`, slot B sysupdate's `_empty` free-slot marker); an assert
+  # below enforces slot_a.type == slot_b.type (sysupdate requires a uniform
+  # Target.Type across all instances of one transfer).
+  slotSubmod = defaultLabel: types.submodule {
     options = {
       type = mkOption {
         type = types.enum [ "partition" "regular-file" ];
@@ -190,14 +192,19 @@ let
         '';
       };
       label = mkOption {
-        type = types.nullOr types.str;
-        default = null;
+        type = types.str;
+        default = defaultLabel;
+        defaultText = literalExpression ''
+          "nix-store_1" for slot_a / "_empty" for slot_b
+        '';
         description = ''
           GPT partition label (only `type = "partition"`). Ignored for
           `regular-file` (the filename comes from sysupdate's MatchPattern).
-          Slot A is conventionally `"nix-store_1"`; slot B is `"_empty"` — the
+          Slot A conventionally is `"nix-store_1"`; slot B is `"_empty"` — the
           free-slot marker systemd-sysupdate hardcodes (it writes the `_empty`
           slot and relabels it to `"nix-store_<v>"`; vacuuming relabels back).
+          The defaults match the stateless detection regex — do not set empty
+          strings.
         '';
       };
     };
@@ -286,9 +293,18 @@ let
         echo "nixtache-ab-provision: Size mismatch: slot is $actual_bytes bytes, configured slotSize is $expected_bytes bytes ($SLOT_SIZE)."
 
         if [ "$ON_MISMATCH" != "wipe" ]; then
-          # onSizeMismatch=error: keep slots, leave sysupdate to the consumer.
-          echo "nixtache-ab-provision: onSizeMismatch=error — keeping existing slots; resolve the mismatch manually (onSizeMismatch=wipe or re-provision)."
-          exit 0
+          # onSizeMismatch=error: keep the slots and STOP sysupdate until the
+          # conflict is resolved by hand — a silently-running sysupdate with a
+          # wrong slot size would fail (or worse, truncate) every update.
+          # `--runtime` mask: plain `mask` refuses to overwrite the
+          # NixOS-managed unit symlink; the runtime mask lives in /run and the
+          # provision unit (ordered before sysupdate, runs every boot) re-arms
+          # it until the conflict is fixed.
+          echo "nixtache-ab-provision: onSizeMismatch=error — keeping existing slots and masking systemd-sysupdate.service until the conflict is resolved." >&2
+          echo "  To resolve: fix slotSize (or set onSizeMismatch=\"wipe\"), rebuild, then:" >&2
+          echo "    systemctl unmask --runtime systemd-sysupdate.service && systemctl start nixtache-ab-provision.service" >&2
+          systemctl mask --runtime systemd-sysupdate.service || { echo "nixtache-ab-provision: failed to mask systemd-sysupdate.service" >&2; exit 1; }
+          exit 1
         fi
 
         # onSizeMismatch=wipe: check protected labels before touching anything.
@@ -389,7 +405,7 @@ in
     };
 
     slot_a = mkOption {
-      type = slotSubmod;
+      type = slotSubmod "nix-store_1";
       description = ''
         Slot A (the active nix-store partition the system boots from). Its
         `type` MUST match `slot_b.type` (sysupdate requires a uniform
@@ -398,7 +414,7 @@ in
     };
 
     slot_b = mkOption {
-      type = slotSubmod;
+      type = slotSubmod "_empty";
       description = ''
         Slot B (the free slot `systemd-sysupdate` writes the next image into).
         Conventionally labelled `"_empty"` — sysupdate's hardcoded free-slot
@@ -438,8 +454,11 @@ in
       default = "error";
       description = ''
         What to do when an existing slot's size differs from `slotSize`.
-        - `"error"` (default): log the mismatch, keep the existing slots, and
-          leave resolution to the operator. The boot is NOT blocked.
+        - `"error"` (default): log the mismatch, keep the existing slots, mask
+          `systemd-sysupdate.service` (updates stop) and fail the provision
+          unit, until the operator resolves the conflict (fix `slotSize` or
+          switch to `"wipe"`, then `systemctl unmask systemd-sysupdate.service`
+          and re-run the provision unit).
         - `"wipe"`: delete BOTH slots and recreate them at the new `slotSize`
           (with the configured labels, conventionally `nix-store_1` + `_empty`).
           DESTRUCTIVE — slot A (current system) is lost; a deploy is REQUIRED

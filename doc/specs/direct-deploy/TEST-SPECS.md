@@ -40,7 +40,7 @@
 | Тип | Каркас | KVM? | Где образец | Применение |
 |---|---|---|---|---|
 | **pure-eval** | `pkgs.runCommand` + `nixpkgs.lib.nixosSystem` | ❌ нет | `tests/ab-image.nix`, `tests/deploy-target.nix`, `tests/runner.nix` | wiring-проверки: `config.*` существует/равен, polkit-текст, tmpfiles, asserts через `builtins.tryEval`. Быстро. |
-| **runNixOSTest** | `pkgs.testers.runNixOSTest` (Python testScript) | ✅ да | `tests/ab-deploy.nix`, `tests/ab-deploy-e2e.nix` | реальное поведение в VM: сервис стартует, sysupdate пишет партицию, polkit авторизует. |
+| **runNixOSTest** | `pkgs.testers.runNixOSTest` (Python testScript) | ✅ да | `tests/ab-deploy.nix`, `tests/ab-ota-e2e.nix` | реальное поведение в VM: сервис стартует, sysupdate пишет партицию, polkit авторизует. |
 | **pexpect-QEMU** | `pkgs.writers.writePython3Bin` + `pkgs.runCommand { requiredSystemFeatures=["kvm"]; }` | ✅ да | `tests/ab-vm.nix` | boot реального A/B-образа в QEMU через serial-консоль; для тестов, где важен ПОЛНЫЙ boot appliance (squashFS mount, boot-complete). |
 | **build-compare** | `pkgs.runCommand`, `nix build` нескольких образов, `stat -c%s` | ❌ нет | (новый) | компрессия: сравнение размеров образов. |
 
@@ -95,7 +95,7 @@
 | `runner.deploy.ab.enable`→staging bind-mount, nginx autoindex, envs, gc, gnupg, LoadCredential | `scenarioAbStage` | `tests/runner.nix` |
 | `runner.forgejoPort` default из forgejoUrl | `scenarioForgejoPort` | `tests/runner.nix` |
 | `stagingPath` basename ≠ `nginx.location` basename→assert | `scenarioAbBasenameAssert` | `tests/runner.nix` |
-| real action.yml → stage → sign → SSH → sysupdate пишет GPT-партицию | `ab-deploy-e2e` | `tests/ab-deploy-e2e.nix` |
+| real action.yml → stage → sign → SSH → sysupdate пишет GPT-партицию | `ab-ota-e2e` | `tests/ab-ota-e2e.nix` |
 | real runner module nginx serves ab-stage + signing key | `ab-deploy` | `tests/ab-deploy.nix` |
 
 ### 1.1. V1 — `versioned-stage-no-conflict` (pure-eval + retain-GC)
@@ -210,7 +210,7 @@ idleWaitTimeout=600; }` + `systemd.sysupdate.enable=true` + `bootCounting`.
 > `nixtache-ab-provision.service`, transfers (Target-сторона) дерируются
 > модулем; тест переопределяет только placeholder `Source` (он `mkDefault`).
 
-### 1а.1. A1 — `ab-deploy-e2e` ✅ РЕАЛИЗОВАН (`tests/ab-deploy-e2e.nix`)
+### 1а.1. A1 — `ab-ota-e2e` ✅ РЕАЛИЗОВАН (`tests/ab-ota-e2e.nix`)
 
 **ID:** `08-A1`
 **Цель:** полный pipeline через реальный `action.yml` на реальный GPT-диск:
@@ -281,10 +281,10 @@ Deployer-нода: extracted `action.yml` run-скрипт + fake-nix (`flake sh
 
 | # | Test name | Отличие от A1 | Доп. assertion |
 |---|---|---|---|
-| A2 | `ab-deploy-e2e-squashfs` | v2 package: `storeFs="squashfs" storeCompression="zstd" storeCompressionLevel=19` | после записи: `file -s /dev/vdb2 \| grep -i squashfs` (без reboot — по сигнатуре слота) |
-| A3 | `ab-deploy-e2e-erofs` | `storeFs="erofs"` + zstd-19 | `file -s /dev/vdb2 \| grep -i erofs` |
-| A4 | `ab-deploy-e2e-nocompress` | `storeCompression=null` | размер записанного слота ≈ некомпримированному (`du -B1` staged raw ≈ slotSize content) |
-| A5 | `ab-deploy-e2e-percent-slot` | `ab.partitions.slotSize="25%"` (резолвится provision'ом от /dev/vdb) | `lsblk -bno SIZE /dev/vdb1` ≈ 25% диска ±2% |
+| A2 | `ab-ota-e2e-squashfs` | v2 package: `storeFs="squashfs" storeCompression="zstd" storeCompressionLevel=19` | после записи: `file -s /dev/vdb2 \| grep -i squashfs` (без reboot — по сигнатуре слота) |
+| A3 | `ab-ota-e2e-erofs` | `storeFs="erofs"` + zstd-19 | `file -s /dev/vdb2 \| grep -i erofs` |
+| A4 | `ab-ota-e2e-nocompress` | `storeCompression=null` | размер записанного слота ≈ некомпримированному (`du -B1` staged raw ≈ slotSize content) |
+| A5 | `ab-ota-e2e-percent-slot` | `ab.partitions.slotSize="25%"` (резолвится provision'ом от /dev/vdb) | `lsblk -bno SIZE /dev/vdb1` ≈ 25% диска ±2% |
 
 **Setup:** как A1; v2 appliance собирается `fixture.mkAppliance` с
 соответствующими `storeFs/storeCompression/storeCompressionLevel/storeSize`.
@@ -558,7 +558,7 @@ provision не пересоздаёт, **отключает sysupdate** (тай�
 **Приоритет:** P1.
 
 **Setup:** диск с предсозданными слотами по 512M (`sgdisk --new=...:+512M` в
-initrd-service, как `ab-disk-init` в `ab-deploy-e2e.nix`); `partitions.slotSize =
+initrd-service, как `ab-disk-init` в `ab-ota-e2e.nix`); `partitions.slotSize =
 "1G"`, `onSizeMismatch = "error"`.
 
 **Assertions:**
@@ -821,7 +821,7 @@ spec 08 §7 строки 1217–1230. **Assert уже реализован** в 
 **KVM:** ✅.
 **приоритет:** P2.
 
-**Setup:** собрать v1 и v2 appliance (как `ab-vm.nix` + `ab-deploy-e2e.nix`); boot
+**Setup:** собрать v1 и v2 appliance (как `ab-vm.nix` + `ab-ota-e2e.nix`); boot
 v1, дождаться clone, выполнить sysupdate до v2, reboot, дождаться второго clone.
 
 **Assertions:**
@@ -1050,7 +1050,7 @@ install пакет через overlay, capture снова.
 
 ### 6.1. N1 — `ab-nixos-anywhere` 📋 MANUAL
 
-> Автоматический вариант N1 реализован: `checks.x86_64-linux.ab-anywhere-vm`
+> Автоматический вариант N1 реализован: `checks.x86_64-linux.ab-ota-anywhere-vm`
 > (полный OTA-lifecycle: kexec → disko A/B → UKI boot → signed v2 sysupdate).
 > Ручной runbook — `doc/specs/direct-deploy/10-nixos-anywhere-runbook.md`.
 
@@ -1224,7 +1224,7 @@ store.mode="overlay"; ... }`.
 | `enable` | bool | ✅ | `ab-image` scenarioFixed + все ab-VM |
 | `imageId` | str | ✅ | scenarioFixed (imageId в MatchPattern) |
 | `imageVersion` | str | ✅ | scenarioFixed |
-| `stagingPath` | str | ✅ | ab-deploy-e2e (http://), ab-vm (file://) |
+| `stagingPath` | str | ✅ | ab-ota-e2e (http://), ab-vm (file://) |
 | `storeSize` | str | ✅ | scenarioFixed/maxDisk; **S4** (percent) |
 | `storeFs` | enum | ✅ K-секции | **K2/K4** (erofs) |
 | `storeCompression` | null\|str | ✅ | **§3.0** (wiring) + **K1/K3** |
@@ -1235,7 +1235,7 @@ store.mode="overlay"; ... }`.
 | `publicKeyFile` | null\|path | ✅ | scenarioSigned |
 | `publicKey` | null\|str | ✅ | scenarioSigned (использует publicKey) |
 | `extraPartitions` | attrsOf | ✅ | ab-vm T6 (data partition) |
-| `transfers` | attrsOf | ✅ | ab-deploy-e2e (custom transfers) |
+| `transfers` | attrsOf | ✅ | ab-ota-e2e (custom transfers) |
 
 > **GAP `ukiTries`:** добавить pure-eval проверку — при `ukiTries=5` →
 > `config.boot.uki.tries == 5`. Минимальный сценарий в `tests/ab-image.nix`.
@@ -1244,7 +1244,7 @@ store.mode="overlay"; ... }`.
 
 | Опция | Покрытие | Тест |
 |---|---|---|
-| `enable` | ✅ | scenarioAb + ab-deploy-e2e |
+| `enable` | ✅ | scenarioAb + ab-ota-e2e |
 | `gating` | ✅ | scenarioAbGating |
 | `idleWaitTimeout` | ✅ | scenarioAbGating (600 в script) |
 | `forceAfterTimeout` | ⚠️ partial | **V4** (добирает) |
@@ -1332,7 +1332,7 @@ checks = forAllSystems (system: {
 ```
 
 > **KVM-маркировка:** `runNixOSTest` и pexpect-QEMU требуют KVM. У существующих
-> тяжелых тестов (`ab-vm`, `ab-deploy-e2e`) `requiredSystemFeatures = ["kvm"]`
+> тяжелых тестов (`ab-vm`, `ab-ota-e2e`) `requiredSystemFeatures = ["kvm"]`
 > ставится внутри (см. `ab-vm.nix` строка 193). Новые тяжёлые — делать так же,
 > иначе `nix flake check` на runner'е в nspawn упадёт.
 
@@ -1349,7 +1349,7 @@ checks = forAllSystems (system: {
 | Приоритет | Тесты | Примечание |
 |---|---|---|
 | **P0** (топ-пушка) | **O1, O2, O3**, **RO1, RO2, RO3** | overlay-nix + runner-overlay — базовая функциональность |
-| **P0** (existing) | A1 (ab-deploy-e2e — ✅ на provision-модуле) | §1а.1 |
+| **P0** (existing) | A1 (ab-ota-e2e — ✅ на provision-модуле) | §1а.1 |
 | **P0** (implement next) | **B1**, **C1, C2** | self-deploy + signature verification — ядро A/B (§1а.3, §1а.7) |
 | **P1** | **P1–P5, S1–S4**, **K1, K4**, **R1, R2, R3**, V1, V2, O4, O5, O7, O8, RO4, RO5 | provisioning + runner-compat + compression core |
 | **P2** | V3, V4, **PR1**, **K2, K3**, R4, O6, O9, RO6, RO7, **A2–A5**, **B2–B4**, **C3, C4** | edge cases / benchmarks / deploy-варианты |
@@ -1586,7 +1586,7 @@ busy=$(curl -sf ... | jq '...' 2>/dev/null \
 | `tests/deploy-target.nix` | deploy-target.ab polkit/gating/asserts (spec 06) |
 | `tests/runner.nix` | runner.deploy.ab staging/nginx/envs/gc/signing (spec 06) |
 | `tests/ab-deploy.nix`, `tests/ab-vm.nix` | E2E staging + appliance boot (spec 06) |
-| `tests/ab-deploy-e2e.nix` | **A1** (§1а.1): полный deploy-пайплайн; target-нода на provision-модуле (слоты создаёт `nixtache-ab-provision`, transfer Target — из модуля) |
+| `tests/ab-ota-e2e.nix` | **A1** (§1а.1): полный deploy-пайплайн; target-нода на provision-модуле (слоты создаёт `nixtache-ab-provision`, transfer Target — из модуля) |
 
 ### 12.4. Что НЕ покрыто (gap → после реализации/уточнения)
 
@@ -1599,9 +1599,9 @@ busy=$(curl -sf ... | jq '...' 2>/dev/null \
 | R4 (reclone after swap) | `ab-runner-compat-vm.nix` | multi-boot |
 | RO6 (runner overlay ab-swap), RO7 (boot benchmark) | `runner-store-mode-vm.nix` | multi-boot / benchmark |
 | N1/N2 (nixos-anywhere) | runbook (manual) | spec 08 сама: «may stay manual» |
-| A2–A5 (compression/slotSize варианты A1) | §1а.2, `ab-deploy-e2e.nix` (варианты) | спека есть (§1а.2), реализация P2 |
+| A2–A5 (compression/slotSize варианты A1) | §1а.2, `ab-ota-e2e.nix` (варианты) | спека есть (§1а.2), реализация P2 |
 | B1–B4 (self-deploy + gating) | §1а.3–1а.6, новый `ab-deploy-self-vm.nix` | спека есть; open question: `forgejoPort` stub (§1а.4) |
-| C1–C4 (signature verification) | §1а.7, `ab-deploy-verify-vm.nix` | спека есть, реализация P0 (C1/C2) / P2 (C3/C4) |
+| C1–C4 (signature verification) | §1а.7, `ab-ota-verify-vm.nix` | спека есть, реализация P0 (C1/C2) / P2 (C3/C4) |
 
 ---
 

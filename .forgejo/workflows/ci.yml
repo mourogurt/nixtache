@@ -1,16 +1,16 @@
 # Self-CI for nixtache: validate the flake and run its `checks.*` (the
-# runner module tests in tests/runner.nix).
+# pure-eval module test suites in tests/).
 #
 # Unlike nix-check.yml / update-flake.yml (reusable workflows meant for
 # CONSUMER repositories), this triggers on push/PR to nixtache's own main
-# branch. nixtache exports only `nixosModules` + `checks` (no
-# nixosConfigurations, no devShells), so we run flake validation + the checks
-# and skip the rebuild actions (rebuild-configurations hard-fails when a flake
-# has no nixosConfigurations).
+# branch. nixtache exposes no consumer-facing `nixosConfigurations` (only the
+# `abtest-remote` dogfood fixture) and no devShells, so we run flake
+# validation + the checks and skip the rebuild actions
+# (rebuild-configurations hard-fails when a flake has no nixosConfigurations).
 #
 # `nix flake check` already builds `checks.*`, i.e. it runs the tests; the
-# explicit `nix build --print-build-logs` step below is there to surface the
-# test report (per-check ok/FAIL lines) directly in the CI log.
+# explicit `nix build --print-build-logs` loop below is there to surface each
+# suite's test report (ok/FAIL lines) directly in the CI log.
 name: CI
 
 on:
@@ -49,13 +49,15 @@ jobs:
             echo "SANDBOX_OK!=1 → --no-sandbox"
             SANDBOX_FLAG="--no-sandbox"
           fi
-          out=$(nix build --no-link --print-out-paths --print-build-logs $SANDBOX_FLAG .#checks.x86_64-linux.runner)
-          echo "----- module test report -----"
-          cat "$out"
+          for suite in runner deploy-target ab-image mkDocs ab-existing ab-contract auto-update; do
+            echo "----- checks.x86_64-linux.${suite}: test report -----"
+            out=$(nix build --no-link --print-out-paths --print-build-logs $SANDBOX_FLAG ".#checks.x86_64-linux.${suite}")
+            cat "$out"
+          done
 
       - name: Generate this flake's option docs
         # Build `.#optionsMarkdown` + `.#optionsJSON` (this flake's own option
-        # reference, generated from the runner module) and upload as an artifact.
+        # reference, generated from all nixtache modules) and upload as an artifact.
         uses: ./.forgejo/actions/generate-docs
         with:
           attributes: "optionsMarkdown optionsJSON"

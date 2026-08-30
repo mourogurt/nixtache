@@ -1,15 +1,11 @@
-# QEMU (pexpect) BEHAVIORAL CONTRACT for the not-yet-implemented module
+# QEMU (pexpect) BEHAVIORAL test for the module
 # `services.nixtache.overlay-nix.*` (spec 08 §6): a Nix `local-overlay-store`
 # layered over the read-only squashFS /nix/store of an A/B appliance.
 #
 # Boots a REAL A/B appliance image (built with the REAL deploy-target + ab-image
-# modules + the FUTURE overlay-nix module) in QEMU and asserts the overlay comes
+# + overlay-nix modules) in QEMU and asserts the overlay comes
 # up: an OverlayFS mount exists, the overlay daemon is active, and a write
 # through the merged store lands in the upper dir while the lower stays ro.
-#
-# The test FAILS NOW (overlay-nix module absent → appliance image build refuses)
-# and turns green once an implementing agent creates
-# `modules/overlay-nix/default.nix` (+ wires `nixosModules.overlay-nix` in flake.nix).
 #
 # Offline constraint: the appliance VM has no internet, so `nix-env -i`/`nix shell`
 # (which fetch from a registry) are NOT exercised here — the read-only+overlay
@@ -24,7 +20,7 @@ let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
 
-  # Local appliance builder = ab-fixture mkAppliance + the FUTURE overlay-nix
+  # Local appliance builder = ab-fixture mkAppliance + the overlay-nix
   # module + its config. (ab-fixture.nix mkAppliance doesn't take extra modules,
   # so we replicate its thin consumer layer and add overlay-nix. Do NOT edit
   # ab-fixture.nix — other tests depend on it unchanged.)
@@ -39,7 +35,7 @@ let
         # --- REAL nixtache modules (code under test / appliance base) ----------
         self.nixosModules.deploy-target
         self.nixosModules.ab-image
-        # --- FUTURE overlay-nix module (absent until implemented) ---------------
+        # --- overlay-nix module (code under test) -------------------------------
         (self.nixosModules.overlay-nix or ({ ... }: { }))
 
         # --- thin consumer settings -------------------------------------------
@@ -62,8 +58,7 @@ let
               ab.gating = false;
             };
 
-            # The FUTURE overlay-nix config (spec 08 §6). Refuses eval until the
-            # module exists — that is the intended red state.
+            # The overlay-nix config (spec 08 §6).
             services.nixtache.overlay-nix = {
               enable = true;
               inherit upperDir workDir;
@@ -156,7 +151,7 @@ pkgs.runCommand "overlay-nix-vm-test"
     pass() { echo "  ok    $1"; echo "ok    $1" >> $out/report; }
     fail() { echo "  FAIL  $1"; echo "FAIL  $1" >> $out/report; FAIL=1; }
 
-    echo "=== overlay-nix-vm (appliance + FUTURE overlay-nix module) ==="
+    echo "=== overlay-nix-vm (appliance + overlay-nix module) ==="
     overlay-nix-vm-driver ${v1Image} > driver.out 2>driver.err || true
     echo "--- driver output ---"; cat driver.out
     if [ -s driver.err ]; then echo "--- driver stderr (tail) ---"; tail -5 driver.err; fi

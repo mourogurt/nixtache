@@ -1,6 +1,6 @@
 # ab-deploy — CI-faithful LIVE deploy E2E via runNixOSTest (method = "live").
 #
-# The live-path counterpart of tests/ab-deploy-e2e.nix (which owns the
+# The live-path counterpart of tests/ab-ota-e2e.nix (which owns the
 # ab-image path): the REAL `.forgejo/actions/deploy-target/action.yml`
 # composite `run:` text is extracted at build time (Python yaml parse of the
 # actual file) and executed on the deployer node with the env the Forgejo
@@ -33,13 +33,15 @@
 # The target imports the REAL `nixosModules.deploy-target`: deployUser
 # (authorizedKey from tests/ab-fixture.nix), criticalUnits = sshd.service
 # (trivial, always active), health-check defaults. The deploy user lands in
-# `nix.settings.trusted-users` (deployUser.nixTrust) — without it the daemon
-# rejects the unsigned closure push.
+# `nix.settings.trusted-users` (unconditional module wiring — a protocol
+# requirement of the serve-write push); without it the daemon rejects the
+# unsigned closure push.
 #
 # Assertions, in CI order:
-#   dry-activate run (non-main ref): the log shows the dry branch, the
-#     nixos-rebuild stub WAS invoked, and NOTHING mutated — profile unchanged,
-#     no pointer file, toplevel not valid in the target store.
+#   dry-activate run (non-main ref): the log shows the V2 dry branch, the root
+#     nixtache-apply-dry.service ran (journal "no mutation"), the closure WAS
+#     pushed — and NOTHING mutated: profile + /run/current-system unchanged,
+#     no pointer files, no marker.
 #   switch run (main ref): the toplevel closure is valid in the target store
 #     (`nix path-info`), the system profile points at it, /etc/deploy-marker
 #     exists (switch-to-configuration really ran), the pointer file was
@@ -70,7 +72,7 @@ let
   actionYmlFile = pkgs.writeText "deploy-action.yml" actionYml;
 
   # Extract the composite step's `run:` text at BUILD TIME — the SINGLE source
-  # of the deploy logic (see ab-deploy-e2e.nix for the same technique).
+  # of the deploy logic (see ab-ota-e2e.nix for the same technique).
   actionRunScript = pkgs.runCommand "deploy-action-from-yml" {
     nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) ];
   } ''
@@ -99,15 +101,6 @@ let
       exit 0
     fi
     exec ${pkgs.nix}/bin/nix "$@"
-  '';
-
-  # The dry-activate branch runs `nixos-rebuild --target-host --use-remote-sudo`
-  # — a separate binary, so fake-nix never sees it. Stub it as a no-op logger:
-  # the dry run's point is proving the branch makes NO mutation, and the marker
-  # file proves the branch was actually taken.
-  fakeNixosRebuild = pkgs.writeShellScript "fake-nixos-rebuild" ''
-    echo "nixos-rebuild(stub): $*"
-    touch /tmp/nixos-rebuild-called
   '';
 
   # JSON deploy map — the same shape the nixtache runner module exports as
@@ -213,7 +206,6 @@ let
       environment.etc."deploy-action.sh".source = "${actionRunScript}";
       environment.etc."deploy-env.sh".source = "${deployEnvFile}";
       environment.etc."fake-nix/nix".source = "${fakeNix}";
-      environment.etc."fake-nix/nixos-rebuild".source = "${fakeNixosRebuild}";
       # Deploy SSH key (copied into CREDENTIALS_DIRECTORY by the test script).
       environment.etc."deploy-key".source = "${fixture.testDeployKey}/id_ed25519";
       # The prebuilt toplevel, registered in the guest nix db at boot so the
@@ -274,12 +266,18 @@ let
         "chmod 600 /run/credentials/deploy_ssh_${cfgName}"
       )
 
+      # Baselines for the dry-run no-mutation asserts. NB: on these test VMs
+      # the system profile link may NOT exist yet (writable-store VMs boot
+      # without one; `nix copy` does not create it) — `readlink -f` then
+      # canonicalizes the path AS-IS. Capture both pointers raw and require
+      # them unchanged; the apply unit (RUN 2) is what creates the profile.
       pre_profile = target.succeed("readlink -f /nix/var/nix/profiles/system").strip()
+      pre_cur = target.succeed("readlink -f /run/current-system").strip()
 
       def run_action(ref):
           """Run the REAL action.yml script with the given git ref (mode).
           Returns the per-target deploy log."""
-          deployer.succeed("rm -f /tmp/artifacts/deploy_${cfgName}.log /tmp/nixos-rebuild-called")
+          deployer.succeed("rm -f /tmp/artifacts/deploy_${cfgName}.log")
           # fake-nix on PATH intercepts `nix flake show` + `nix build`;
           # `nix copy` delegates to the REAL nix — closure push + ssh trigger
           # run verbatim from action.yml's run text.
@@ -289,19 +287,29 @@ let
           )
           return deployer.succeed("cat /tmp/artifacts/deploy_${cfgName}.log")
 
-      # ── RUN 1: dry-activate (non-main ref) — build + dry branch, no mutation ─
+      # ── RUN 1: dry-activate (non-main ref) — REAL dry branch, no mutation ──
+      # V2: the branch pushes the closure and triggers the root
+      # nixtache-apply-dry.service through the gate (no nixos-rebuild stub).
       log = run_action("refs/heads/staging")
-      assert "dry-activate (no mutation)" in log, "dry run did not take the dry-activate branch: " + log[-500:]
-      # The dry branch's nixos-rebuild WAS invoked (stub logger marker).
-      deployer.succeed("test -f /tmp/nixos-rebuild-called")
-      # Nothing mutated on the target: profile unchanged, no pointer file, the
-      # toplevel was NOT pushed (not valid in the target's nix db).
+      assert "dry-activate via nixtache-apply-dry.service" in log, \
+          "dry run did not take the V2 dry branch: " + log[-500:]
+      # The root dry unit ran on the target and reported a clean no-mutation run.
+      target.wait_until_succeeds(
+        "journalctl -u nixtache-apply-dry.service --no-pager | grep 'no mutation'",
+        timeout=60
+      )
+      # The closure WAS pushed (the dry unit needs it locally)…
+      target.succeed("nix path-info ${newToplevel}")
+      # …but nothing mutated: profile unchanged, no activation pointer, no
+      # marker, and the dry pointer is consumed.
       assert target.succeed("readlink -f /nix/var/nix/profiles/system").strip() == pre_profile, \
           "dry-activate changed the system profile"
+      assert target.succeed("readlink -f /run/current-system").strip() == pre_cur, \
+          "dry-activate changed /run/current-system"
       target.fail("test -e /var/lib/nixtache/pending-system")
-      target.fail("nix path-info ${newToplevel}")
+      target.fail("test -e /var/lib/nixtache/pending-dry")
       target.fail("test -e /etc/deploy-marker")
-      print("OK: RUN 1 — dry-activate took the dry branch, target untouched")
+      print("OK: RUN 1 — dry-activate via root unit, diff generated, target untouched")
 
       # ── RUN 2: switch (main ref) — copy closure → pointer → apply unit ──────
       # On failure, dump the apply unit's journal — the probe/rollback detail
@@ -314,8 +322,9 @@ let
           raise
       assert "activated ${newToplevel}" in log, "switch run did not activate: " + log[-500:]
 
-      # The closure arrived via the REAL `nix copy --to ssh://` (deploy user is
-      # in nix.settings.trusted-users via the module's deployUser.nixTrust).
+      # The closure arrived via the REAL `nix copy --to ssh://` (the module
+      # adds the deploy user to nix.settings.trusted-users — a protocol
+      # requirement of the serve-write channel, not an optional privilege).
       target.succeed("nix path-info ${newToplevel}")
       # The apply unit set the system profile to the staged toplevel…
       profile = target.succeed("readlink -f /nix/var/nix/profiles/system").strip()
@@ -333,6 +342,35 @@ let
       journal = target.succeed("journalctl -u nixtache-apply.service --no-pager -o cat")
       assert "activated ${newToplevel}" in journal, "apply unit journal: " + journal[-500:]
       print("OK: RUN 2 — closure copied, profile switched, criticalUnits probe passed")
+
+      # ── deploy-user is a SYSTEM user — invisible in display managers ────────
+      # SDDM & co. only list normal users (uid >= 1000); the deploy account
+      # exists solely for the gated SSH channel.
+      uid = int(target.succeed("id -u nixos-deploy").strip())
+      assert uid < 1000, f"deploy user must be a system user (uid < 1000), got {uid}"
+      target.succeed(
+        "test \"$(getent passwd nixos-deploy | cut -d: -f3)\" -lt 1000"
+      )
+      print("OK: deploy user is a system user (uid %d) — hidden from SDDM" % uid)
+
+      # ── SSH gate (deployUser.sshGate default "gate") — positives were RUN 2 ─
+      # (probe / nix-store --serve / apply trigger all passed through the gate).
+      # Negatives: arbitrary commands and port forwarding are rejected. Use the
+      # 0600 credentials copy — ssh refuses world-readable /etc/deploy-key.
+      key0600 = "/run/credentials/deploy_ssh_${cfgName}"
+      gate_out = deployer.fail(
+        f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
+        f"-i {key0600} nixos-deploy@target id 2>&1"
+      )
+      assert "nixtache-ssh-gate" in gate_out, "gate must reject arbitrary commands: " + str(gate_out[-300:])
+      # Remote forwarding requests a server-side listener — `restrict` denies
+      # it immediately (a -L would idle silently until traffic flows).
+      deployer.fail(
+        f"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "
+        f"-o ExitOnForwardFailure=yes "
+        f"-i {key0600} -N -R 12345:localhost:22 nixos-deploy@target"
+      )
+      print("OK: SSH gate — arbitrary command + port forwarding rejected; deploy protocol passes")
 
       print("PASS: runtime action.yml (method=live) → nix copy → pointer → nixtache-apply activated the new system")
     '';

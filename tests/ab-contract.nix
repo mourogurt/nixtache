@@ -1,18 +1,17 @@
-# Pure-eval CONTRACT tests for not-yet-implemented modules/options from spec 08.
+# Pure-eval CONTRACT tests for spec 08 (ab-provision / overlay-nix / runner
+# store.mode).
 #
-# These DEFINE the contract and FAIL NOW (module/option absent); they turn green
-# once the implementing agent adds:
+# These pin the wiring + assertion contracts for:
 #   - modules/deploy-target/ab-provision.nix  → services.nixtache.deploy-target.ab.partitions.*
 #   - modules/overlay-nix/default.nix         → services.nixtache.overlay-nix.*  (+ flake.nix nixosModules.overlay-nix)
 #   - store.mode option in modules/runner/store.nix
 #
 # Graceful degradation:
 #   - wiring scenarios (contract*) flag a named `moduleImplemented=false` check
-#     (red, clearly reported) when the module eval refuses — instead of crashing
-#     the whole suite;
+#     when the module eval refuses — instead of crashing the whole suite;
 #   - assert scenarios (assertContract*) are GATED by a `modulePresent` probe so
-#     they cannot falsely pass while the module is still missing (an absent
-#     option refuses just like a firing assertion would).
+#     they cannot falsely pass while a module is missing (an absent option
+#     refuses just like a firing assertion would).
 #
 # Fast, no KVM. Exposed via checks.<system>.ab-contract.
 {
@@ -171,8 +170,8 @@ let
   scenarioPartRegularFile = contract
     "ab.partitions: type=regular-file → no provision service, Target.Type=regular-file (P5)"
     [ self.nixosModules.deploy-target (abPartCfg {
-        slot_a = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; label = null; };
-        slot_b = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; label = null; };
+        slot_a = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; };
+        slot_b = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; };
       }) ]
     (cfg: {
       noProvisionService = !(cfg.systemd.services ? "nixtache-ab-provision");
@@ -184,7 +183,7 @@ let
     "ab.partitions assert: slot_a.type≠slot_b.type → eval refuses (A1)"
     abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg {
-        slot_b = { type = "regular-file"; storage = "/x"; label = null; };
+        slot_b = { type = "regular-file"; storage = "/x"; };
       }) ];
 
   scenarioPartAssertSizeMismatch = assertContract
@@ -203,8 +202,8 @@ let
     [ self.nixosModules.deploy-target (abPartCfg {
         slotSize = lib.mkForce "512M";
         autoInit = true;
-        slot_a = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; label = null; };
-        slot_b = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; label = null; };
+        slot_a = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; };
+        slot_b = { type = "regular-file"; storage = "/var/lib/nixtache/ab-slots/"; };
       }) ];
 
   scenarioPartAssertBadStorage = assertContract
@@ -321,6 +320,42 @@ let
   # ========================================================================
   # Report aggregation
   # ========================================================================
+  # Slot labels default to the detection-regex names — unset labels previously
+  # produced empty GPT partition names the stateless detection could never match
+  # (non-idempotent provisioning whenever the consumer omitted them).
+  # (The script-level check — the defaults are BAKED into the provision
+  # script — runs in the build-time bash part below, on the actual derivation.)
+  scenarioPartLabelDefaults = contract
+    "ab.partitions: slot labels default to nix-store_1 / _empty (P2 idempotence)"
+    [ self.nixosModules.deploy-target (abPartCfg {
+        slot_a = { type = "partition"; storage = "/dev/vdb"; };
+        slot_b = { type = "partition"; storage = "/dev/vdb"; };
+      }) ]
+    (cfg: {
+      slotADefault = cfg.services.nixtache.deploy-target.ab.partitions.slot_a.label == "nix-store_1";
+      slotBDefault = cfg.services.nixtache.deploy-target.ab.partitions.slot_b.label == "_empty";
+      provisionUnitPresent = cfg.systemd.services ? "nixtache-ab-provision";
+    });
+
+  # The provision script source (the unit's `script` attr only carries the
+  # writeShellScript store path; the source text is the checkable artifact).
+  # Two-step proof for the baked labels: option defaults are asserted above
+  # (slotADefault/slotBDefault) + the script consumes ${…slot.label} below.
+  abProvisionSource = pkgs.writeText "ab-provision.nix"
+    (builtins.readFile ../modules/deploy-target/ab-provision.nix);
+
+  # onSizeMismatch=error masks systemd-sysupdate (updates STOP until manual
+  # unmask) and fails the provision unit — a silently-running sysupdate with a
+  # wrong slot size would fail or truncate every update. Script-text checks run
+  # in the build-time bash part below (same pattern as runner.nix).
+  scenarioPartMismatchMasks = contract
+    "ab.partitions: onSizeMismatch=error → unit present; mask semantics in script (S1)"
+    [ self.nixosModules.deploy-target (abPartCfg { }) ]
+    (cfg: {
+      provisionUnitPresent = cfg.systemd.services ? "nixtache-ab-provision";
+      mismatchPolicy = cfg.services.nixtache.deploy-target.ab.partitions.onSizeMismatch == "error";
+    });
+
   scenarios = [
     scenarioPartWiring
     scenarioPartBootTargetDir
@@ -336,6 +371,8 @@ let
     scenarioPartAssertVerifyNoKey
     scenarioPartAssertBothKeys
     scenarioPartVerifyKey
+    scenarioPartLabelDefaults
+    scenarioPartMismatchMasks
     scenarioOverlayWiring
     scenarioStoreModeOverlay
     scenarioStoreModeClone
@@ -358,9 +395,30 @@ pkgs.runCommand "ab-contract-test"
   {
     inherit report failMsg;
     passAsFile = [ "report" "failMsg" ];
+    # Forces the provision script source into the build so its text can be
+    # verified (the unit's `script` attr holds only a store path).
+    deps = [ abProvisionSource ];
   }
   ''
     cat "$reportPath"
     cp "$reportPath" "$out"
     if [ -s "$failMsgPath" ]; then echo; cat "$failMsgPath"; printf '\n%s\n' "$(<$failMsgPath)" >> "$out"; exit 1; fi
+
+    script_fail=""
+    src="${abProvisionSource}"
+    # The script bakes the slot labels from the options (defaults proven by the
+    # eval scenario above → the baked values are nix-store_1 / _empty).
+    grep -qF 'LABEL_A="''${toString slotA.label}"' "$src" || script_fail="$script_fail no-label-a-bake"
+    grep -qF 'LABEL_B="''${toString slotB.label}"' "$src" || script_fail="$script_fail no-label-b-bake"
+    # onSizeMismatch=error: runtime-mask sysupdate (updates STOP; the provision
+    # unit re-arms the mask every boot) + fail + unmask hint.
+    grep -q 'systemctl mask --runtime systemd-sysupdate.service' "$src" || script_fail="$script_fail no-mask"
+    grep -q 'systemctl unmask --runtime systemd-sysupdate.service' "$src" || script_fail="$script_fail no-unmask-hint"
+
+    if [ -n "$script_fail" ]; then
+      echo "FAIL: provision script text:$script_fail"
+      echo "FAIL: provision script text:$script_fail" >> "$out"
+      exit 1
+    fi
+    echo "provision script text: default labels + mask-on-mismatch OK"
   ''

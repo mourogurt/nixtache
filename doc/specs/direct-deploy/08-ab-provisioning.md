@@ -162,8 +162,10 @@ partition sizes — машинно-специфичные). nixtache обесп�
    sgdisk --new=3:0:+2G --typecode=3:8300 --change-name=3:nix-store_1 /dev/nvme0n1
    sgdisk --new=4:0:+2G --typecode=4:8300 --change-name=4:_empty /dev/nvme0n1
    ```
-4. **Записать slot A** из текущего образа: `dd if=<squashfs> of=/dev/nvme0n1p3`.
-   - На этом этапе слот A получает валидный squashFS из текущей сборки.
+4. **Записать slot A** из текущего образа — **вне модуля** (dd из live-USB,
+   `nixos-anywhere`, или initial deploy через action `_abImage`): на первой
+   загрузке после миграции образ ещё не собран (appliance, `nix.enable=false`),
+   поэтому provisioning-модуль слот A не заполняет.
 5. **Обновить fstab:** `/nix/store` монтируется из `/dev/disk/by-partlabel/nix-store_1`.
 6. **Перезагрузка.**
 
@@ -304,11 +306,6 @@ udevadm settle
 # На первой загрузке после миграции образ ещё не собран (nix.enable=false
 # на appliance!). Поэтому slot A записывается ВНЕ модуля — dd из live-USB
 # или deploy через action _abImage в режиме "initial provisioning".
-#
-# Если образ доступен в initrd (initrd includes squashFS):
-if [ -f "/nix-store-squashfs.img" ]; then
-  dd if=/nix-store-squashfs.img of="/dev/disk/by-partlabel/nix-store_1" bs=1M
-fi
 
 echo "A/B slots created on $DISK"
 ```
@@ -398,10 +395,14 @@ services.nixtache.deploy-target.ab.partitions = {
   See doc/specs/direct-deploy/08-ab-provisioning.md §3.
 ```
 
-Boot **не блокируется** (система грузится из старого slot A), но sysupdate
-**отключается** до разрешения конфликта (assertion не даёт таймеру запуститься).
-Деплой нового образа (через action _abImage с новым slotSize) автоматически
-пересоздаст слот A правильного размера.
+Boot **не блокируется** (система грузится из старого slot A), но обновления
+**останавливаются**: provision-юнит логирует mismatch, **маскирует**
+`systemd-sysupdate.service` (`systemctl mask --runtime` — plain mask не может
+перезаписать NixOS-managed symlink юнита; runtime-маска в /run, а provision-юнит
+каждую загрузку перемаскирует ДО старта sysupdate) и завершается с ошибкой.
+Разрешение — ручное: поправить `slotSize` (или переключиться на
+`onSizeMismatch = "wipe"`), пересобраться, затем
+`systemctl unmask --runtime systemd-sysupdate.service && systemctl start nixtache-ab-provision.service`.
 
 #### `onSizeMismatch = "wipe"` (автоматический, деструктивный)
 
@@ -433,8 +434,8 @@ slotSize) → provision no-op (exit 0). Отдельного post-wipe сост�
 1. **Изменить `slotSize` в конфиге** (новое значение).
 2. **Деплоить новый образ** через action `_abImage` — он собирается с новым
    `storeSize`, `sysupdate-package` имеет правильный размер.
-3. **onSizeMismatch = "error"**: provision-сервис видит mismatch, отключает
-   sysupdate, пишет assertion-сообщение.
+3. **onSizeMismatch = "error"**: provision-юнит видит mismatch, маскирует
+   sysupdate (`systemctl mask`) и падает с сообщением о разрешении конфликта.
 4. **Вручную:** либо:
    - `onSizeMismatch = "wipe"` → перезагрузка → оба слота пересоздаются →
      sysupdate ставит v_new в `_empty` → reboot в новый активный слот.
@@ -745,7 +746,7 @@ assertions = [
 | `ab-image` | `tests/ab-image.nix` | Pure-eval: fixed vs max-disk sizing + Verify=yes/no |
 | `ab-vm` | `tests/ab-vm.nix` | Repart image boot в QEMU-KVM: boots v1 + bless + slots + data + polkit + integrity |
 | `ab-deploy` | `tests/ab-deploy.nix` | Server-side: runner module nginx + action.yml parser (Q5) |
-| `ab-deploy-e2e` | `tests/ab-deploy-e2e.nix` | **Scenario A**: action.yml → stage → sign → SSH → sysupdate writes to GPT partition on /dev/vdb. GPT раскладывает **ab-provision модуль** (autoInit), transfer Target — из модуля (тест переопределяет только Source) |
+| `ab-ota-e2e` | `tests/ab-ota-e2e.nix` | **Scenario A**: action.yml → stage → sign → SSH → sysupdate writes to GPT partition on /dev/vdb. GPT раскладывает **ab-provision модуль** (autoInit), transfer Target — из модуля (тест переопределяет только Source) |
 
 ### Полный план тестов (сценарии A/B/C + provisioning)
 
@@ -753,11 +754,11 @@ assertions = [
 
 | # | Test name | Описание | Setup | Assertions |
 |---|---|---|---|---|
-| A1 ✅ | `ab-deploy-e2e` | Полный pipeline через **action.yml** на реальный GPT-диск | 2 VM (deployer+target), action.yml extracted, fake-nix, /dev/vdb GPT через **ab-provision** (autoInit), Type=partition | `nix-store_2` label на /dev/vdb + abtest_2.efi exists |
-| A2 | `ab-deploy-e2e-squashfs` | Scenario A с **squashFS** + zstd compression | storeFs=squashfs, storeCompression=zstd, level=19 | Same as A1 + verify `mount \| grep squashfs` |
-| A3 | `ab-deploy-e2e-erofs` | Scenario A с **EROFS** + zstd compression | storeFs=erofs, storeCompression=zstd, level=19 | Same as A1 + verify `mount \| grep erofs` |
-| A4 | `ab-deploy-e2e-nocompress` | Scenario A **без компрессии** | storeCompression=null | Same as A1 |
-| A5 | `ab-deploy-e2e-percent-slot` | Scenario A с **процентным** slotSize | storeSize="10%" (resolved at runtime) | Slot size = 10% of /dev/vdb |
+| A1 ✅ | `ab-ota-e2e` | Полный pipeline через **action.yml** на реальный GPT-диск | 2 VM (deployer+target), action.yml extracted, fake-nix, /dev/vdb GPT через **ab-provision** (autoInit), Type=partition | `nix-store_2` label на /dev/vdb + abtest_2.efi exists |
+| A2 | `ab-ota-e2e-squashfs` | Scenario A с **squashFS** + zstd compression | storeFs=squashfs, storeCompression=zstd, level=19 | Same as A1 + verify `mount \| grep squashfs` |
+| A3 | `ab-ota-e2e-erofs` | Scenario A с **EROFS** + zstd compression | storeFs=erofs, storeCompression=zstd, level=19 | Same as A1 + verify `mount \| grep erofs` |
+| A4 | `ab-ota-e2e-nocompress` | Scenario A **без компрессии** | storeCompression=null | Same as A1 |
+| A5 | `ab-ota-e2e-percent-slot` | Scenario A с **процентным** slotSize | storeSize="10%" (resolved at runtime) | Slot size = 10% of /dev/vdb |
 
 #### Сценарий B — Self-deploy (одна машина, file://, local trigger)
 
@@ -824,7 +825,7 @@ assertions = [
 
 | # | Test name | Описание | Setup | Assertions |
 |---|---|---|---|---|
-| O1 | `overlay-nix-mount` | OverlayFS mount поднимается: lower=squashFS, upper=root FS | 1 VM, A/B appliance + overlay-nix.enable=true, upperDir=/var/lib/nix-overlay/upper | `mount \| grep overlay \| grep /nix/store`, `nix-daemon-overlay.service` active |
+| O1 | `overlay-nix-mount` | OverlayFS mount поднимается: lower=squashFS, upper=root FS | 1 VM, A/B appliance + overlay-nix.enable=true, upperDir=/var/lib/nix-overlay/upper | `mount \| grep overlay \| grep /nix/store`, `nix-daemon-overlay-mount.service` active |
 | O2 | `overlay-nix-install` | `nix-env -iA nixpkgs.hello` — пакет ставится в upper layer | Same as O1 + nix-env install | `hello` binary works, store path in `/var/lib/nix-overlay/upper/` |
 | O3 | `overlay-nix-shell` | `nix shell nixpkgs#cowsay -c cowsay moo` — работает | Same as O1 | Command exits 0, output contains "moo" |
 | O4 | `overlay-nix-gc` | GC удаляет upper-layer пути, **lower не трогает** | Install hello via nix-env → `nix-collect-garbage` | hello gone from upper; system closure (lower) intact |
@@ -1128,29 +1129,37 @@ Boot-counting — автоматический откат:
 > — настоящий store type, который **понимает слои** (metadata, GC, validity).
 >
 > **Дока для будущих агентов:** https://nix.dev/manual/nix/2.35/store/types/experimental-local-overlay-store.html
-> Store URL: `local-overlay://?root=...&lower-store=...&upper-layer=...`
+> Store URL: `local-overlay://?lower-store=...&upper-layer=...`
 > Experimental feature: `extra-experimental-features = local-overlay-store`
-> Нужен Nix ≥ 2.35 (проверить: `nix --version`).
+> Нужен Nix ≥ 2.19 (проверить: `nix --version`; фича появилась в 2.19 —
+> `/2.35/` в URL доки вводит в заблуждение).
 
 Не просто `mount -t overlay` поверх `/nix/store` (потеря метаданных, GC ломается),
-а полноценный Nix store поверх OverlayFS:
+а полноценный Nix store поверх OverlayFS. Реализованный дизайн
+(`modules/overlay-nix/default.nix`): OverlayFS монтируется **overmount'ом прямо
+на `/nix/store`** (ro squashFS остаётся смонтирован под ним как lower), а merged
+store обслуживает **системный `nix-daemon`**, переприцеленный через
+`nix.settings.store` — никакого side-daemon'а и отдельной точки монтирования
+вида `/mnt/nix-overlay`:
 
 ```
-local-overlay://?root=/mnt/nix-overlay&lower-store=/nix/store&upper-layer=/var/lib/nix-overlay/upper
-         │                                       │                           │
-         │                                       │                           └─ upper (read-write)
-         │                                       │                              user-configured:
-         │                                       │                              • /var/lib/... (persistent, root FS)
-         │                                       │                              • /tmp/... (tmpfs, RAM)
-         │                                       │                              • loopback file
-         │                                       │                              • separate partition
-         │                                       │
-         │                                       └─ lower (read-only)
-         │                                          /nix/store (squashFS, active A/B slot)
-         │
-         └─ merged store (OverlayFS mount)
-            представляется как единый /nix/store
+local-overlay://?lower-store=local&upper-layer=/var/lib/nix-overlay/upper&ignore-gc-delete-failure=true&check-mount=false
+          │                          │                            │
+          │                          │                            └─ upper (read-write)
+          │                          │                               user-configured:
+          │                          │                               • /var/lib/... (persistent, root FS)
+          │                          │                               • /tmp/... (tmpfs, RAM)
+          │
+          │                          └─ lower (read-only)
+          │                             local store → /nix/store (squashFS, active A/B slot)
+          │
+          └─ merged store — OverlayFS overmount НА /nix/store
+             представляется как единый /nix/store
 ```
+
+`check-mount=false` нужен потому, что overlay — overmount: lowerdir совпадает с
+точкой монтирования, и дефолтная проверка `check-mount=true` (сверка с
+/proc/mounts) такой расклад отвергает, хотя ядро обрабатывает его корректно.
 
 **Nix-уровневое понимание слоёв:**
 - Отдельная SQLite DB в upper layer (metadata для путей, установленных через overlay)
@@ -1187,17 +1196,19 @@ services.nixtache.overlay-nix = {
 **Что модуль делает при `enable = true`:**
 
 1. Создаёт директории (`tmpfiles.rules`)
-2. Монтирует OverlayFS:
+2. Монтирует OverlayFS **overmount'ом прямо на `/nix/store`** (mount-only юнит
+   `nix-daemon-overlay-mount.service`; idempotent — при уже поднятом overlay
+   ничего не делает):
    ```bash
    mount -t overlay overlay \
      -o lowerdir=/nix/store \
      -o upperdir=/var/lib/nix-overlay/upper \
      -o workdir=/var/lib/nix-overlay/work \
-     /mnt/nix-overlay/nix/store
+     /nix/store
    ```
-3. Запускает `nix-daemon` с overlay store:
+3. Переприцеливает **системный** `nix-daemon` через `nix.settings.store`:
    ```
-   nix-daemon --store "local-overlay://?root=/mnt/nix-overlay&lower-store=/nix/store&upper-layer=/var/lib/nix-overlay/upper"
+   local-overlay://?lower-store=local&upper-layer=/var/lib/nix-overlay/upper&ignore-gc-delete-failure=true&check-mount=false
    ```
 4. Включает experimental feature в `nix.conf`:
    ```
@@ -1511,7 +1522,7 @@ services.nixtache.runner.store.mode = mkOption {
     `overlay`: OverlayFS mount combines the read-only lower store
     (`/nix/store`, e.g. squashFS) with a writable upper
     (`<store.path>/overlay/upper`). Instant (no copy), proper GC
-    (local-overlay-store type), but requires Nix ≥ 2.35 with the
+    (local-overlay-store type), but requires Nix ≥ 2.19 with the
     `local-overlay-store` experimental feature.
 
     Doc: https://nix.dev/manual/nix/2.35/store/types/experimental-local-overlay-store.html

@@ -61,7 +61,8 @@ let
   # root FS vs tmpfs — O5 vs O6).
   mkApplianceNode = { upperDir, workDir }: {
     imports = [
-      # FUTURE module — absent until implemented (intended contract-red).
+      # Empty-module fallback when the module is absent (graceful degradation
+      # instead of an attrset-missing eval crash).
       (self.nixosModules.overlay-nix or ({ ... }: { }))
     ];
     # overlay-nix: bring a FULL working nix over the read-only lower via

@@ -9,7 +9,7 @@ not the tooling.
 
 > **Automated variant available.** The full OTA lifecycle (kexec install →
 > A/B disko layout → UKI boot → signed v2 sysupdate onto slot B) is now
-> covered end-to-end by `checks.x86_64-linux.ab-anywhere-vm` (runNixOSTest,
+> covered end-to-end by `checks.x86_64-linux.ab-ota-anywhere-vm` (runNixOSTest,
 > KVM). The manual steps below remain the reference for bare-metal runs and
 > for verifying things a VM cannot (real firmware, real disks).
 

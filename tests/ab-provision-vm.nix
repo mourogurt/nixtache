@@ -1,11 +1,9 @@
-# QEMU (runNixOSTest) BEHAVIORAL CONTRACT for the not-yet-implemented module
+# QEMU (runNixOSTest) BEHAVIORAL test for the module
 # `services.nixtache.deploy-target.ab.partitions.*` (spec 08 §1–§4).
 #
 # Regular NixOS VM nodes (NOT an appliance image) with extra empty disks; each
-# node imports `self.nixosModules.deploy-target` and sets the FUTURE
+# node imports `self.nixosModules.deploy-target` and sets the
 # `ab.partitions.*` option, then we assert on real sgdisk partition tables.
-# The test FAILS NOW (option absent → node eval refuses) and turns green once
-# an implementing agent creates `modules/deploy-target/ab-provision.nix`.
 #
 # Covers (TEST-SPECS.md §2): P1 init, P2 idempotent, P3 second-disk, S1 size-error,
 # S2 size-wipe, S3 no-space, S4 percent, PR1 protected-label. Needs KVM.
@@ -44,8 +42,11 @@ let
           autoInit = false;
           onSizeMismatch = "error";
           protectedLabels = [ "root" "esp" "boot" ];
-          slot_a = { type = "partition"; storage = "/dev/vdb"; label = "nix-store_1"; };
-          slot_b = { type = "partition"; storage = "/dev/vdb"; label = "_empty"; };
+          # labels intentionally NOT set — the module defaults (nix-store_1 /
+          # _empty) are exactly these, so every node exercises the defaults
+          # (P2 idempotence must not depend on explicit labels).
+          slot_a = { type = "partition"; storage = "/dev/vdb"; };
+          slot_b = { type = "partition"; storage = "/dev/vdb"; };
         }
         part-extra;
       systemd.services.ab-pre-partition = lib.mkIf (pre-part != null) {
@@ -177,12 +178,19 @@ pkgs.testers.runNixOSTest {
     p3_second.fail("sgdisk -p /dev/vdb | grep -E 'nix-store_1|_empty'")
     print("P3 OK: slots on /dev/vdc; /dev/vdb untouched")
 
-    # ── S1: size mismatch, onSizeMismatch=error → slots intact, mismatch logged
+    # ── S1: size mismatch, onSizeMismatch=error → slots intact, sysupdate MASKED
     s1_error.start()
-    s1_error.wait_for_unit("nixtache-ab-provision.service")
+    s1_error.wait_until_succeeds(
+      "systemctl is-failed nixtache-ab-provision.service", timeout=120
+    )
     s1_error.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # old 512M slot preserved
     s1_error.succeed("journalctl -u nixtache-ab-provision --no-pager | grep -i mismatch")
-    print("S1 OK: size mismatch detected, slots preserved, message logged")
+    # updates STOP until manual resolution: sysupdate masked (runtime), unmask hint logged
+    # updates STOP until manual resolution: the runtime-mask symlink exists
+    # (/run/systemd/system/… → /dev/null), unmask hint logged
+    s1_error.succeed("test \"$(readlink /run/systemd/system/systemd-sysupdate.service)\" = /dev/null")
+    s1_error.succeed("journalctl -u nixtache-ab-provision --no-pager | grep 'systemctl unmask'")
+    print("S1 OK: size mismatch detected, slots preserved, sysupdate masked, provision failed")
 
     # ── S2: size mismatch, onSizeMismatch=wipe → both slots recreated at new size ──
     s2_wipe.start()

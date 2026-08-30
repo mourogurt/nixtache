@@ -42,6 +42,16 @@ let
   abImageEnabled = abImage.enable or false;
   gating = dtAb.gating or false;
   sysupdateEnabled = config.systemd.sysupdate.enable or false;
+  dtAbPartitions = dtAb.partitions or { };
+  # A4 — the ab path needs a resolvable update source: the ab-image module,
+  # ab.partitions with a source, or consumer-owned sysupdate transfers that
+  # already carry a Source.
+  sysupdateTransfers = config.systemd.sysupdate.transfers or { };
+  transfersHaveSource = builtins.any (t: t ? Source && t.Source ? Path)
+    (builtins.attrValues sysupdateTransfers);
+  abSourceResolvable = abImageEnabled
+    || ((dtAbPartitions.enable or false) && (dtAbPartitions.source or null) != null)
+    || transfersHaveSource;
 
   abPresent = dtAbEnabled || abImageEnabled;
   effectiveMethod =
@@ -378,15 +388,16 @@ in
             method = "flake" (including method = "auto" deriving to flake).
           '';
         }
-        # A4
+        # A4 — the ab path needs BOTH a running sysupdate AND a resolvable
+        # image source (ab-image module, or ab.partitions with a source).
         {
-          assertion = !isAb || sysupdateEnabled;
+          assertion = !isAb || (sysupdateEnabled && abSourceResolvable);
           message = ''
             services.nixtache.auto-update: the ab-image path requires
-            systemd.sysupdate.enable = true with a resolvable Source — enable
-            it via nixosModules.ab-image or via deploy-target
-            ab.partitions.source (transfers stay with those modules;
-            auto-update only triggers the pull).
+            systemd.sysupdate.enable = true AND a resolvable update source —
+            enable nixosModules.ab-image, or set deploy-target
+            ab.partitions.{enable,source}. auto-update only triggers the pull;
+            the transfers/source stay with those modules.
           '';
         }
         # A5

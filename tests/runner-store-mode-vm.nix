@@ -1,12 +1,9 @@
 # Behavioral QEMU test for the `services.nixtache.runner.store.mode` option
 # (spec 08 §8 — "Runner store: clone → overlay").
 #
-# This is a CONFORMANCE / executable-spec test: it defines the behavioral
-# contract for an option that does NOT exist yet. Until an implementing agent
-# adds `store.mode` to `modules/runner/store.nix`, this check fails to EVALUATE
-# (option `services.nixtache.runner.store.mode` is undefined → eval throw).
-# That red state is intentional (TDD). The test turns green once the option is
-# implemented to match the contract below.
+# This is a CONFORMANCE test: it exercises the implemented `store.mode`
+# option (`modules/runner/store.nix`) and fails on any behavioural drift
+# from the contract below.
 #
 # WHAT THIS TEST PROVES (the key requirement):
 #   On a host whose `/nix/store` is READ-ONLY (an A/B appliance's squashFS), a
@@ -72,14 +69,13 @@ pkgs.testers.runNixOSTest {
         secrets.cachePrivateKey = toString /dev/null;
         # Relocated store: lives at /srv/nix (bind from host /srv/bincache).
         store.path = "/srv";
-        # NEW OPTION UNDER TEST. Until added to modules/runner/store.nix this
-        # whole check fails to evaluate (intended red state).
+        # Option under test: overlay population of the relocated store.
         store.mode = "overlay";
         # Overlay mount inside the container needs CAP_SYS_ADMIN. Keep the
         # nix sandbox OFF (enableSandbox=false: it is unreliable in nspawn and
         # would only complicate daemon startup) and grant just the mount cap.
         # additionalCapabilities is a listOf str (merges by concatenation), so
-        # an implementing agent may also add it for overlay mode without harm.
+        # consumers may also add caps for overlay mode without harm.
         enableSandbox = false;
         additionalCapabilities = [ "CAP_SYS_ADMIN" ];
       };

@@ -7,12 +7,14 @@
 #
 #   1. serializes the NON-secret subset of the map into the job env
 #      `NIXTACHE_DEPLOY_TARGETS` (via the `_extraRunnerEnvs` aggregator owned by
-#      instances.nix) — `{name, host, sshUser, sshPort, method, transport,
-#      system, tags, timeout, hasKey}`;
+#      instances.nix) — `{name, enable, host, sshUser, sshPort, method, system,
+#      tags, timeout, extraOptions, hasKey}`;
 #   2. bind-mounts each target's private key into the container at a fixed path
-#      `/var/secrets/runner/deploy/<name>/id_ed25519` and exposes it to every
-#      `gitea-runner-*` service via `LoadCredential` (`deploy_ssh_<name>`),
-#      mirroring the `flake_ssh_*` / `update_ssh_*` pattern in ssh.nix.
+#      `/var/secrets/runner/deploy/<name>/id_ed25519` (and, when `sshPublicKey`
+#      is set, the matching `.pub`) and exposes them to every
+#      `gitea-runner-*` service via `LoadCredential` (`deploy_ssh_<name>` /
+#      `deploy_ssh_<name>.pub`), mirroring the `flake_ssh_*` / `update_ssh_*`
+#      pattern in ssh.nix.
 #
 # Secret paths never leave the host eval: only `hasKey: bool` ships in the env.
 # The map is the single source of truth for the job env; the `deploy-target`
@@ -35,11 +37,16 @@ let
 
   # Per-target deploy key bind-mounts (only targets that actually have a key).
   targetsWithKey = filterAttrs (_: t: t.sshPrivateKey != null) cfg.targets;
+  targetsWithPubKey = filterAttrs (_: t: t.sshPublicKey != null) cfg.targets;
 
   # LoadCredential entries — same set on every gitea-runner-<name> service.
-  deployLoadCreds = mapAttrsToList
-    (name: _: "deploy_ssh_${name}:/var/secrets/runner/deploy/${name}/id_ed25519")
-    targetsWithKey;
+  deployLoadCreds =
+    (mapAttrsToList
+      (name: _: "deploy_ssh_${name}:/var/secrets/runner/deploy/${name}/id_ed25519")
+      targetsWithKey)
+    ++ (mapAttrsToList
+      (name: _: "deploy_ssh_${name}.pub:/var/secrets/runner/deploy/${name}/id_ed25519.pub")
+      targetsWithPubKey);
 in
 {
   options.services.nixtache.runner.deploy.targets = mkOption {
@@ -63,11 +70,13 @@ in
   config = mkIf runnerCfg.enable {
     # 1) Map → job env (empty map `{}` when no targets configured; the action
     #    treats `{}` as "no deploy targets" and no-ops). No secret paths leak —
-    #    only `hasKey: bool` per target.
+    #    only `hasKey: bool` per target. `enable` and `extraOptions` MUST ship:
+    #    the action's optionality filters read both.
     services.nixtache.runner._extraRunnerEnvs.NIXTACHE_DEPLOY_TARGETS =
       builtins.toJSON (mapAttrs (name: t: {
         inherit name;
         inherit (t)
+          enable
           host
           sshUser
           sshPort
@@ -75,6 +84,7 @@ in
           system
           tags
           timeout
+          extraOptions
           ;
         hasKey = t.sshPrivateKey != null;
       }) cfg.targets);
@@ -83,7 +93,7 @@ in
     #    ssh.nix. The inner `config` runs in the CONTAINER eval — it only uses
     #    host-side `let` bindings above, never host `config.*`.
     containers.${runnerCfg.containerName} = {
-      bindMounts = mapAttrs' (name: t:
+      bindMounts = (mapAttrs' (name: t:
         nameValuePair "deploy_ssh_${name}" {
           mountPoint = "/var/secrets/runner/deploy/${name}/id_ed25519";
           # `toString`: bindMounts.hostPath is string-typed; sshPrivateKey may be
@@ -92,7 +102,13 @@ in
           hostPath = toString t.sshPrivateKey;
           isReadOnly = true;
         }
-      ) targetsWithKey;
+      ) targetsWithKey) // (mapAttrs' (name: t:
+        nameValuePair "deploy_ssh_${name}-pub" {
+          mountPoint = "/var/secrets/runner/deploy/${name}/id_ed25519.pub";
+          hostPath = toString t.sshPublicKey;
+          isReadOnly = true;
+        }
+      ) targetsWithPubKey);
 
       config = { ... }: {
         systemd.services = mapAttrs' (iname: _:

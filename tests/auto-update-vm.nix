@@ -3,9 +3,9 @@
 # AU-A1…A5 (ab path). AU-F5 (kernel-change reboot) stays a manual runbook —
 # see the comment block at the bottom of this file.
 #
-# Red until modules/auto-update/default.nix lands: without the module the suite
-# degrades to a clearly-named failing placeholder derivation instead of an
-# attrset-missing eval crash. KVM: runNixOSTest carries
+# When the auto-update module is absent the suite degrades to a clearly-named
+# failing placeholder derivation instead of an attrset-missing eval crash.
+# KVM: runNixOSTest carries
 # requiredSystemFeatures = [ "kvm" "nixos-test" ] itself (as ab-deploy-self-vm).
 #
 # Flake-path fixture: a self-contained flake (nixpkgs by store path — no
@@ -141,14 +141,6 @@ let
   flakeNode = { criticalUnits, healthCheckTimeout ? 60, fixture, extraPaths ? [ ] }: { ... }: {
     imports = [ self.nixosModules.deploy-target autoMod ];
     networking.hostName = hostName;
-    # Gap surfaced by this suite: deploy-target's tmpfiles rule for the pointer
-    # dir references group nixtache-deploy, but user.nix only defines that
-    # group when deployUser != null — while spec 09 §5 explicitly allows
-    # deployUser = null on timer-driven targets (tmpfiles then skips the rule
-    # and /var/lib/nixtache is missing). Shimmed here so the auto-update flow
-    # is exercised end-to-end; the dir provisioning should become
-    # deployUser-independent in the modules.
-    users.groups.nixtache-deploy = { };
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
     virtualisation.diskSize = 8192;
     virtualisation.memorySize = 2048;
@@ -223,7 +215,7 @@ if autoMod == null then
   pkgs.runCommand "auto-update-vm-module-missing"
     { requiredSystemFeatures = [ "kvm" ]; }
     ''
-      echo "nixosModules.auto-update is not implemented yet — auto-update VM conformance suite intentionally red" >&2
+      echo "nixosModules.auto-update is missing from this flake — cannot build the auto-update VM conformance suite" >&2
       exit 1
     ''
 else

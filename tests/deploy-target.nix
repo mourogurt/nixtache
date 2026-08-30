@@ -64,6 +64,11 @@ let
   servicesOf = host: host.config.systemd.services;
   has = set: name: set ? ${name};
 
+  # First-occurrence position of `pat` in `s` (used to assert script ORDER:
+  # e.g. rm-of-ab-pending AFTER the sysupdate trigger). lib.split takes a regex
+  # — the patterns below are regex-safe.
+  posOf = pat: s: lib.stringLength (builtins.head (lib.split pat s));
+
   # --- scenario A: apply unit + polkit wired (default deploy user) ----------
   hostApply = mkHost {
     services.nixtache.deploy-target.deployUser = {
@@ -72,11 +77,19 @@ let
     };
   };
   svcApply = servicesOf hostApply;
+  dryScript = svcApply."nixtache-apply-dry".script or "";
   scenarioApply = {
-    name = "apply unit + polkit wired; deploy user default name";
+    name = "apply units + polkit wired; deploy user default name";
     checks = {
       hasApplyUnit = has svcApply "nixtache-apply";
       applyTypeOneshot = svcApply."nixtache-apply".serviceConfig.Type == "oneshot";
+      # dry-apply unit (D11): PR-preview counterpart — diff only, no mutation
+      hasDryUnit = has svcApply "nixtache-apply-dry";
+      dryTypeOneshot = svcApply."nixtache-apply-dry".serviceConfig.Type == "oneshot";
+      dryScriptActivates = lib.hasInfix "dry-activate" dryScript;
+      dryScriptOwnPointer = lib.hasInfix "pending-dry" dryScript;
+      # read-only: no profile mutation in the dry path
+      dryScriptNoProfileSet = !(lib.hasInfix "nix-env" dryScript);
       polkitEnabled = hostApply.config.security.polkit.enable == true;
       polkitRulePresent = hostApply.config.environment.etc."polkit-1/rules.d/49-nixtache-deploy.rules".text or null != null;
       polkitRuleNamesUser =
@@ -85,6 +98,9 @@ let
       polkitRuleNamesUnit =
         lib.hasInfix "nixtache-apply.service"
           (hostApply.config.environment.etc."polkit-1/rules.d/49-nixtache-deploy.rules".text or "");
+      polkitRuleNamesDryUnit =
+        lib.hasInfix "nixtache-apply-dry.service"
+          (hostApply.config.environment.etc."polkit-1/rules.d/49-nixtache-deploy.rules".text or "");
       tmpfilesStateDir =
         lib.any (r: lib.hasInfix "/var/lib/nixtache" r)
           hostApply.config.systemd.tmpfiles.rules;
@@ -92,25 +108,59 @@ let
       # deploy user NOT auto-created here (autoProvision defaults true) — it IS:
       deployUserCreated = hostApply.config.users.users ? nixos-deploy;
       deployUserInGroup =
-        lib.elem "nixtache-deploy"
+        hostApply.config.users.users.nixos-deploy.group or null == "nixtache-deploy"
+        || lib.elem "nixtache-deploy"
           (hostApply.config.users.users.nixos-deploy.extraGroups or [ ]);
       deployUserTrusted =
         lib.elem "nixos-deploy" hostApply.config.nix.settings.trusted-users;
+      # SYSTEM user: invisible in display managers (SDDM lists uid >= 1000 /
+      # normal users only), never isNormalUser.
+      deployUserIsSystem = hostApply.config.users.users.nixos-deploy.isSystemUser == true;
+      deployUserNotNormal = hostApply.config.users.users.nixos-deploy.isNormalUser or false == false;
+      # gate prefix on the provisioned key line (sshGate default "gate")
+      deployKeyGated = lib.hasPrefix "restrict,command=" (lib.head
+        hostApply.config.users.users.nixos-deploy.openssh.authorizedKeys.keys);
     };
   };
 
-  # --- scenario A2: nixTrust=false → deploy user stays untrusted ------------
-  hostNoTrust = mkHost {
+  # --- scenario A2: nixTrust option REMOVED → setting it refuses eval --------
+  tryNixTrust = builtins.tryEval
+    (mkHost {
+      services.nixtache.deploy-target.deployUser = {
+        name = "nixos-deploy";
+        authorizedKey = "ssh-ed25519 AAAA...test";
+        nixTrust = false;
+      };
+    }).config.system.build.toplevel.outPath;
+  scenarioNixTrustRemoved = {
+    name = "deployUser.nixTrust removed → setting it is an unknown-option eval error";
+    checks = { refused = !tryNixTrust.success; };
+  };
+
+  # --- scenario A3: sshGate modes --------------------------------------------
+  hostGateRestrict = mkHost {
     services.nixtache.deploy-target.deployUser = {
       name = "nixos-deploy";
       authorizedKey = "ssh-ed25519 AAAA...test";
-      nixTrust = false;
+      sshGate = "restrict";
     };
   };
-  scenarioNoTrust = {
-    name = "deployUser.nixTrust=false → deploy user NOT in nix.settings.trusted-users";
+  hostGateNone = mkHost {
+    services.nixtache.deploy-target.deployUser = {
+      name = "nixos-deploy";
+      authorizedKey = "ssh-ed25519 AAAA...test";
+      sshGate = "none";
+    };
+  };
+  scenarioGateModes = {
+    name = "sshGate=restrict → restrict-only prefix; sshGate=none → plain key line";
     checks = {
-      notTrusted = !(lib.elem "nixos-deploy" hostNoTrust.config.nix.settings.trusted-users);
+      restrictOnly = lib.hasPrefix "restrict ssh-ed25519"
+        (lib.head hostGateRestrict.config.users.users.nixos-deploy.openssh.authorizedKeys.keys);
+      noCommandInRestrict = !(lib.hasInfix "command="
+        (lib.head hostGateRestrict.config.users.users.nixos-deploy.openssh.authorizedKeys.keys));
+      plainKey = (lib.head hostGateNone.config.users.users.nixos-deploy.openssh.authorizedKeys.keys)
+        == "ssh-ed25519 AAAA...test";
     };
   };
 
@@ -137,6 +187,10 @@ let
       applyHasTimeout600 = lib.hasInfix "600" applyScript;
       hcHasTimeout600 = lib.hasInfix "600" hcScript;
       applyHasRollback = lib.hasInfix "rollback" applyScript;
+      # Rollback re-activates the PRE-APPLY closure — never /run/current-system
+      # (which post-switch points at the broken new system).
+      rollbackReactivatesPrev = lib.hasInfix "\"$prev/bin/switch-to-configuration\" switch" applyScript;
+      noCurrentSystemRollback = !(lib.hasInfix "/run/current-system/bin/switch-to-configuration" applyScript);
     };
   };
 
@@ -176,6 +230,43 @@ let
     checks = { refused = !tryAutoOff.success; };
   };
 
+  # --- scenario E1.5: manual user (autoProvision=false) → warnings ------------
+  # A hand-managed NORMAL user is visible in SDDM → warning; with sshGate =
+  # "gate" the module also suggests the ready-made gate prefix for the key.
+  hostManualUser = mkHost {
+    users.users.ghost = {
+      isNormalUser = true;
+      openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAA...manual" ];
+    };
+    services.nixtache.deploy-target.deployUser = {
+      name = "ghost";
+      authorizedKey = "ssh-ed25519 AAAA...manual";
+      autoProvision = false;
+    };
+  };
+  warningsManual = hostManualUser.config.warnings;
+  scenarioManualUserWarns = {
+    name = "autoProvision=false + hand-managed normal user → DM-visibility + gate-prefix warnings";
+    checks = {
+      warnsNormalUser = lib.any (lib.hasInfix "visible in graphical login screens") warningsManual;
+      warnsGatePrefix = lib.any (lib.hasInfix "restrict,command=") warningsManual;
+    };
+  };
+
+  # --- scenario D2: criticalUnits + systemd-boot without bootCounting → warn -
+  hostBootCountingOff = mkHost {
+    services.nixtache.deploy-target.criticalUnits = [ "sshd.service" ];
+    boot.loader.systemd-boot.enable = true;
+    # bootCounting intentionally NOT enabled
+  };
+  scenarioBootCountingWarn = {
+    name = "criticalUnits + systemd-boot + bootCounting off → Tier-0 rollback warning";
+    checks = {
+      warnsBootCounting = lib.any (lib.hasInfix "bootCounting")
+        hostBootCountingOff.config.warnings;
+    };
+  };
+
   # --- scenario E2: deployUser=null (timer-only target) → group + dir exist -
   # The pointer dir's tmpfiles rule references the `nixtache-deploy` group; it
   # must exist even without a deploy user (auto-update-only targets).
@@ -194,9 +285,9 @@ let
   };
 
   # --- ab-image scenarios (Batch E: services.nixtache.deploy-target.ab.*) ----
-  # ab.enable wires a polkit rule authorizing the deploy user to start the two
-  # ab-image units (systemd-sysupdate + nixtache-ab-apply). Requires the consumer
-  # to have enabled systemd.sysupdate + bootCounting (asserted).
+  # ab.enable wires a polkit rule authorizing the deploy user to start the ab
+  # units (systemd-sysupdate, its -reboot variant, nixtache-ab-apply). Requires
+  # the consumer to have enabled systemd.sysupdate + bootCounting (asserted).
   hostAb = mkHost {
     services.nixtache.deploy-target.ab.enable = true;
     systemd.sysupdate.enable = true;
@@ -204,10 +295,11 @@ let
   };
   polkitAbRule = hostAb.config.environment.etc."polkit-1/rules.d/49-nixtache-ab.rules".text or "";
   scenarioAb = {
-    name = "ab.enable=true (+sysupdate+bootCounting) → ab polkit rule authorizes sysupdate + nixtache-ab-apply (start only)";
+    name = "ab.enable=true (+sysupdate+bootCounting) → ab polkit rule authorizes sysupdate(+reboot) + nixtache-ab-apply (start only)";
     checks = {
       polkitAbPresent = polkitAbRule != "";
       polkitAbSysupdate = lib.hasInfix "\"systemd-sysupdate.service\"" polkitAbRule;
+      polkitAbSysupdateReboot = lib.hasInfix "\"systemd-sysupdate-reboot.service\"" polkitAbRule;
       polkitAbApply = lib.hasInfix "\"nixtache-ab-apply.service\"" polkitAbRule;
       polkitAbStartOnly = lib.hasInfix "\"start\"" polkitAbRule;
       # gating off (default) → no nixtache-ab-apply path/service provisioned
@@ -244,9 +336,15 @@ let
       abServiceOneshot = svcAbGating.services."nixtache-ab-apply".serviceConfig.Type == "oneshot";
       # forgejoPort (3000, parsed from the runner module's forgejoUrl) reaches the script
       scriptHasForgejoPort = lib.hasInfix ":3000/api/v1/actions/runners" abApplyScript;
-      # idle-poll loop + sysupdate trigger present
+      # idle-poll loop + sysupdate-reboot trigger present (the -reboot variant:
+      # writes the inactive slot AND reboots — plain sysupdate never reboots)
       scriptPollsBusy = lib.hasInfix "busy" abApplyScript;
-      scriptTriggersSysupdate = lib.hasInfix "systemctl start systemd-sysupdate.service" abApplyScript;
+      scriptTriggersSysupdateReboot = lib.hasInfix "systemctl start systemd-sysupdate-reboot.service" abApplyScript;
+      # the pending flag is consumed ONLY after a successful start (retry-safe)
+      rmAfterSuccessfulStart =
+        (posOf "systemctl start systemd-sysupdate-reboot" abApplyScript)
+          < (posOf "rm -f /var/lib/nixtache/ab-pending" abApplyScript);
+      scriptKeepsPendingOnFail = lib.hasInfix "for retry" abApplyScript;
       # idleWaitTimeout propagates into the script (600s set above)
       scriptHasTimeout = lib.hasInfix "600" abApplyScript;
       # Forgejo API token mounted via LoadCredential
@@ -281,11 +379,14 @@ let
 
   scenarios = [
     scenarioApply
-    scenarioNoTrust
+    scenarioNixTrustRemoved
+    scenarioGateModes
     scenarioCritical
     scenarioNoCritical
     scenarioDefaultTimeout
     scenarioAutoOffAssert
+    scenarioManualUserWarns
+    scenarioBootCountingWarn
     scenarioNoUser
     scenarioAb
     scenarioAbGating

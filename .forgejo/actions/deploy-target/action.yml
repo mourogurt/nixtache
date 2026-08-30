@@ -76,19 +76,23 @@ runs:
             echo "::error::$cfg: toplevel build failed (no store path in output)"; return 1
           fi
 
+          # NIX_SSHOPTS so `nix copy --to ssh://` uses the deploy key + port.
+          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          export NIX_SSHOPTS="$ssh_opts"
+
           if [ "$mode" = "dry-activate" ]; then
-            echo "→ $cfg: dry-activate (no mutation)"
-            # dry-activate uses nixos-rebuild --use-remote-sudo (diff-only, OK without the apply unit)
-            nixos-rebuild dry-activate --flake .#$cfg \
-              --target-host "$user@$host" --use-remote-sudo $SANDBOX_FLAG $extra \
-              || { echo "::error::$cfg: dry-activate failed"; return 1; }
+            echo "→ $cfg: dry-activate via nixtache-apply-dry.service (diff, no mutation)"
+            # Same V2 transport as switch (no rebuild tool, no remote sudo):
+            # (sudo does not exist for the deploy user): push the closure, drop
+            # the dry pointer, trigger the root dry-apply unit (polkit start).
+            nix copy --to "ssh://$user@$host" "$P" $extra || { echo "::error::$cfg: nix copy failed (dry)"; return 1; }
+            ssh $ssh_opts "$user@$host" "echo '$P' > /var/lib/nixtache/pending-dry && systemctl start nixtache-apply-dry.service" \
+              || { echo "::error::$cfg: nixtache-apply-dry.service failed — see target journal: journalctl -u nixtache-apply-dry.service"; return 1; }
+            echo "✓ $cfg: dry-activate complete (diff in target journal — nothing mutated)"
             return 0
           fi
 
           # switch: copy closure, drop pointer, trigger root apply-unit (polkit).
-          # NIX_SSHOPTS so `nix copy --to ssh://` uses the deploy key + port.
-          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-          export NIX_SSHOPTS="$ssh_opts"
           echo "→ $cfg: nix copy closure → $user@$host"
           nix copy --to "ssh://$user@$host" "$P" $extra || { echo "::error::$cfg: nix copy failed"; return 1; }
 
@@ -172,16 +176,27 @@ runs:
               || { echo "::error::$cfg: nixtache-ab-apply trigger failed"; return 1; }
           else
             echo "→ $cfg: remote ab-image — trigger target systemd-sysupdate"
-            ssh $ssh_opts "$user@$host" "systemctl start systemd-sysupdate.service" \
-              || echo "::warning::$cfg: remote systemd-sysupdate trigger failed (target will apply on its own timer)"
+            # The -reboot variant: after writing the inactive slot it reboots
+            # the remote target so the new slot actually becomes active
+            # (plain systemd-sysupdate.service never reboots).
+            ssh $ssh_opts "$user@$host" "systemctl start systemd-sysupdate-reboot.service" \
+              || echo "::warning::$cfg: remote systemd-sysupdate-reboot trigger failed (target will apply on its own timer)"
           fi
           echo "✓ $cfg: ab-image staged + apply signalled"
         }
+
+        # Exported so the per-target `timeout … bash -c` subshells below see
+        # the functions and the sandbox flag.
+        export SANDBOX_FLAG
+        export -f _liveApply _abImage
 
         for cfg in $configs; do
           echo ""
           echo "=== target: $cfg ==="
           t=$(echo "$NIXTACHE_DEPLOY_TARGETS" | jq -e --arg n "$cfg" '.[$n]') || { echo "skip: no map entry for $cfg"; continue; }
+          # Safe-default: `enable` absent from the JSON (older runner module)
+          # means enabled — only an explicit false skips the target.
+          t=$(jq 'if .enable == null then . + {enable: true} else . end' <<<"$t")
           [ "$(jq -r .hasKey <<<"$t")" = "true" ] || { echo "skip: $cfg has no deploy key (sshPrivateKey=null)"; continue; }
           [ "$(jq -r .enable <<<"$t")"  = "true" ] || { echo "skip: $cfg enable=false"; continue; }
 
@@ -198,11 +213,18 @@ runs:
           fi
 
           method=$(jq -r .method <<<"$t")
+          # Per-target timeout (minutes) from the map: wrap the whole
+          # build+activate of THIS target in timeout(1); 124 = timed out.
+          tmo=$(jq -r '.timeout // 240' <<<"$t")
           case "$method" in
-            live)     _liveApply "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1 \
-                        || { echo "::error::$cfg: live deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; } ;;
-            ab-image) _abImage "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1 \
-                        || { echo "::error::$cfg: ab-image deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; } ;;
+            live)     timeout "${tmo}m" bash -c '_liveApply "$@"' _ "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1
+                      rc=$?
+                      if [ "$rc" -eq 124 ]; then echo "::error::$cfg: exceeded per-target timeout (${tmo}m)"; exit 1; fi
+                      if [ "$rc" -ne 0 ]; then echo "::error::$cfg: live deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; fi ;;
+            ab-image) timeout "${tmo}m" bash -c '_abImage "$@"' _ "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1
+                      rc=$?
+                      if [ "$rc" -eq 124 ]; then echo "::error::$cfg: exceeded per-target timeout (${tmo}m)"; exit 1; fi
+                      if [ "$rc" -ne 0 ]; then echo "::error::$cfg: ab-image deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; fi ;;
             *) echo "::error::$cfg: unknown method '$method'"; exit 1 ;;
           esac
         done

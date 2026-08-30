@@ -2,9 +2,9 @@
 # `services.nixtache.auto-update.*`), implementing the pure-eval cases AU-1…AU-25
 # of doc/specs/direct-deploy/TEST-SPECS-AUTO-UPDATE.md.
 #
-# Red until modules/auto-update/default.nix lands: wiring scenarios degrade to a
-# named `moduleImplemented=false` check, assert scenarios are gated on a
-# `modulePresent` probe — the graceful-degradation pattern of ab-contract.nix.
+# Wiring scenarios degrade to a named `moduleImplemented=false` check and
+# assert scenarios are gated on a `modulePresent` probe when the module is
+# absent — the graceful-degradation pattern of ab-contract.nix.
 #
 # Fast, no KVM. Exposed via checks.<system>.auto-update.
 {
@@ -21,8 +21,8 @@ let
   # breaks nullOr str options under the deep toplevel probe).
   dummySecret = "/dev/null";
 
-  # Absent until implemented → empty-module fallback so an OPTION-missing error
-  # (caught by the probes) is what surfaces, not an attrset-missing crash.
+  # Empty-module fallback when the module is absent, so an OPTION-missing
+  # error (caught by the probes) is what surfaces, not an attrset-missing crash.
   autoMod = self.nixosModules.auto-update or ({ ... }: { });
 
   baseModule = { lib, ... }: {
@@ -54,8 +54,15 @@ let
     baseModule
     {
       # Stubs for a clean eval without full A/B prep — same pair as scenarioAb
-      # in tests/deploy-target.nix.
+      # in tests/deploy-target.nix. The hand-rolled transfer satisfies strict
+      # A4 (the ab path needs a resolvable update source; consumer-owned
+      # systemd.sysupdate transfers with a Source count).
       systemd.sysupdate.enable = true;
+      systemd.sysupdate.transfers."10-nix-store".Source = {
+        Path = "http://stage.test/";
+        Type = "url-file";
+        MatchPattern = [ "t_@v.nix-store.raw" ];
+      };
       boot.loader.systemd-boot.bootCounting.enable = true;
       services.nixtache.deploy-target.ab.enable = true;
       services.nixtache.auto-update = lib.recursiveUpdate { enable = true; } au;
@@ -73,6 +80,11 @@ let
     {
       services.nixtache.runner.forgejoUrl = "http://localhost:3000";
       systemd.sysupdate.enable = true;
+      systemd.sysupdate.transfers."10-nix-store".Source = {
+        Path = "http://stage.test/";
+        Type = "url-file";
+        MatchPattern = [ "t_@v.nix-store.raw" ];
+      };
       boot.loader.systemd-boot.bootCounting.enable = true;
       services.nixtache.deploy-target.ab = {
         enable = true;
@@ -274,7 +286,18 @@ let
   # indicator that makes explicit method = "ab-image" legitimate (AU-22 keeps
   # sysupdate off and must fail). See test-spec AU-11 setup B.
   scenarioAu11b = contract "AU-11B: explicit method=ab-image on a non-ab host (+sysupdate stub)"
-    (flakeMods { method = "ab-image"; } ++ [ { systemd.sysupdate.enable = true; } ])
+    (flakeMods { method = "ab-image"; } ++ [
+      {
+        systemd.sysupdate.enable = true;
+        # Strict A4: the ab path needs a resolvable source — a consumer-owned
+        # transfer with a Source satisfies it without the ab modules.
+        systemd.sysupdate.transfers."10-nix-store".Source = {
+          Path = "http://stage.test/";
+          Type = "url-file";
+          MatchPattern = [ "t_@v.nix-store.raw" ];
+        };
+      }
+    ])
     (cfg: {
       explicitAb = lib.hasInfix "systemd-sysupdate.service" (auScript cfg);
     });
@@ -367,6 +390,23 @@ let
     ]
     [ "systemd.sysupdate" ];
 
+  # Strict A4 (spec 09 §7): sysupdate alone is NOT enough — the ab path also
+  # needs a resolvable source (ab-image module, ab.partitions.source, or
+  # consumer-owned transfers carrying a Source). None here → refuses.
+  scenarioAu18b = assertContract "AU-18b/A4-strict: ab path + sysupdate on + NO source anywhere → eval refuses"
+    [
+      self.nixosModules.deploy-target
+      autoMod
+      baseModule
+      {
+        systemd.sysupdate.enable = true;
+        boot.loader.systemd-boot.bootCounting.enable = true;
+        services.nixtache.deploy-target.ab.enable = true;
+        services.nixtache.auto-update = { enable = true; method = "ab-image"; };
+      }
+    ]
+    [ "resolvable update source" ];
+
   scenarioAu19 = assertContract "AU-19/A5: rebootPolicy=window + empty window (start==end) → eval refuses"
     (flakeMods { rebootPolicy = "window"; rebootWindow = { start = "02:00"; end = "02:00"; }; })
     [ "rebootWindow" ];
@@ -444,6 +484,7 @@ let
     scenarioAu16
     scenarioAu17
     scenarioAu18
+    scenarioAu18b
     scenarioAu19
     scenarioAu20
     scenarioAu21

@@ -87,7 +87,8 @@ boot-счётчиком; обнуливший счётчик → грузитс�
 4. **probe**: в окне `healthCheckTimeout` локально опрашивает
    `systemctl is-active --quiet --wait <unit>` для каждого `criticalUnits`;
 5. при fail → `rollback()`: `nix-env --set "$prev"` + повторный switch + `exit 1`;
-6. при success → удаляет pointer + `exit 0`.
+6. при success → удаляет pointer + `exit 0`; при провале — тоже удаляет
+   (анти-retry, см. 04 §B) и `exit 1`.
 
 Юнит запускается deploy-юзером через `systemctl start nixtache-apply.service`
 (polkit-авторизация, см. `02-action.md` `_liveApply`). `systemctl start` для

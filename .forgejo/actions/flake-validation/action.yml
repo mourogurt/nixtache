@@ -8,10 +8,10 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # SANDBOX_OK is exported by the nixtache runner module (1 = the
-        # container has CAP_SYS_ADMIN and the daemon sandboxes; 0 = legacy /
-        # unprivileged container). Only fall back to --no-sandbox in the 0
-        # case so the check still runs instead of dying on missing namespaces.
+        # SANDBOX_OK is exported by the sandbox-probe action (1 = the probe
+        # build succeeded under the daemon sandbox; 0/unset = broken or
+        # unsupported). Only fall back to --no-sandbox in the 0 case so the
+        # check still runs instead of dying on missing namespaces.
         if [ "${SANDBOX_OK:-0}" = "1" ]; then
           SANDBOX_FLAG=""
         else

@@ -1,4 +1,4 @@
-# The consumer-style system that tests/ab-anywhere-vm.nix installs onto the
+# The consumer-style system that tests/ab-ota-anywhere-vm.nix installs onto the
 # bare target disk via nixos-anywhere. A standalone function of the flake
 # inputs so the SAME expression evaluates in two places:
 #   1. on the host — to pre-build toplevel / diskoScript / sysupdate-package /
@@ -81,7 +81,7 @@ fixture.mkAppliance {
         # root filesystem — nixos-anywhere installs a closure, it cannot write
         # raw image slots, so the A/B slots are out-of-band update partitions
         # written only by systemd-sysupdate (the same separation of concerns
-        # as the extra-disk layout in tests/ab-deploy-e2e.nix). ab-image's
+        # as the extra-disk layout in tests/ab-ota-e2e.nix). ab-image's
         # by-partlabel /nix/store mount (the squashfs slot) is replaced
         # wholesale — disko creates the slot partitions but leaves them raw.
         fileSystems = lib.mkForce {
@@ -160,8 +160,8 @@ fixture.mkAppliance {
 
         # ab-image targets receive no `nix copy` closure pushes (the OTA
         # payload is the sysupdate-package) and the appliance profile disables
-        # nix — deploy-user store trust would be dead config here.
-        services.nixtache.deploy-target.deployUser.nixTrust = false;
+        # nix — no store trust configuration here (the deploy-user module adds
+        # trusted-users unconditionally; on a nix-less appliance it is inert).
       }
     )
   ];

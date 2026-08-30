@@ -86,27 +86,39 @@ with lib;
             type = types.bool;
             default = true;
             description = ''
-              `true` (default): the module creates `users.users.<name>`
-              (`isNormalUser`), installs the `authorizedKey`, and adds it to the
-              `nixtache-deploy` group (write access to the apply pointer dir).
-              `false`: the consumer manages the user/key themselves; the module
-              still grants the polkit + group membership for activation
-              (permissions are always the module's job) and asserts the user
-              exists.
+              `true` (default): the module creates `users.users.<name>` as a
+              SYSTEM user (`isSystemUser`, uid < 1000 — invisible in SDDM/Plasma
+              login screens), installs the `authorizedKey` (with the SSH gate
+              prefix, see `sshGate`), and adds it to the `nixtache-deploy` group
+              (write access to the apply pointer dir). `false`: the consumer
+              manages the user/key themselves; the module still grants the
+              polkit + group membership for activation (permissions are always
+              the module's job), asserts the user exists, and warns when the
+              hand-managed user is a normal (display-manager-visible) user.
             '';
           };
-          nixTrust = mkOption {
-            type = types.bool;
-            default = true;
+          sshGate = mkOption {
+            type = types.enum [ "gate" "restrict" "none" ];
+            default = "gate";
             description = ''
-              Whether to add the deploy user to `nix.settings.trusted-users`.
-              The `live` deploy path pushes the built closure with
-              `nix copy --to ssh://…`, which serves the store as this user, and
-              the target's nix-daemon only imports unsigned store paths for
-              trusted users — without trust the push is rejected. Trusted
-              status also lets the user pass arbitrary nix options to the
-              daemon, so set `false` only if you manage nix trust (or closure
-              signing) out-of-band.
+              How the auto-provisioned authorized key restricts the SSH session:
+
+              - `"gate"` (default): the key line gets a
+                `restrict,command=<nixtache-ssh-gate>` prefix. The gate allows
+                exactly the deploy protocol's remote commands (`nix-store
+                --serve` for `nix copy --to`, the apply-unit trigger,
+                `systemd-sysupdate` triggers, the `true` probe) and rejects
+                anything else — no shell, no port forwarding, no agent/X11
+                (`restrict`).
+              - `"restrict"`: only the `restrict` prefix (no command gate) —
+                escape hatch for protocol drift between the action version and
+                this module: commands run unrestricted-minus-features until
+                both sides are updated.
+              - `"none"`: plain key line, no options (legacy behavior).
+
+              Only meaningful with `autoProvision = true` (otherwise the key
+              line is the consumer's; the module emits a warning suggesting the
+              ready-made gate prefix).
             '';
           };
         };
@@ -115,11 +127,16 @@ with lib;
       description = ''
         The deploy user account the runner authenticates as on this target. The
         module provisions it (when `autoProvision = true`) with least-privilege
-        — SSH key + `nixtache-deploy` group + polkit authorization to start the
-        root-owned `nixtache-apply.service`. NO sudo/doas/run0: the runner only
-        copies the closure (`nix copy --to`), drops a pointer file, and triggers
-        the apply unit; all root work happens inside the unit. `null` = no deploy
-        user provisioned (the consumer sets up auth out-of-band).
+        — SSH key + `nixtache-deploy` group + polkit authorization to start
+        the root-owned `nixtache-apply.service`. NO sudo/doas/run0: the runner
+        only copies the closure (`nix copy --to`), drops a pointer file, and
+        triggers the apply unit; all root work happens inside the unit. `null`
+        = no deploy user provisioned (the consumer sets up auth out-of-band).
+
+        The account is added to `nix.settings.trusted-users` unconditionally:
+        `nix copy --to ssh://…` pushes locally-built (unsigned) closures, and
+        the nix daemon only imports those for trusted users — this is a
+        protocol requirement of the live path, not an optional privilege.
       '';
     };
   };

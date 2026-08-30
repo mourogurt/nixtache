@@ -117,7 +117,7 @@ let
   # JSON без секретных путей — только то, что уходит в env джобы.
   targetJSON = builtins.toJSON (lib.mapAttrs (name: t: {
     inherit name;
-    inherit (t) host sshUser sshPort method transport system tags timeout;
+    inherit (t) enable host sshUser sshPort method system tags timeout extraOptions;
     hasKey = t.sshPrivateKey != null;
   }) cfg.targets);
 in {
@@ -127,8 +127,10 @@ in {
     description = "Карта целей deploy: config → host → creds.";
   };
 
-  config = mkIf (cfg.targets != {}) {
-    # 1) карта → env (через агрегатор _extraRunnerEnvs → instances.nix вливает в runner.envs)
+  config = mkIf config.services.nixtache.runner.enable {
+    # 1) карта → env (через агрегатор _extraRunnerEnvs → instances.nix вливает в runner.envs).
+    #    Env установлен ВСЕГДА: пустая карта сериализуется как "{}"
+    #    (action трактует "{}" как «целей нет» и no-op'ится).
     services.nixtache.runner._extraRunnerEnvs.NIXTACHE_DEPLOY_TARGETS = targetJSON;
 
     # 2) ключи → LoadCredential (один bind-mount на цель)
@@ -152,12 +154,12 @@ in {
 
 ```json
 {
-  "desktop": {"name":"desktop","host":"10.13.37.3","sshUser":"nixos-deploy",
+  "desktop": {"name":"desktop","enable":true,"host":"10.13.37.3","sshUser":"nixos-deploy",
               "sshPort":22,"method":"live","system":null,
-              "tags":["lan","vpn"],"timeout":240,"hasKey":true},
-  "server":  {"name":"server","host":"10.13.37.1","sshUser":"nixos-deploy",
+              "tags":["lan","vpn"],"timeout":240,"extraOptions":[],"hasKey":true},
+  "server":  {"name":"server","enable":true,"host":"10.13.37.1","sshUser":"nixos-deploy",
               "sshPort":22,"method":"ab-image","system":null,
-              "tags":[],"timeout":240,"hasKey":true}
+              "tags":[],"timeout":240,"extraOptions":[],"hasKey":true}
 }
 ```
 
@@ -174,7 +176,7 @@ skip (R1). `transport` в JSON **отсутствует** (V2 — единств
 | `sshPrivateKey=null` | в env `hasKey:false` → action skip (R1); bindMount НЕТ |
 | `method="ab-image"` (server) | поле в JSON корректно; action идёт по ab-image-ветке (06) |
 | `method="live"` (default) | default в JSON = `"live"`; transport в JSON отсутствует |
-| `enable=false` | цель в env отсутствует (или помечена) → action skip |
+| `enable=false` | цель присутствует в env с `"enable":false` → action skip по фильтру |
 | `_extraRunnerEnvs` агрегация (S1) | deploy.nix-ключ доходит до `runner.envs` |
 
 Тесты — pure-evaluation (`nixosSystem` + assert на `config.*`), по образцу

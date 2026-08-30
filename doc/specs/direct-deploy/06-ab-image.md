@@ -40,8 +40,8 @@ per-cfg dir с versioned-файлами `<cfg>/<id>_<version>.{raw,efi}`) дер
 
 | Таргет | source sysupdate | apply | idle-gate? |
 |---|---|---|---|
-| **local-self** (runner-host = цель, напр. server) | `file:///var/lib/nixtache/ab-stage/` (тот же dir, без сети) | CI сигналит `nixtache-ab-apply` → idle-wait → sysupdate → reboot | **да** (не рвать джобы) |
-| **remote** (цель ≠ runner-host) | `https://<runner-host>/ab-stage/…` (nginx) | sysupdate-таймер цели тянет по HTTPS (pull, асинхронно); CI опц. SSH-триггерит | нет (раннеров на цели нет) |
+| **local-self** (runner-host = цель, напр. server) | `/var/lib/nixtache/ab-stage/` (тот же dir, plain path — sysupdate отвергает `file://` URI для regular-file source) | CI сигналит `nixtache-ab-apply` → idle-wait → `systemd-sysupdate-reboot.service` | **да** (не рвать джобы) |
+| **remote** (цель ≠ runner-host) | `https://<runner-host>/ab-stage/…` (nginx) | sysupdate-таймер цели тянет по HTTPS (pull, асинхронно); CI опц. SSH-триггерит `systemd-sysupdate-reboot.service` | нет (раннеров на цели нет) |
 
 sysupdate на каждом таргете **сам** выбирает старшую версию по `MatchPattern`
 (central store — источник правды по версиям).
@@ -112,11 +112,17 @@ sysupdate на каждом таргете **сам** выбирает стар�
 1. **Partition layout: 2 nix-store слота** (`image.repart`): squashFS slot A + пустой
    slot B **равного размера** + ESP + root.
 2. **UKI + systemd-boot** (загрузчик обязателен — boot-counting): UKI в ESP.
-3. **`systemd.sysupdate` transfers** — source по топологии таргета (per-cfg subdir):
-   - **local-self**: `Source = file:///var/lib/nixtache/ab-stage/<cfg>/`, `Type = "regular-file"`,
-     `reboot.enable = false` (reboot делает gating по idle);
-   - **remote**: `Source = https://<runner-host>/ab-stage/<cfg>/`, `Type = "url-file"`,
-     `reboot.enable = true` (sysupdate сканит HTTPS autoindex'ом — нужен `autoindex on`, см. nixtache-side);
+3. **`systemd.sysupdate` transfers** — source по топологии таргета (per-cfg subdir);
+   per-transfer reboot-флага у sysupdate НЕТ — ребут даёт выбор ЮНИТА:
+   `systemd-sysupdate.service` (только запись слота) vs
+   `systemd-sysupdate-reboot.service` (запись + ребут):
+   - **local-self**: `Source = /var/lib/nixtache/ab-stage/<cfg>/` (plain absolute
+     path), `Type = "regular-file"`; ребут триггерит gating-юнит
+     (`nixtache-ab-apply` → `systemd-sysupdate-reboot.service` после idle-wait);
+   - **remote**: `Source = https://<runner-host>/ab-stage/<cfg>/`, `Type = "url-file"`
+     (sysupdate сканит HTTPS autoindex'ом — нужен `autoindex on`, см. nixtache-side);
+     CI-триггер и авто-канал используют `systemd-sysupdate-reboot.service`,
+     чтобы новый слот активировался ребутом;
    - общий: `MatchPattern` `<id>_@v.nix-store.raw` / `<id>_@v.efi`, `InstancesMax = 2`.
 4. **`system.image.id`** (фикс.) + **`system.image.version`** (per build).
    **Версия назначается в РАНТАЙМЕ, не декларативно:** consumer коммитит файл

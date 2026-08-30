@@ -4,7 +4,7 @@
 #
 #   1. Boot the v1 A/B appliance (real repart image: ESP + nix-store_1 slot +
 #      _empty slot + shared ext4 root) in QEMU via a driver-created machine
-#      (the ab-anywhere-vm mechanism: OVMF → systemd-boot fallback → UKI;
+#      (the ab-ota-anywhere-vm mechanism: OVMF → systemd-boot fallback → UKI;
 #      backdoor root shell over virtconsole from test-instrumentation.nix).
 #      overlay-nix is enabled: /nix/store is the ro squashFS of slot A with a
 #      writable OverlayFS upper at /var/lib/nix-overlay/upper on the SHARED

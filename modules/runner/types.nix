@@ -178,8 +178,10 @@ in
         type = types.nullOr types.path;
         default = null;
         description = ''
-          Optional path to the deploy public key matching `sshPrivateKey` (for
-          `known_hosts` / verification). `null` = not provided.
+          Optional path to the deploy public key matching `sshPrivateKey`.
+          When set it is bind-mounted into the container and exposed to jobs as
+          the `deploy_ssh_<name>.pub` credential (verification / known_hosts
+          bookkeeping). `null` = not provided.
         '';
       };
 
@@ -223,8 +225,9 @@ in
         type = types.ints.positive;
         default = 240;
         description = ''
-          Per-target timeout (minutes) for build + activation. The action aborts
-          a target that exceeds it.
+          Per-target timeout (minutes) for build + activation. The deploy-target
+          action wraps each target's whole deploy (build, copy, activate) in
+          `timeout(1)`; exceeding it fails that target's job.
         '';
       };
     };

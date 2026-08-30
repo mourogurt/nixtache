@@ -13,52 +13,107 @@ actions that build/validate consumer flakes. Any project can consume it
 ```nix
 inputs.nixtache.url = "git+ssh://forgejo@code.zinzaguras.ru/nixops/nixtache.git";
 # ...
-nixtache.nixosModules.runner    # (or .default alias)
-nixtache.nixosModules.secrets   # secrets provider abstraction (vars + providers)
-nixtache.lib.mkDocs             # consumer docs helper (configurations + devShells)
+nixtache.nixosModules.runner        # (or .default alias)
+nixtache.nixosModules.deploy-target # direct-deploy target side
+nixtache.nixosModules.ab-image      # A/B appliance image config
+nixtache.nixosModules.overlay-nix   # writable store overlay for appliances
+nixtache.nixosModules.auto-update   # unified auto-update channel
+nixtache.nixosModules.secrets       # secrets provider abstraction (vars + providers)
+nixtache.lib.mkDocs                 # consumer docs helper (configurations + devShells)
 ```
 
 - **`nixosModules.runner`** — `services.nixtache.runner`: a NixOS container
   running `gitea-actions-runner` (forgejo-runner) with a configurable nix
   store location (`store.path`: `"/"` reuses the container's system nix-daemon;
   any other base like `/srv` relocates the store to `<path>/nix` via a custom
-  `nix-daemon` + storage oneshot), a `nix-serve-ng` binary cache, an nginx
-  vhost, and **multi-instance** support (`instances.<name>`). Exports
-  `gitUser` + `bot` identity to every CI job via act_runner `runner.envs`
-  (see "Module → CI wiring" below). All project-specific values are options;
-  **secrets are `types.path`, supplied by the consumer**. Source split by
-  responsibility under `modules/runner/` (default/types/store/cache/ssh/
-  sandbox/known-hosts/instances) — all contributions merge into one container
-  via `mkMerge`.
+  `nix-daemon` + storage oneshot; `store.mode` picks `clone` vs `overlay`
+  population), a `nix-serve-ng` binary cache, an nginx vhost, and
+  **multi-instance** support (`instances.<name>`). Exports `gitUser` + `bot`
+  identity to every CI job via act_runner `runner.envs` (see "Module → CI
+  wiring" below). All project-specific values are options; **secrets are
+  `types.path`, supplied by the consumer**. Source split by responsibility
+  under `modules/runner/` (default/types/store/cache/ssh/sandbox/known-hosts/
+  instances/deploy/ab) — all contributions merge into one container via
+  `mkMerge`.
+- **`nixosModules.deploy-target`** — `services.nixtache.deploy-target`:
+  imported by EVERY deploy target. Provisions the root
+  `nixtache-apply.service` (set profile → switch → probe `criticalUnits` →
+  ROLLBACK re-activating the previous closure), polkit start-only rules, the
+  `nixtache-deploy` group + `/var/lib/nixtache` pointer dir, the deploy user
+  (system user, uid < 1000, `nixtache-ssh-gate` `restrict,command=` key,
+  added to `nix.settings.trusted-users` unconditionally — protocol
+  requirement of `nix copy --to ssh://` serve-write), Tier-0
+  `nixtache-health-check.service` on `boot-complete.target`, and the
+  `ab.*` runtime options (gating, partition provisioning).
+- **`nixosModules.ab-image`** — `services.nixtache.ab-image`: build-time A/B
+  image config (repart slots + UKI + sysupdate transfers +
+  `system.image.{id,version}` + boot counting + GPG verify). Imports the
+  image-based-appliance profile (`nix.enable = false`) — A/B targets only.
+  Remote targets update via `systemd-sysupdate-reboot.service`; the runner
+  host self-updates through the idle-gated `nixtache-ab-apply`.
+- **`nixosModules.overlay-nix`** — `services.nixtache.overlay-nix`: layers a
+  writable OverlayFS on `/nix/store` (lower = RO image store, upper =
+  writable) via `local-overlay-store`, so image-based targets can install
+  packages at runtime.
+- **`nixosModules.auto-update`** — `services.nixtache.auto-update`: unified
+  auto-update replacing `system.autoUpgrade` (asserted): method
+  `auto|flake|ab-image`, shared timer, flake path builds toplevel → pointer →
+  `nixtache-apply` (never `nixos-rebuild`), ab path triggers sysupdate,
+  `rebootPolicy never|if-needed|window`. See
+  `doc/specs/direct-deploy/09-auto-update.md`.
 - **`nixosModules.secrets`** — `services.nixtache.secrets`: provider
   abstraction. `vars` (name → path, internal) is the uniform end result;
   `providers` is an extensible attrset (ssh/forgejo/vault/systemd roadmap,
   any combination). Today the runner consumes direct path options; `vars` is
   the target providers write into. See modules/secrets.nix.
+- **Direct deploy (summary).** Runner-side `deploy.targets.<name>` map
+  (serialized to job env `NIXTACHE_DEPLOY_TARGETS`, keys as `deploy_ssh_*`
+  LoadCredential) → reusable `deploy.yml` workflow → `deploy-target` action →
+  target-side module. Spec: `doc/specs/0001-direct-deploy.md` +
+  `doc/specs/direct-deploy/*`; consumer migration:
+  `doc/migration/direct-deploy.md`.
 - **`lib.mkDocs`** — consumer docs helper. Generates `configurationDocs-<machine>`
   (via `nixosOptionsDoc`, scoped by `optionPrefixes`) + `devShellDocs` + a
   combined `docs` artifact. Consumers expose it under `packages.<system>` and
   build via the reusable `docs.yml` workflow. See README "Documenting your flake".
-- **`packages.<system>.optionsMarkdown` / `.optionsJSON`** — this flake's OWN
-  option reference, generated from the runner module via `nixosOptionsDoc`
-  (filtered to `services.nixtache.*`). Built into the `nixtache-options`
-  artifact by self-CI.
-- **`checks.x86_64-linux.runner`** (alias `.default`) — pure-evaluation tests
-  for the module contract (store `/`/`/srv`/empty, multi-instance, optional
-  SSH, gitUser/bot envs, sandbox cap on/off). Build with `nix build .#checks.x86_64-linux.runner`.
-- **`.forgejo/workflows/{nix-check,update-flake,docs}.yml`** — reusable
-  workflows (`on: workflow_call`) for consumer repositories.
+- **`packages.<system>.optionsMarkdown` / `.optionsJSON` / `.optionsHTML`**
+  (`.default` = `optionsMarkdown`) — this flake's OWN option reference,
+  generated from ALL nixtache modules via `nixosOptionsDoc` (scoped to
+  `services.nixtache.*`). Built into the `nixtache-options` artifact by
+  self-CI.
+- **`checks.<system>`** — pure-eval test suites: `runner`, `deploy-target`,
+  `ab-image`, `mkDocs`, `ab-existing`, `ab-contract`, `auto-update` (no
+  `.default` alias). Built by every `nix flake check`; each prints an ok/FAIL
+  report. Build one with `nix build .#checks.x86_64-linux.<suite>`.
+- **`vmTests.x86_64-linux`** — KVM-only suites: `ab-deploy`, `ab-ota-e2e`,
+  `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`, `overlay-nix-vm`,
+  `overlay-nix-install-vm`, `overlay-nix-ab-swap-vm`, `runner-store-mode-vm`,
+  `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
+  `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`. NOT a checked
+  output — `nix flake check` skips it; run explicitly on a KVM host with
+  `nix build .#vmTests.x86_64-linux.<suite>`.
+- **`nixosConfigurations.abtest-remote`** — dogfood fixture for
+  `tests/ab-deploy.nix` (the action's `nix build .#nixosConfigurations.…`
+  resolves inside nixtache itself). NOT for real deployment.
+- **`.forgejo/workflows/{nix-check,deploy,docs,update-flake}.yml`** —
+  reusable workflows (`on: workflow_call`) for consumer repositories.
 - **`.forgejo/workflows/ci.yml`** — nixtache's **own** CI: on push/PR to
-  `main`, runs `nix flake check` (which builds `checks.*`, i.e. the module
-  tests), prints the test report, and generates the `nixtache-options` docs
-  artifact. Not reusable — nixtache has no `nixosConfigurations`/`devShells`,
-  so it deliberately does not call `rebuild-configurations`/`rebuild-devshells`.
-- **`.forgejo/actions/{ssh-setup,flake-validation,rebuild-configurations,rebuild-devshells,generate-docs}`**
+  `main`, runs `nix flake check` (which builds `checks.*`), prints every
+  suite's test report, and generates the `nixtache-options` docs artifact.
+  Not reusable — nixtache exposes no consumer-facing `nixosConfigurations`
+  (only the `abtest-remote` dogfood fixture) and no `devShells`, so it
+  deliberately does not call `rebuild-configurations`/`rebuild-devshells`.
+- **`.forgejo/actions/{ssh-setup,flake-validation,rebuild-configurations,rebuild-devshells,generate-docs,deploy-target,sandbox-probe}`**
   — reusable composite actions.
 - **`README.md`** — user-facing documentation (quickstart, architecture,
-  wiring, sandboxing, secrets providers, "Documenting your flake", sha1).
-- **`doc/migration-plan.md`** — the migration plan + architectural decisions
-  (Q1–Q5) that shaped this repo (draft reference).
+  wiring, direct deploy, sandboxing, secrets providers, "Documenting your
+  flake", sha1).
+- **`doc/specs/`** — `0001-direct-deploy.md` + `direct-deploy/` stages 01–10 +
+  TEST-SPECS* (the deploy feature's design + test contracts).
+- **`doc/migration/direct-deploy.md`** — consumer migration guide (adopting the
+  deploy feature, moving to auto-update, BREAKING changes).
+- **`doc/drafts/migration-plan.md`** — the original migration plan +
+  architectural decisions (Q1–Q5) (superseded historical draft).
 
 ## CRITICAL: this repo MUST stay `sha1`
 
@@ -106,6 +161,9 @@ services.nixtache.runner = {
   additionalCapabilities = [ "CAP_NET_ADMIN" ];   # extra caps merged on top of the sandbox one (optional)
   gitHost       = { name = "forgejo_ed25519"; hostNames = [ "git.example.com" "10.0.0.1" "localhost" ]; publicKey = "ssh-ed25519 AAAA..."; };
   extraKnownHosts = [ { name = "github_ed25519"; hostNames = [ "github.com" ]; publicKey = "ssh-ed25519 AAAA..."; } ];
+  deploy.targets = {                                # direct-deploy map; attr name MUST equal nixosConfigurations.<name>
+    desktop = { host = "desktop.example.com"; sshPrivateKey = config.sops.secrets.deploy-desktop-key.path; };
+  };
   secrets.cachePrivateKey = config.sops.secrets.cache-private-key.path;
   # Secret paths can come from sops, agenix, vault-agent, systemd
   # LoadCredential, etc. The module is backend-agnostic by design.
@@ -139,40 +197,40 @@ push. Typically the consumer points both at the same key files. If
 `update-flake.yml` **self-disables** (a guard step no-ops the job with a
 warning). The bot's commit identity is separate (`bot.*`).
 
-## Build sandboxing (`enableSandbox`, `HAS_SANDBOX_CAP`)
+## Build sandboxing (`enableSandbox`, `SANDBOX_OK`)
 
 The runner is a NixOS `systemd-nspawn` container. NixOS sets
 `nix.settings.sandbox = true` by default, **but nspawn drops `CAP_SYS_ADMIN`
-from the container's bounding set**, so `nix-daemon` inside cannot create the
-user/mount namespaces + bind-mounts the sandbox needs. Result: every
-`nix build` / `nix flake check` fails with
+from the container's bounding set** and locks /proc submounts, so
+`nix-daemon` inside cannot create the user/mount namespaces + bind-mounts
+the sandbox needs — every `nix build` / `nix flake check` fails with
 `this system does not support the kernel namespaces that are required for
-sandboxing`. Two module options make the trade-off explicit:
+sandboxing`. The default is therefore **`false`** (working CI; the container
+itself is the isolation boundary):
 
 | option | default | effect |
 |---|---|---|
-| `enableSandbox` | `true` | grants `CAP_SYS_ADMIN` to the container, forces `nix.settings.sandbox = true`, exports `HAS_SANDBOX_CAP=1` to every job |
-| `additionalCapabilities` | `[]` | extra caps merged on top (e.g. `CAP_NET_ADMIN` for tunnel setup) |
+| `enableSandbox` | `false` | unprivileged container, forces `nix.settings.sandbox = false` |
+| `enableSandbox` | `true` (opt-in) | grants `CAP_SYS_ADMIN` to the container, forces `nix.settings.sandbox = true`, applies the daemon `/proc` remount fix (PrivateMounts + fresh procfs on both daemons). Use only on nspawn setups verified to sandbox |
+| `additionalCapabilities` | `[]` | extra caps merged on top of the sandbox one (optional) |
 
-`enableSandbox = false` keeps the container **unprivileged** (no `CAP_SYS_ADMIN`)
-at the cost of unsandboxed builds — use it only if your threat model forbids
-granting that cap. The module then forces `nix.settings.sandbox = false` and
-exports `HAS_SANDBOX_CAP=0`.
+**CI side — runtime probe.** The `sandbox-probe` composite action builds a
+fresh probe derivation at job start and exports `SANDBOX_OK=1` (sandbox
+usable) / `SANDBOX_OK=0` (fall back) to the job env. All build actions
+(`flake-validation`, `rebuild-configurations`, `rebuild-devshells`,
+`generate-docs`, `deploy-target`) and nixtache's own `ci.yml` append
+`--no-sandbox` when `SANDBOX_OK ≠ 1`, so a runner whose sandbox is broken
+(or not yet rebuilt with the fix) self-heals instead of failing.
 
-**CI side.** The reusable actions (`flake-validation`, `rebuild-configurations`,
-`rebuild-devshells`) and nixtache's own `ci.yml` read `HAS_SANDBOX_CAP`:
-- `1` → build normally (sandboxed);
-- `0` / unset → append `--no-sandbox` (legacy / unprivileged fallback).
-
-So a runner deployed without the cap still passes CI; a runner with the cap
-builds properly sandboxed. The old `--no-sandbox` flags that were hardcoded
-into every action are gone.
+The module still exports a static `HAS_SANDBOX_CAP` env (mirrors
+`enableSandbox` 1:1), but **nothing consumes it** — it is legacy; do not wire
+new code to it. `SANDBOX_OK` from `sandbox-probe` is the operative flag.
 
 > Deployment note (chicken-and-egg, see "Bootstrap & deploy" below): the cap
 > is granted only after the server is rebuilt with the updated module, so a
-> first-time rollout needs one manual `nixos-rebuild switch` on the server.
-> Until then jobs run in the `--no-sandbox` fallback — they don't break, they
-> just don't sandbox.
+> first-time rollout needs one manual `nixos-rebuild switch` (or an
+> `ab-image` deploy) on the server. The runtime probe keeps CI green on both
+> sides of that switch.
 
 ## Consumer pattern
 
@@ -299,7 +357,7 @@ change needs a human deploy and there is no auto-rollback.
 - whether `deploy.yml` gates `nix-check`: yes — combined pipeline, `deploy`
   job `needs: build` (variant b).
 
-See also `doc/migration-plan.md` "Контракт деплоя" for the original deploy
+See also `doc/drafts/migration-plan.md` "Контракт деплоя" for the original deploy
 contract stubs.
 
 ## Nix style
@@ -356,8 +414,3 @@ with `nix build .#vmTests.x86_64-linux.<suite>`).
   stable contract); concrete provider modules (`ssh`, `forgejo`, `vault` as
   primary, `systemd`) land incrementally, each just appending to `vars`. Vault
   is the intended primary, ssh the supplementary one.
-- **Deploy contract** (`deploy.yml` + `deploy-target` action) is defined in
-  `doc/migration-plan.md` (section "Контракт деплоя") as stubs, and the
-  chicken-and-egg bootstrap design is sketched in "Bootstrap & deploy" above.
-  Implementation is a separate task (deploy tool choice, target SSH auth,
-  rollback strategy).

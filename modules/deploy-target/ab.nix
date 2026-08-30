@@ -159,6 +159,7 @@ in
               && action.lookup("verb") === "start"
               && subject.user === "${duName}"
               && (action.lookup("unit") === "systemd-sysupdate.service"
+                  || action.lookup("unit") === "systemd-sysupdate-reboot.service"
                   || action.lookup("unit") === "nixtache-ab-apply.service")) {
               return polkit.Result.YES;
           }
@@ -214,8 +215,16 @@ in
         fi
 
         echo "nixtache-ab-apply: runners idle — triggering systemd-sysupdate (writes inactive slot, then reboots)"
+        # The -reboot variant: after writing the inactive slot it reboots the
+        # host so the new slot becomes active (plain systemd-sysupdate.service
+        # never reboots). The idle-gate above already made the reboot safe.
+        if ! systemctl start systemd-sysupdate-reboot.service; then
+          echo "nixtache-ab-apply: systemd-sysupdate start failed — keeping ${pendingFile} for retry" >&2
+          exit 1
+        fi
+        # Consume the signal only after a successful start: a failed start
+        # leaves ab-pending in place so the next path-trigger retries.
         rm -f "${pendingFile}"
-        systemctl start systemd-sysupdate.service
       '';
     };
   };

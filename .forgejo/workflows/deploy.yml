@@ -24,6 +24,12 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Serialize deploys per calling ref: a second run of the same branch waits in
+# queue instead of racing the first (never auto-cancel an in-flight deploy).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: nixos

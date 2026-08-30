@@ -1,4 +1,4 @@
-# ab-deploy-e2e — full E2E deploy pipeline via runNixOSTest (Scenario A).
+# ab-ota-e2e — full E2E deploy pipeline via runNixOSTest (Scenario A).
 #
 # Two requirements that distinguish this from a "stub" test:
 #
@@ -43,12 +43,39 @@
 # slot B → relabels _empty → nix-store_2). Content assertions prove the
 # update delivered new content (hello in slot B) and left the rollback slot
 # intact (no hello in slot A).
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs, self, system ? "x86_64-linux", variant ? { } }:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+
+  # Compression-matrix knobs (TEST-SPECS 08-A2/A3/A4/A5, design D12). Defaults
+  # reproduce the original suite (A2: squashfs + zstd); the flake registers
+  # erofs / tool-default-compression / percent-slotSize variants as separate
+  # vmTests keys.
+  vCfg = {
+    storeFs = "squashfs";
+    storeCompression = "zstd";
+    storeCompressionLevel = null;
+    slotSize = "512M";
+  } // variant;
+  # The IMAGE store size must stay absolute (repart percents are relative to
+  # the build-time image disk, not the target disk); only the TARGET-side
+  # partitions.slotSize may be a percent (resolved against /dev/vdb).
+  imageStoreSize = if lib.hasSuffix "%" vCfg.slotSize then "512M" else vCfg.slotSize;
+
+  # FS-aware store-slot hello check (squashfs → unsquashfs; erofs → ro-mount
+  # via the kernel erofs driver — unsquashfs cannot read erofs images, and the
+  # erofs image root IS the store dir itself, no /nix/store prefix).
+  helloInSlot = { part, count ? false }:
+    if vCfg.storeFs == "erofs"
+    then "modprobe erofs 2>/dev/null || true; mkdir -p /tmp/slot && "
+      + "mount -t erofs -o ro /dev/vd${part} /tmp/slot && find /tmp/slot "
+      + (if count then "| grep -c hello || true" else "| grep hello")
+      + "; rc=$?; umount /tmp/slot; exit $rc"
+    else "unsquashfs -l /dev/vd${part} | grep "
+      + (if count then "-c hello || true" else "hello");
 
   # Both appliances use the PLACEHOLDER version "0": the deploy path never
   # sees a declarative version.  The runtime version (NIXTACHE_AB_VERSION →
@@ -63,7 +90,8 @@ let
     signVerify = false;
     dataPartition = false;
     stagingPath = "http://deployer/ab-stage/abtest-remote";
-    storeSize = "512M";
+    storeSize = imageStoreSize;
+    inherit (vCfg) storeFs storeCompression storeCompressionLevel;
   };
   v1SysupdatePkg = v1Config.config.system.build.sysupdate-package;
 
@@ -74,7 +102,8 @@ let
     signVerify = false;
     dataPartition = false;
     stagingPath = "http://deployer/ab-stage/abtest-remote";
-    storeSize = "512M";
+    storeSize = imageStoreSize;
+    inherit (vCfg) storeFs storeCompression storeCompressionLevel;
     extraPackages = [ pkgs.hello ];
   };
   v2SysupdatePkg = v2Config.config.system.build.sysupdate-package;
@@ -182,7 +211,7 @@ let
   '';
 in
 pkgs.testers.runNixOSTest {
-  name = "ab-deploy-e2e";
+  name = "ab-ota-e2e";
 
   nodes.deployer = { pkgs, lib, ... }: {
     services.nginx.enable = true;
@@ -220,6 +249,20 @@ pkgs.testers.runNixOSTest {
     services.openssh.enable = true;
     boot.loader.systemd-boot.bootCounting.enable = true;
 
+    # Test-only: the action's remote ab trigger starts the -reboot variant
+    # (write slot + REBOOT). A mid-test reboot would drop the driver's
+    # connections — drop-in the unit to run the PLAIN update instead (the ""
+    # element resets the upstream oneshot ExecStart list; the whole command
+    # must be ONE element). Slot-write assertions stay; the reboot itself is
+    # upstream behavior (same approach as ab-deploy-self-vm).
+    systemd.services."systemd-sysupdate-reboot" = {
+      description = "systemd-sysupdate reboot variant (TEST override: update without reboot)";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = [ "" "${pkgs.systemd}/lib/systemd/systemd-sysupdate update" ];
+      };
+    };
+
     # Extra disk for A/B partition slots — appears as /dev/vdb.
     virtualisation.emptyDiskImages = [ 2048 ]; # 2 GB
 
@@ -235,7 +278,8 @@ pkgs.testers.runNixOSTest {
       ab.gating = false;
       ab.partitions = {
         enable = true;
-        slotSize = "512M";
+        # Variant-controlled (A5: "25%" of the 2 GB test disk ≈ the 512M image).
+        slotSize = vCfg.slotSize;
         autoInit = true;
         imageId = "abtest";
         source = "http://deployer/ab-stage/abtest-remote"; # remote deploy → url-file
@@ -335,7 +379,7 @@ pkgs.testers.runNixOSTest {
       "dd of=/dev/vdb1 bs=4M conv=fsync",
       timeout=300
     )
-    v1_hello = target.succeed("unsquashfs -l /dev/vdb1 | grep -c hello || true").strip()
+    v1_hello = target.succeed("${helloInSlot { part = "b1"; count = true; }}").strip()
     assert v1_hello == "0", f"v1 slot unexpectedly contains hello ({v1_hello})"
     print("OK: slot A populated with v1 store (no hello)")
 
@@ -367,8 +411,8 @@ pkgs.testers.runNixOSTest {
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
 
     # ── Content proof: slot B holds v2 (hello), slot A still holds v1 ────────
-    target.succeed("unsquashfs -l /dev/vdb2 | grep hello")
-    v1_still = target.succeed("unsquashfs -l /dev/vdb1 | grep -c hello || true").strip()
+    target.succeed("${helloInSlot { part = "b2"; }}")
+    v1_still = target.succeed("${helloInSlot { part = "b1"; count = true; }}").strip()
     assert v1_still == "0", f"slot A was clobbered by the update ({v1_still})"
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # rollback slot intact
     print("OK: slot B = v2 (hello present), slot A = v1 (no hello, intact)")

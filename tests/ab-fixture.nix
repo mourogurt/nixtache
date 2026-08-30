@@ -61,6 +61,9 @@ let
     , stagingPath ? "/run/abtest-stage"
     , deployKeyPub ? null
     , storeSize ? "2G"
+    , storeFs ? "squashfs"
+    , storeCompression ? "zstd"
+    , storeCompressionLevel ? null
     , extraPackages ? [ ]
     , extraModules ? [ ]
     }:
@@ -80,7 +83,7 @@ let
               enable = true;
               imageId = "abtest";
               imageVersion = version;
-              inherit stagingPath storeSize;
+              inherit stagingPath storeSize storeFs storeCompression storeCompressionLevel;
               extraPartitions = lib.optionalAttrs dataPartition {
                 data.repartConfig = {
                   Type = "linux-generic"; Label = "abtest-data"; Format = "ext4";

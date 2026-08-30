@@ -60,7 +60,7 @@
 - Pure-eval: фикстур не нужно (пути-заглушки `/dev/null`, `pkgs.writeText`).
 - VM-тесты flake-пути: локальный bare git-репозиторий с минимальным
   NixOS-flake'ом, отдаваемый тестовым httpd/nginx на node `deployer` (по образцу
-  nginx-staging в `tests/ab-deploy-e2e.nix`). **Не** дублировать GPG/SSH
+  nginx-staging в `tests/ab-ota-e2e.nix`). **Не** дублировать GPG/SSH
   fixture'ы — брать из `tests/ab-fixture.nix`, если понадобятся.
 - VM-тесты ab-пути: `tests/ab-fixture.nix` `mkAppliance` + provision-модуль,
   ровно как `B1`-серия (`TEST-SPECS.md` §1а.3): target на

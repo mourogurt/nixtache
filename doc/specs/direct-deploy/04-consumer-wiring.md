@@ -112,7 +112,9 @@ systemd + polkit универсальны. (§9.2 `0001`, V2.)
    `systemctl is-active --wait <unit>` для каждого `criticalUnits`;
 5. при fail → `nix-env --set <prev>` (захваченный до step 2) + повторный switch +
    `exit 1` (→ `systemctl start` вернёт ненулевой код по SSH → джоба краснеет);
-6. при success → удаляет pointer.
+6. при success → удаляет pointer + `exit 0`; при провале (probe/rollback) —
+   тоже удаляет (анти-retry: сломанный closure не должен примениться повторно
+   следующим триггером; провал репортится ненулевым exit юнита).
 
 Probe крутится на цели как root (dbus/systemctl) → работает даже если новый конфиг
 сломал sshd (B1). Детали — `05-rollback.md`.

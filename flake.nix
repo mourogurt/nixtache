@@ -62,9 +62,10 @@
         # ── Conformance / contract tests for spec 06 + 08.
         # See doc/specs/direct-deploy/TEST-SPECS.md. Pure-eval suites are fast
         # (no KVM); the `*-vm` suites live in `vmTests` below.
-        #   ab-existing  : pure-eval against ALREADY-IMPLEMENTED code → green now.
-        #   ab-contract  : pure-eval CONTRACTS for the new modules → intentionally
-        #                   red until ab-provision / overlay-nix / store.mode land.
+        #   ab-existing  : conformance of the implemented ab-image /
+        #                  deploy-target wiring (image layout, transfers, verify).
+        #   ab-contract  : wiring + assertion contracts for ab-provision /
+        #                  overlay-nix / runner store.mode (all implemented).
         ab-existing = import ./tests/ab-existing.nix { inherit nixpkgs self system; };
         ab-contract = import ./tests/ab-contract.nix { inherit nixpkgs self system; };
         # Auto-update module pure-eval (spec 09 + TEST-SPECS-AUTO-UPDATE.md,
@@ -87,13 +88,22 @@
         # ab-deploy server-side (runNixOSTest: real runner module nginx + staging
         # + signing) + action.yml parser.
         ab-deploy = import ./tests/ab-deploy.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-deploy-e2e: full combat scenario via runNixOSTest (deployer+target VMs,
-        # action.yml parsed → sysupdate writes slot B).
-        ab-deploy-e2e = import ./tests/ab-deploy-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-anywhere-vm: full OTA lifecycle in one test — nixos-anywhere
+        # ab-ota-e2e: full combat OTA scenario via runNixOSTest (deployer+target VMs,
+        # action.yml parsed → sysupdate writes slot B). Base variant = A2
+        # (squashfs + zstd); the compression-matrix variants below cover
+        # TEST-SPECS 08-A3/A4/A5 through the OTA-deploy path (build-side matrix
+        # lives in ab-compression-vm, K1–K4).
+        ab-ota-e2e = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # A3: erofs store images.
+        ab-ota-e2e-erofs = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; variant = { storeFs = "erofs"; storeCompression = "zstd"; }; };
+        # A4: no explicit compression (mkfs tool defaults).
+        ab-ota-e2e-none = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; variant = { storeCompression = null; }; };
+        # A5: percent slotSize resolved against the target disk (25% of 2 GiB).
+        ab-ota-e2e-percent = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; variant = { slotSize = "25%"; }; };
+        # ab-ota-anywhere-vm: full OTA lifecycle in one test — nixos-anywhere
         # install (kexec → disko A/B → UKI boot from the installed disk) then
         # a signed v2 sysupdate onto slot B. Heaviest suite.
-        ab-anywhere-vm = import ./tests/ab-anywhere-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        ab-ota-anywhere-vm = import ./tests/ab-ota-anywhere-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # A/B image VM integration tests (Batch E): builds real A/B disk
         # images + runs QEMU.
         ab-vm = import ./tests/ab-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
@@ -123,24 +133,26 @@
         # local staging, direct sysupdate + idle/busy/forced nixtache-ab-apply
         # against a mocked Forgejo API.
         ab-deploy-self-vm = import ./tests/ab-deploy-self-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-deploy-verify-vm: signature verification (C1–C4, TEST-SPECS §1а.7) —
+        # ab-ota-verify-vm: signature verification (C1–C4, TEST-SPECS §1а.7) —
         # Transfer.Verify=yes target accepts the correctly-signed image (full
         # action.yml run) and rejects wrong-key/tampered/unsigned staging.
-        ab-deploy-verify-vm = import ./tests/ab-deploy-verify-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        ab-ota-verify-vm = import ./tests/ab-ota-verify-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # auto-update-vm: AU-F1…F4 (flake path) + AU-A1…A5 (ab path), spec 09.
         auto-update-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
       };
 
       # --- This flake's own option docs -----------------------------------
-      # Generated from the runner module via `pkgs.nixosOptionsDoc` so the
+      # Generated from ALL nixtache modules (runner, deploy-target, ab-image,
+      # auto-update, overlay-nix, secrets) via `pkgs.nixosOptionsDoc` so the
       # option reference never drifts from the source. CI builds these and
-      # uploads them as artifacts (see .forgejo/workflows/docs.yml).
+      # uploads them as artifacts (see .forgejo/workflows/ci.yml).
       #
       #   nix build .#optionsMarkdown   # CommonMark reference
       #   nix build .#optionsJSON       # machine-readable
+      #   nix build .#optionsHTML       # browsable standalone HTML
       #
       # We evaluate via the full `nixosSystem` (so every base option the
-      # module touches — `assertions`, `containers`, `systemd`, `services.*`,
+      # modules touch — `assertions`, `containers`, `systemd`, `services.*`,
       # `nix.settings.*` — exists), then pass ONLY the `services.nixtache`
       # subtree to `nixosOptionsDoc`. `optionAttrSetToDocList` walks that
       # subtree, so the reference lists just our options, not the ~6000 base
@@ -152,7 +164,16 @@
             inherit system;
             modules = [
               self.nixosModules.runner
+              self.nixosModules.deploy-target
+              self.nixosModules.ab-image
+              self.nixosModules.auto-update
+              self.nixosModules.overlay-nix
+              self.nixosModules.secrets
               { system.stateVersion = lib.trivial.release; }
+              # ab-image imports the image-based-appliance profile, which
+              # trips the base NixOS no-login assertion (root without a
+              # password); satisfy it — same stub the pure-eval tests use.
+              { users.users.root.initialPassword = ""; }
             ];
           };
           ownDocs = pkgs.nixosOptionsDoc {

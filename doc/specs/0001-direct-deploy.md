@@ -5,7 +5,7 @@
 > **Дата:** 2026-08-05 (итерации 2026-08-06: Forgejo `environment`, A/B image (sysupdate), cross-arch, root-less, multi-tier rollback)
 > **Зона:** `nixtache` (reusable `deploy.yml` + action `deploy-target` + опции runner-модуля)
 > + `nixos-configuration` (consumer-side карта целей + deploy-ключи)
-> **Ссылки:** `doc/migration-plan.md` §6 «Контракт деплоя» (стабы);
+> **Ссылки:** `doc/drafts/migration-plan.md` §6 «Контракт деплоя» (исторический черновик);
 > `AGENTS.md` «Bootstrap & deploy: the chicken-and-egg».
 
 ---
@@ -13,7 +13,8 @@
 ## 1. Цель
 
 **Назначение фичи — сократить задержку доставки новых дериваций на машины.**
-По умолчанию машины обновляются сами через `system.autoUpgrade` по расписанию
+По умолчанию машины обновляются сами через `services.nixtache.auto-update`
+(`nixosModules.auto-update`, замена `system.autoUpgrade`) по расписанию
 (см. «Модель доставки» ниже) — автономно, но медленно (таймер). Эта фича
 доставляет свежесобранные конфиги на машины **сразу после успешной сборки**
 (зелёный `nix-check`), не дожидаясь таймера. Поэтому основной путь
@@ -46,12 +47,14 @@ config → host → creds
 Изменения попадают на машины **двумя** путями — их надо различать:
 
 1. **Pull-based auto-update — ДЕФОЛТ, автономный.** Каждая машина (включая хост
-   nixtache) крутит `system.autoUpgrade` (`flake = git+ssh://…/nixos-configuration`,
-   `operation = "switch"`, по таймеру `dates`). По расписанию машина **сама**
-   тянет свежий flake и свитчится — **без участия человека**. Для рутинных
-   изменений этого достаточно, CI вообще не нужен. На хосте nixtache `autoUpgrade`
-   бежит host-level таймером (не в контейнере) → routine-обновления сервера **не**
-   имеют chicken-and-egg (§8).
+   nixtache) обновляется через модуль `services.nixtache.auto-update`
+   (`nixosModules.auto-update`, детально — `direct-deploy/09-auto-update.md`) —
+   единую замену `system.autoUpgrade` (совместное включение ассертится, A1).
+   Модуль сам выбирает механизм: **flake-путь** строит toplevel из flake →
+   pointer → root-юнит `nixtache-apply.service` (никакого `nixos-rebuild`),
+   **ab-путь** триггерит `systemd-sysupdate`. По расписанию машина **сама**
+   тянет свежую конфигурацию и применяется — **без участия человека**. Для
+   рутинных изменений этого достаточно, CI вообще не нужен.
 
 2. **CI `deploy` workflow — ускоритель доставки (в этом и смысл фичи).**
    Автофайрится на успех `nix-check` и применяет конфиг **сразу**, не дожидаясь
@@ -62,10 +65,10 @@ config → host → creds
    `workflow_dispatch` — для форсирования вне триггера / выбора конкретного
    таргета.
 
-Оба пути заканчиваются `switch` и покрыты auto-rollback (§8.5). `mode:
-dry-activate` в CI-воркфлоу — безопасный предпросмотр (сборка + дифф без
-активации); реальное применение по умолчанию идёт через `autoUpgrade`, а из CI
-на `main` — `switch` (после merge, по §7.1).
+Оба пути заканчиваются применением конфигурации и покрыты auto-rollback (§8.5).
+`mode: dry-activate` в CI-воркфлоу — безопасный предпросмотр (сборка + дифф без
+активации); реальное применение по умолчанию идёт через auto-update (pull-канал),
+а из CI на `main` — `switch` (после merge, по §7.1).
 
 ### Не-цели (out of scope)
 
@@ -106,7 +109,7 @@ dry-activate` в CI-воркфлоу — безопасный предпросм
   **уже** перечисляют `nixosConfigurations` через `nix flake show --json` и
   собирают `.config.system.build.toplevel` — то есть **сборка уже работает**,
   не хватает только шага активации.
-- `doc/migration-plan.md` §6 зарезервировал стабы `deploy.yml` + action
+- `doc/drafts/migration-plan.md` §6 зарезервировал стабы `deploy.yml` + action
   `deploy-target`; `AGENTS.md` «Bootstrap & deploy» описал chicken-and-egg и
   дизайн bootstrap-раннера. Эта спека — реализация того контракта.
 
@@ -187,11 +190,11 @@ services.nixtache.runner.deploy.targets.<name> = {
 
 Runner-модуль (новый `modules/runner/deploy.nix`,.merge в тот же контейнер):
 
- 1. **Export env** `NIXTACHE_DEPLOY_TARGETS` = JSON-сериализация карты **без**
-    секретных путей (только `{name, host, sshUser, sshPort, method, system, tags,
-    timeout, hasKey}`) — добавляется в `runner.envs` через агрегатор
-    `_extraRunnerEnvs` (см. `instances.nix`, S1). `hasKey: bool` = задан ли
-    `sshPrivateKey` (драйвит «креды не заданы → skip»).
+  1. **Export env** `NIXTACHE_DEPLOY_TARGETS` = JSON-сериализация карты **без**
+     секретных путей (только `{name, enable, host, sshUser, sshPort, method,
+     system, tags, timeout, extraOptions, hasKey}`) — добавляется в `runner.envs`
+     через агрегатор `_extraRunnerEnvs` (см. `instances.nix`, S1). `hasKey: bool` =
+     задан ли `sshPrivateKey` (драйвит «креды не заданы → skip»).
 2. **LoadCredential** одного приватного ключа на цель:
    `deploy_ssh_<name>:/var/secrets/runner/deploy/<name>/id_ed25519`
    (bind-mount hostPath → `sshPrivateKey`, `isReadOnly = true`). Аналогично
@@ -272,11 +275,13 @@ inputs**), тонкая обёртка в consumer по аналогии с `nix
 `nixosConfigurations` + `devShells`): деплой стартует **когда всё собралось**.
 `mode` выводится из ветки и передаётся в action (§7.2).
 
-> **Сходимость с `autoUpgrade`:** `system.autoUpgrade` тянет flake по дефолтному
-> ref'у (`main`). PR-ветку он не подхватит → на PR нигде ничего не мутирует (CI
-> даёт только `dry-activate`, `autoUpgrade` игнорит не-`main`). На `main` CI
-> применяет `switch` сразу, а `autoUpgrade` перестраховочно применит ещё раз по
-> таймеру. Модели согласованы.
+> **Сходимость с auto-update:** pull-канал (`services.nixtache.auto-update`,
+> flake-путь) тянет flake по настроенному ref'у (по умолчанию — дефолтная ветка,
+> `main`). PR-ветку он не подхватит → на PR нигде ничего не мутирует (CI
+> даёт только `dry-activate`, auto-update игнорит не-`main`). На `main` CI
+> применяет `switch` сразу, а auto-update перестраховочно применит ещё раз по
+> таймеру (идемпотентно: на той же ревизии — no-op). Модели согласованы
+> (см. `direct-deploy/09-auto-update.md` §8).
 
 ### 7.2. Алгоритм (action `deploy-target`, V2 — systemd-unit активация)
 
@@ -287,8 +292,8 @@ inputs**), тонкая обёртка в consumer по аналогии с `nix
 ```
 mode ← из ветки (§7.1): main → switch, иначе dry-activate
 1. configs ← nix flake show --json | jq '.nixosConfigurations | keys[]'
-2. map     ← $NIXTACHE_DEPLOY_TARGETS  (JSON из env: {name,host,sshUser,sshPort,
-              method,system,tags,hasKey})
+2. map     ← $NIXTACHE_DEPLOY_TARGETS  (JSON из env: {name,enable,host,sshUser,
+              sshPort,method,system,tags,timeout,extraOptions,hasKey})
 3. for cfg in configs:
      t = map.${cfg} or ∅
      # --- фильтры опциональности (R1) ---
@@ -313,7 +318,8 @@ mode ← из ветки (§7.1): main → switch, иначе dry-activate
 
 ```
 _liveApply(cfg, t, mode, key):
-  # 1. build toplevel на раннере (sandbox; HAS_SANDBOX_CAP=0 → --no-sandbox)
+  # 1. build toplevel на раннере (sandbox-режим определяет runtime-проб
+  #    sandbox-probe: SANDBOX_OK≠1 → --no-sandbox)
   P=$(nix build --no-link --print-out-paths .#nixosConfigurations.${cfg}.config.system.build.toplevel)
   if mode == "dry-activate":                              # PR-предпросмотр — без мутации
      nixos-rebuild dry-activate --flake .#${cfg} \
@@ -408,9 +414,12 @@ Forgejo крутится в одном экземпляре на сервере 
 
 ### 8.3. Routine-обновления сервера
 
-Помимо CI-`ab-image`, сервер крутит `system.autoUpgrade` (host-level таймер) как
-автономный дефолт (§1 «Модель доставки») — chicken-and-egg не имеет (бежит на
-хосте, не в контейнере). `ab-image` — CI-ускоритель + атомарность поверх.
+Помимо CI-`ab-image`, сервер обновляется через `services.nixtache.auto-update`
+(автономный дефолт, §1 «Модель доставки»; на ab-таргете `method = "auto"`
+derive'ится в `"ab-image"`): poll-таймер триггерит `systemd-sysupdate`, а
+активация+reboot на runner-host идут через idle-gated `nixtache-ab-apply`
+(детально — `direct-deploy/09-auto-update.md` §6.2). CI-деплой `ab-image` —
+ускоритель + атомарность поверх.
 
 ### 8.5. Многоуровневый health-check + auto-rollback (для **всех** таргетов)
 
@@ -576,12 +585,15 @@ fail); плюс bootCounting как consumer-side опция (N1) для boot-br
 universal — в reference workspace это `wireguard-awg0.service` — + per-target)
 настраивается через приёмный модуль `nixtache.nixosModules.deploy-target`.
 
-**Ручной fallback** (когда авто не сработало / точечный откат):
+**Ручной fallback** (когда авто не сработало / точечный откат): deploy-юзер не
+имеет sudo/doas/run0 (V2, §9.2) — откат выполняет **root на самой цели**
+(консоль / physical access / отдельный emergency-путь):
 
 ```bash
-ssh nixos-deploy@<host> \
-  sudo nixos-rebuild switch --rollback
-  # либо: sudo nix-env -p /nix/var/nix/profiles/system --switch-generation <N>
+# на самой цели как root (deploy-юзер не может — нет sudo/doas/run0 по дизайну, §9.2):
+nixos-rebuild switch --rollback
+# либо:
+nix-env -p /nix/var/nix/profiles/system --switch-generation <N>
 ```
 
 Для `ab-image`-машин (server) дополнительная страховка — boot-counting (N1):
@@ -598,8 +610,8 @@ Tier-1 (probe+rollback внутри `nixtache-apply.service`) — для `live`-
 | `modules/runner/types.nix` | `deployTargetType` (подмодуль выше; `method = "live"\|"ab-image"`) | НОВОЕ |
 | `modules/runner/instances.nix` | `_extraRunnerEnvs` агрегатор (S1) — envs из подмодулей в `runner.envs` | правка |
 | `modules/deploy-target/` → `nixosModules.deploy-target` | **Приёмный модуль** (импортируется каждым таргетом): `criticalUnits`, `healthCheckTimeout`, `deployUser`; **`nixtache-apply.service` (root: set+switch+probe+rollback, Tier-1 §8.5)** + polkit-правило + `nixtache-deploy` group + pointer-dir; `nixtache-health-check.service` (`Before=`+`RequiredBy=` `boot-complete.target`) — Tier 0. bootCounting — consumer-scope (N1) | НОВОЕ |
-| `.forgejo/workflows/deploy.yml` | Reusable workflow `on: workflow_call` + `workflow_run` (опц. `workflow_dispatch` без inputs) (§7) | НОВОЕ (заменяет стаб из migration-plan §6) |
-| `.forgejo/actions/deploy-target/` | Composite-action (V2): discovery → probe → `_liveApply` (`nix build` → `nix copy --to` → pointer + `systemctl start nixtache-apply.service`) / `_abImage`; `HAS_SANDBOX_CAP`→`--no-sandbox` | НОВОЕ |
+| `.forgejo/workflows/deploy.yml` | Reusable workflow `on: workflow_call` + `workflow_run` (опц. `workflow_dispatch` без inputs) (§7) | НОВОЕ (заменяет стаб из drafts/migration-plan §6) |
+| `.forgejo/actions/deploy-target/` | Composite-action (V2): discovery → probe → `_liveApply` (`nix build` → `nix copy --to` → pointer + `systemctl start nixtache-apply.service`) / `_abImage`; при `SANDBOX_OK`≠1 из runtime-проба `sandbox-probe` → `--no-sandbox` (статический env `HAS_SANDBOX_CAP` модуля остался, но ничего не потребляет — legacy) | НОВОЕ |
 | `tests/runner.nix` | + сценарии: карта пуста / карта с ключами / `enable=false` / `sshPrivateKey=null` / `method="ab-image"` / `method="live"` default / `_extraRunnerEnvs` агрегация | правка |
 | `tests/deploy-target.nix` | приёмный модуль: apply-юнит wired + polkit + probe/rollback в скрипте, `criticalUnits` wired в oneshot, `healthCheckTimeout` default, `autoProvision=false` assertion | НОВОЕ |
 | `packages.optionsMarkdown` | авто-включит новые опции (`services.nixtache.runner.deploy.*` + `services.nixtache.deploy-target.*`) | без правок |
@@ -631,7 +643,9 @@ Tier-1 (probe+rollback внутри `nixtache-apply.service`) — для `live`-
    тесты `tests/deploy-target.nix`. ✅ (Batch B)
 3. **Action `deploy-target`** — discovery + probe + `_liveApply` (`nix build` →
    `nix copy --to` → pointer + `systemctl start nixtache-apply.service`) /
-   `_abImage`; все skip-ветки = `continue`, не `exit 1`; `HAS_SANDBOX_CAP`-aware.
+   `_abImage`; все skip-ветки = `continue`, не `exit 1`; sandbox — по runtime-пробу
+   `sandbox-probe` (строит probe-деривацию, экспортирует `SANDBOX_OK=1/0`; при ≠1
+   build-шаги добавляют `--no-sandbox`; статический `HAS_SANDBOX_CAP` — legacy).
 4. **Workflow `deploy.yml`** — без inputs, mode по ветке (§7.1), calls action.
 5. **Consumer wiring (nixos-configuration)** — `deploy-keys.nix`, ключи в sops,
    `common/deploy-target.nix` (импорт приёмного модуля + `criticalUnits` +

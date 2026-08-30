@@ -6,7 +6,7 @@
 > **Зона:** `nixtache` (`modules/runner/cache.nix` + новый `modules/runner/mirror.nix`
 > + host-side nginx vhost) + consumer-side проводка доверия (`trusted-public-keys`).
 > **Ссылки:** `modules/runner/cache.nix` (текущий `nix-serve-ng` + nginx vhost);
-> `doc/migration-plan.md` §«Бинарный кэш» (`bincache.zinzaguras.ru`).
+> `doc/drafts/migration-plan.md` §«Бинарный кэш» (`bincache.zinzaguras.ru`).
 
 ---
 

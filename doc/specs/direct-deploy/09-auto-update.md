@@ -246,11 +246,11 @@ idle-wait по Forgejo API, 06 §gating). Auto-update здесь — **no-op by 
 | A1 | `cfg.enable && config.system.autoUpgrade.enable` | «auto-update replaces system.autoUpgrade — отключите последний (миграция §10)» |
 | A2 | `enable && effectiveMethod == "flake" && !(deploy-target.enable or false)` | «flake-путь активирует через nixtache-apply.service — импортируйте nixosModules.deploy-target (deployUser можно не задавать)» |
 | A3 | `enable && effectiveMethod == "flake" && flake.url == null` | «flake.url обязателен при method flake/auto→flake» |
-| A4 | `enable && effectiveMethod == "ab-image" && !(sysupdate.enable or false)` + source не разрешим | «ab-image-путь требует systemd.sysupdate (ab-image или ab-provision с partitions.source)» — модуль чекает `config.systemd.sysupdate.enable or false` и наличие `partitions.source`/`ab-image.enable` (hasAttr-guard) |
+| A4 | `enable && effectiveMethod == "ab-image"` && (sysupdate выключен ИЛИ источник не разрешим) | «ab-image-путь требует systemd.sysupdate + разрешимый источник» — модуль чекает `config.systemd.sysupdate.enable or false` И источник: `ab-image.enable`, `ab.partitions.{enable,source}` или consumer'ские `systemd.sysupdate.transfers` с `Source` (hasAttr-guard) |
 | A5 | `rebootPolicy == "window" && rebootWindow.start == rebootWindow.end` | «пустое окно reboot» |
 | A6 | `effectiveMethod == "ab-image" && (deploy-target.ab.gating or false) && rebootPolicy != "never"` | «на gating-хосте reboot владеет nixtache-ab-apply (idle-gate); rebootPolicy должен быть never» |
 | A7 (warning) | `effectiveMethod == "ab-image"` и любой transfer содержит `Transfer.Reboot == "yes"` | `lib.warn`: «auto-update владеет reboot-политикой; уберите Reboot=yes из transfers» |
-| A8 | `method == "ab-image"` (explicit) && `!abPresent` | «method=ab-image задан явно, но ни ab-image.enable, ни deploy-target.ab.enable не включены — опечатка?» (fail) |
+| A8 | `method == "ab-image"` (explicit) && `!abPresent` && sysupdate выключен | «method=ab-image задан явно, но ни ab-image.enable / deploy-target.ab.enable, ни systemd.sysupdate — опечатка?» (fail; явный `systemd.sysupdate.enable = true` легитимен как заглушка при переходном периоде — AU-11B) |
 
 `abPresent` / все обращения к соседним модулям — через
 `builtins.hasAttr "ab-image" config.services.nixtache` / `or false` guard'ы

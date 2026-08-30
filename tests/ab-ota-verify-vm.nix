@@ -1,8 +1,8 @@
-# ab-deploy-verify-vm — signature verification scenarios (TEST-SPECS §1а.7,
+# ab-ota-verify-vm — signature verification scenarios (TEST-SPECS §1а.7,
 # C1–C4) via runNixOSTest. Needs KVM (runNixOSTest carries
 # requiredSystemFeatures = [ "kvm" "nixos-test" ] itself, like ab-provision-vm).
 #
-# Two nodes like ab-deploy-e2e: a deployer (nginx staging + the REAL extracted
+# Two nodes like ab-ota-e2e: a deployer (nginx staging + the REAL extracted
 # action.yml + fake-nix) and a target (provision module owns the GPT + transfers
 # on /dev/vdb). The difference: the target sets
 # `ab.partitions.publicKeyFile = fixture.testSignKey/pubring.pgp`, so the module
@@ -70,7 +70,7 @@ let
   actionYmlFile = pkgs.writeText "deploy-action.yml" actionYml;
 
   # Extract the composite step's `run:` text at BUILD TIME (same pattern as
-  # ab-deploy-e2e): the test executes the REAL staging/signing/SSH logic.
+  # ab-ota-e2e): the test executes the REAL staging/signing/SSH logic.
   actionRunScript = pkgs.runCommand "deploy-action-from-yml" {
     nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) ];
   } ''
@@ -86,7 +86,7 @@ let
     chmod +x "$out"
   '';
 
-  # Same fake-nix contract as ab-deploy-e2e: intercepts `flake show` / `build`,
+  # Same fake-nix contract as ab-ota-e2e: intercepts `flake show` / `build`,
   # requires the runtime `image-version` file (proving the action assigns the
   # version BEFORE the build). The build stub echoes the PREBUILT v2 package
   # (already in the deployer's store via extraDependencies; its artifacts are
@@ -132,7 +132,7 @@ let
   '';
 in
 pkgs.testers.runNixOSTest {
-  name = "ab-deploy-verify-vm";
+  name = "ab-ota-verify-vm";
 
   nodes.deployer = { pkgs, lib, ... }: {
     services.nginx.enable = true;
