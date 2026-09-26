@@ -36,7 +36,11 @@ in
       description = ''
         Primary Forgejo/git host the runner pushes back to. Provide all
         resolvable names (domain, apex, server IP, localhost) in `hostNames`
-        so git operations succeed regardless of the URL form used.
+        so git operations succeed regardless of the URL form used. The FIRST
+        hostName is the canonical SSH endpoint — exported to every job as
+        `NIXTACHE_GIT_SSH_HOST` and used by `update-flake.yml` as the push
+        target (GITHUB_SERVER_URL is the HTTP endpoint; its port is the HTTP
+        port, not SSH, so it cannot be derived from there).
       '';
     };
 
@@ -49,6 +53,10 @@ in
   };
 
   config = mkIf cfg.enable {
+    services.nixtache.runner._extraRunnerEnvs = optionalAttrs (cfg.gitHost != null) {
+      NIXTACHE_GIT_SSH_HOST = head cfg.gitHost.hostNames;
+    };
+
     containers.${cfg.containerName}.config = { ... }: {
       services.openssh = {
         enable = false;

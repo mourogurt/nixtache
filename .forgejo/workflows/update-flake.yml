@@ -43,16 +43,23 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Derive git host from GITHUB_SERVER_URL
-        # The push URL is built from GITHUB_SERVER_URL, so the ssh config must
-        # match that same host (may be host:port, e.g. localhost:7111) — a
-        # hardcoded host leaves git without an IdentityFile and the server
-        # closes the connection.
+      - name: Derive git host
+        # SSH push target = NIXTACHE_GIT_SSH_HOST (the runner module's
+        # gitHost.hostNames[0] — the canonical SSH endpoint). Fallback for
+        # runners not yet rebuilt with that env: the bare GITHUB_SERVER_URL
+        # hostname. GITHUB_SERVER_URL itself is the HTTP endpoint — its port
+        # is the HTTP port (e.g. localhost:7111 behind nginx), NOT an SSH
+        # port, so it must be stripped; ssh (default 22, or a Port from the
+        # ssh-setup config) handles transport.
         if: steps.guard.outputs.enabled == 'true'
         id: githost
         shell: bash
         run: |
-          host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
+          host="${NIXTACHE_GIT_SSH_HOST:-}"
+          if [ -z "$host" ]; then
+            host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
+            host="${host%%:*}"
+          fi
           echo "host=$host" >> "$GITHUB_OUTPUT"
 
       - name: Setup SSH
@@ -96,12 +103,12 @@ jobs:
       - name: Push Changes
         # SSH push URL from server state — no hardcoded user/host.
         # NIXTACHE_UPDATE_GIT_USER = server RUN_USER (from updateSshCreds.user);
-        # host derived from GITHUB_SERVER_URL; repo/ref from GitHub-compat env.
+        # host = NIXTACHE_GIT_SSH_HOST (see the githost step); repo/ref from
+        # GitHub-compat env.
         if: steps.guard.outputs.enabled == 'true'
         run: |
           set -euo pipefail
-          host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
-          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${host}/${GITHUB_REPOSITORY}"
+          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${{ steps.githost.outputs.host }}/${GITHUB_REPOSITORY}"
           echo "Setting origin to $url"
           git remote set-url origin "$url"
           echo "Pushing to ${GITHUB_REF_NAME}"

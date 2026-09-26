@@ -571,6 +571,29 @@ self.nixosModules.runner
     };
   };
 
+  # --- scenario: gitHost → NIXTACHE_GIT_SSH_HOST env + known_hosts ---------
+  # The FIRST hostName is the canonical SSH endpoint exported to every job as
+  # NIXTACHE_GIT_SSH_HOST (update-flake push target). gitHost=null (hostSrv)
+  # must NOT export it.
+  hostGitHost = mkHost "/srv" {
+    services.nixtache.runner.gitHost = {
+      name = "git_ed25519";
+      hostNames = [ "git.example.com" "10.0.0.1" "localhost" ];
+      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDummyKeyForEvalOnlyTests0000000000000000";
+    };
+  };
+  envsGitHost = (instancesOf hostGitHost)."default".settings.runner.envs;
+  scenarioGitSshHost = {
+    name = "gitHost → NIXTACHE_GIT_SSH_HOST env (hostNames[0]) + known_hosts entry";
+    checks = {
+      sshHostEnv = envsGitHost.NIXTACHE_GIT_SSH_HOST == "git.example.com";
+      knownHostEntry =
+        (containerCfg hostGitHost).services.openssh.knownHosts."git_ed25519".hostNames
+        == [ "git.example.com" "10.0.0.1" "localhost" ];
+      noEnvWhenNull = !(envsNoTargets ? NIXTACHE_GIT_SSH_HOST);
+    };
+  };
+
   scenarios = [
     scenarioSrv
     scenarioRoot
@@ -593,6 +616,7 @@ self.nixosModules.runner
     scenarioForgejoPort
     scenarioAbBasenameAssert
     scenarioApplianceClone
+    scenarioGitSshHost
   ];
 
   failed = builtins.concatMap

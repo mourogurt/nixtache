@@ -188,6 +188,7 @@ not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
 | `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_*` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`) |
 | `updateSshCreds.user` | `NIXTACHE_UPDATE_GIT_USER` + `update_ssh_*` LoadCredential | `ssh-setup` (creds: update) + `update-flake.yml` push URL + commit signing |
 | `bot.name` / `bot.email` | `NIXTACHE_BOT_NAME` / `NIXTACHE_BOT_EMAIL` | `update-flake.yml` commit author |
+| `gitHost.hostNames[0]` | `NIXTACHE_GIT_SSH_HOST` | `update-flake.yml` SSH push host (canonical SSH endpoint; `GITHUB_SERVER_URL` is HTTP-only — its port is the HTTP port, not SSH) |
 
 `*.user` is the git SSH **transport** user (server's `RUN_USER`, e.g.
 `forgejo`/`git`) — not the bot account. The two bundles are **independent**:
