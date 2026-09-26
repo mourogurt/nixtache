@@ -43,12 +43,24 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Derive git host from GITHUB_SERVER_URL
+        # The push URL is built from GITHUB_SERVER_URL, so the ssh config must
+        # match that same host (may be host:port, e.g. localhost:7111) — a
+        # hardcoded host leaves git without an IdentityFile and the server
+        # closes the connection.
+        if: steps.guard.outputs.enabled == 'true'
+        id: githost
+        shell: bash
+        run: |
+          host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
       - name: Setup SSH
         if: steps.guard.outputs.enabled == 'true'
         id: ssh
         uses: ./.nixtache/.forgejo/actions/ssh-setup
         with:
-          git-host: code.zinzaguras.ru
+          git-host: ${{ steps.githost.outputs.host }}
           creds: update
 
       - name: Setup Git

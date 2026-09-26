@@ -3,7 +3,7 @@ description: "Configure the bot SSH key (from systemd LoadCredential) for git pu
 
 inputs:
   git-host:
-    description: "Git host to configure in the SSH config (e.g. code.zinzaguras.ru)"
+    description: "Git host to configure in the SSH config, optionally host:port (e.g. code.zinzaguras.ru or localhost:7111)"
     required: false
     default: "code.zinzaguras.ru"
   git-user:
@@ -73,8 +73,18 @@ runs:
         chmod 400 "$ssh_dir/id_key"
         chmod 400 "$ssh_dir/id_key.pub"
 
-        echo "Host ${{ inputs.git-host }}" > "$cfg"
-        echo "  HostName ${{ inputs.git-host }}" >> "$cfg"
+        # git-host may carry a port (host:port, e.g. a Forgejo test instance
+        # at localhost:7111); split it into HostName + Port so the `Host`
+        # pattern still matches the bare hostname git passes to ssh.
+        git_host="${{ inputs.git-host }}"
+        git_port=""
+        case "$git_host" in
+          *:*) git_port="${git_host##*:}"; git_host="${git_host%:*}" ;;
+        esac
+
+        echo "Host $git_host" > "$cfg"
+        echo "  HostName $git_host" >> "$cfg"
+        [ -n "$git_port" ] && echo "  Port $git_port" >> "$cfg"
         echo "  User $git_user" >> "$cfg"
         echo "  IdentityFile $ssh_dir/id_key" >> "$cfg"
 
