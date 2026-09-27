@@ -83,6 +83,12 @@ let
     checks = {
       hasApplyUnit = has svcApply "nixtache-apply";
       applyTypeOneshot = svcApply."nixtache-apply".serviceConfig.Type == "oneshot";
+      # Self-restart guard: a deploy that changes the apply unit itself must
+      # not let switch-to-configuration restart the running apply oneshot
+      # (that cancels the start job mid-switch — "Job for nixtache-apply.service
+      # canceled").
+      applyNoRestartIfChanged = svcApply."nixtache-apply".restartIfChanged == false;
+      dryNoRestartIfChanged = svcApply."nixtache-apply-dry".restartIfChanged == false;
       # dry-apply unit (D11): PR-preview counterpart — diff only, no mutation
       hasDryUnit = has svcApply "nixtache-apply-dry";
       dryTypeOneshot = svcApply."nixtache-apply-dry".serviceConfig.Type == "oneshot";

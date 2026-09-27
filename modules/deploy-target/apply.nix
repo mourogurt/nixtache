@@ -61,6 +61,13 @@ in
     systemd.services.nixtache-apply = {
       description = "nixtache direct-deploy: activate a staged system closure, probe criticalUnits, roll back on failure";
       path = with pkgs; [ systemd nix coreutils ];
+      # Never restart this unit from switch-to-configuration: when a deploy
+      # changes the apply unit itself (path/script/module update), a
+      # restart-if-changed would stop the very oneshot that is running the
+      # switch — systemd cancels the start job ("Job for nixtache-apply.service
+      # canceled") and the deploy dies mid-activation. The unit is start-only
+      # (no wantedBy), so the new definition is picked up on the next trigger.
+      restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
       };
@@ -135,6 +142,9 @@ in
     systemd.services.nixtache-apply-dry = {
       description = "nixtache direct-deploy: dry-activate a staged system closure (diff, no mutation)";
       path = with pkgs; [ systemd nix coreutils ];
+      # Same self-restart guard as nixtache-apply: a dry run racing a real
+      # switch that changed this unit must not be killed mid-diff.
+      restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
       };
