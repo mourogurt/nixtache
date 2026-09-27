@@ -192,6 +192,11 @@ let
       applyProbesForgejo = lib.hasInfix "forgejo.service" applyScript;
       applyHasTimeout600 = lib.hasInfix "600" applyScript;
       hcHasTimeout600 = lib.hasInfix "600" hcScript;
+      # Probes must NOT use `is-active --wait`: it blocks indefinitely on a
+      # unit stuck in "activating", defeating the deadline loop (hangs the
+      # apply/health-check unit — and CI — forever). The poll loop is the wait.
+      applyNoIsActiveWait = !(lib.hasInfix "is-active --quiet --wait" applyScript);
+      hcNoIsActiveWait = !(lib.hasInfix "is-active --quiet --wait" hcScript);
       applyHasRollback = lib.hasInfix "rollback" applyScript;
       # Rollback re-activates the PRE-APPLY closure — never /run/current-system
       # (which post-switch points at the broken new system).

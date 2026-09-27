@@ -10,7 +10,7 @@
 # activation atomically:
 #   1. read the staged closure path from the pointer file;
 #   2. `nix-env -p .../system --set <closure>` + `switch-to-configuration switch`;
-#   3. Tier-1 probe: poll `systemctl is-active --wait <unit>` for every
+#   3. Tier-1 probe: poll `systemctl is-active <unit>` for every
 #      `criticalUnits` in the `healthCheckTimeout` window (B1 — runs ON the
 #      target as root, so it works even if the new config broke sshd);
 #   4. on probe failure, revert the system profile to the pre-apply closure and
@@ -76,8 +76,11 @@ in
       # mid-script).
       script = let
         # Probe chain: ALL criticalUnits active. Empty → skip probe (always ok).
+        # NO --wait: it blocks indefinitely on a unit stuck in "activating",
+        # defeating the deadline loop (the apply unit — and the CI job blocked
+        # on it — would hang forever). The loop below IS the wait.
         probes = concatStringsSep " && "
-          (map (u: "systemctl is-active --quiet --wait ${escapeShellArg u}") cfg.criticalUnits);
+          (map (u: "systemctl is-active --quiet ${escapeShellArg u}") cfg.criticalUnits);
         timeout = toString cfg.healthCheckTimeout;
         hasUnits = cfg.criticalUnits != [ ];
       in ''

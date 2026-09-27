@@ -45,7 +45,7 @@ systemd.services.nixtache-health-check = {
   requiredBy = [ "boot-complete.target" ];
   script = let
     probes = lib.concatStringsSep " && "
-      (map (u: "systemctl is-active --quiet --wait ${lib.escapeShellArg u}") cfg.criticalUnits);
+      (map (u: "systemctl is-active --quiet ${lib.escapeShellArg u}") cfg.criticalUnits);
     timeout = toString cfg.healthCheckTimeout;
   in ''
     deadline=$(( $(date +%s) + ${timeout} ))
@@ -59,7 +59,7 @@ systemd.services.nixtache-health-check = {
 };
 ```
 
-**Поведение:** oneshot крутит `systemctl is-active --wait <unit>` для каждого
+**Поведение:** oneshot крутит `systemctl is-active <unit>` (без `--wait` — он блокируется бесконечно на юните в `activating`, обходя deadline) для каждого
 `criticalUnits` в окне `healthCheckTimeout` (default 300с — машины грузятся долго, N3).
 Все активны → `exit 0` → `boot-complete.target` достигнут → `systemd-bless-boot`
 метит generation «good». Иначе `exit 1` → target не достигнут (RequiredBy) → нет bless.

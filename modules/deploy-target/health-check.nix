@@ -1,7 +1,7 @@
 # Tier-0 boot-time health-check (the `nixtache-health-check.service` oneshot).
 #
 # Generated from `criticalUnits`: a oneshot that, in the window
-# `healthCheckTimeout`, polls `systemctl is-active --wait <unit>` for each
+# `healthCheckTimeout`, polls `systemctl is-active <unit>` for each
 # critical unit and exits 0 once all are active. Ordered Before= and
 # RequiredBy= `boot-complete.target`, so a failure (any critical unit not active
 # in time) keeps boot-complete unreached → no `systemd-bless-boot` blessing →
@@ -50,10 +50,13 @@ in
 
         script = let
           # Join per-unit probes with `&&` so the chain exits 0 only when ALL are
-          # active. escapeShellArg defends against unit names with shell
+          # active. NO --wait: it blocks indefinitely on a unit stuck in
+          # "activating", defeating the deadline loop (the service — and
+          # boot-complete — would hang forever). The loop IS the wait.
+          # escapeShellArg defends against unit names with shell
           # metacharacters (unit names are normally tame, but defence in depth).
           probes = concatStringsSep " && "
-            (map (u: "systemctl is-active --quiet --wait ${escapeShellArg u}") cfg.criticalUnits);
+            (map (u: "systemctl is-active --quiet ${escapeShellArg u}") cfg.criticalUnits);
           timeout = toString cfg.healthCheckTimeout;
         in ''
           deadline=$(( $(date +%s) + ${timeout} ))

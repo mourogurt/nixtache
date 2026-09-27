@@ -457,7 +457,7 @@ services.nixtache.deploy-target = {
 **Tier 0 — штатный, service-level при загрузке (приёмный модуль).**
 Приёмный модуль генерирует oneshot `nixtache-health-check.service`, ordered
 `Before=boot-complete.target`, который в окне `healthCheckTimeout` ждёт
-`systemctl is-active --wait <unit>` для каждого `criticalUnits`. Если хоть один
+`systemctl is-active <unit>` (без `--wait` — он блокируется бесконечно на юните в `activating`, обходя deadline) для каждого `criticalUnits`. Если хоть один
 не активен → oneshot fail → `boot-complete.target` не достигнут → благословения
 (`systemd-bless-boot`) нет. Дополнительно можно включить
 `systemd-boot-check-no-failures.service`. Покрывает **service-breaking**
@@ -467,7 +467,7 @@ services.nixtache.deploy-target = {
 **Tier 1 — живой rollback сразу после `switch`, без ребута (внутри apply-юнита).**
 Root-юнит `nixtache-apply.service` (запущенный deploy-юзером через polkit, §7.2)
 после `nix-env --set <closure>` + `switch-to-configuration switch` **локально**
-опрашивает `systemctl is-active --wait <unit>` для каждого `criticalUnits` (тот
+опрашивает `systemctl is-active <unit>` (без `--wait` — он блокируется бесконечно на юните в `activating`, обходя deadline) для каждого `criticalUnits` (тот
 же источник правды, что у Tier 0) в окне `healthCheckTimeout`. При fail —
 откатывает system profile к pre-apply closure (`nix-env --set <prev>` +
 `switch-to-configuration switch`) и выходит с `exit 1` → `systemctl start`
