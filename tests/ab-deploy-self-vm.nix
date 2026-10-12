@@ -1,5 +1,4 @@
-# ab-deploy-self-vm — self-deploy + gating scenarios (TEST-SPECS §1а.3–§1а.6,
-# B1–B4) via runNixOSTest. Needs KVM (runNixOSTest carries
+# ab-deploy-self-vm — self-deploy + gating scenarios via runNixOSTest. Needs KVM (runNixOSTest carries
 # requiredSystemFeatures = [ "kvm" "nixos-test" ] itself, like ab-provision-vm).
 #
 # Four independent 1-node scenarios. Every node is a plain NixOS VM (NOT the

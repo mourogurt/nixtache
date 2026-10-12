@@ -1,5 +1,9 @@
 # Спека 0002 — Транзитивный (pull-through) кэш в nixtache
 
+> **Status:** draft — not implemented, awaiting decision.
+> Moved from `doc/specs/` to `doc/drafts/`: unimplemented drafts do not
+> live next to the implemented spec corpus.
+
 > **Статус:** черновик (на ревью) — **до реализации жду подтверждения**
 > (см. «Контрольная точка» в §11)
 > **Дата:** 2026-08-06

@@ -1,5 +1,5 @@
 # Live activation via a root systemd unit — the V2 design (no deploy-rs, no
-# sudo/doas/run0). See doc/specs/direct-deploy/0001 §7.2/§9.2 (revised).
+# sudo/doas/run0). Background: doc/archive/specs/0001-direct-deploy.md §7.2/§9.2.
 #
 # The runner pushes a built closure to the target with `nix copy --to`, drops
 # its store path into `/var/lib/nixtache/pending-system`, and triggers:
@@ -11,8 +11,8 @@
 #   1. read the staged closure path from the pointer file;
 #   2. `nix-env -p .../system --set <closure>` + `switch-to-configuration switch`;
 #   3. Tier-1 probe: poll `systemctl is-active <unit>` for every
-#      `criticalUnits` in the `healthCheckTimeout` window (B1 — runs ON the
-#      target as root, so it works even if the new config broke sshd);
+#      `criticalUnits` in the `healthCheckTimeout` window — the probe runs ON
+#      the target as root, so it works even if the new config broke sshd;
 #   4. on probe failure, revert the system profile to the pre-apply closure and
 #      re-activate it, then exit non-zero (the action turns the job red).
 #

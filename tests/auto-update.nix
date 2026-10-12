@@ -1,6 +1,6 @@
 # Pure-eval CONTRACT tests for the auto-update module (spec 09 — option tree
 # `services.nixtache.auto-update.*`), implementing the pure-eval cases AU-1…AU-25
-# of doc/specs/direct-deploy/TEST-SPECS-AUTO-UPDATE.md.
+# of doc/archive/specs/direct-deploy/TEST-SPECS-AUTO-UPDATE.md.
 #
 # Wiring scenarios degrade to a named `moduleImplemented=false` check and
 # assert scenarios are gated on a `modulePresent` probe when the module is

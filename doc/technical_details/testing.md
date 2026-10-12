@@ -22,24 +22,46 @@ sufficient for a module whose job is to produce NixOS config attrsets. Runtime
 behaviour of the container (does `nix-daemon-custom` actually start?) is out of
 scope here and belongs to NixOS VM tests if ever needed.
 
-### Layout
+### Layout — pure-eval suites (`checks.*`, built by every `nix flake check`)
 
 | File | Covers | Wired as |
 |---|---|---|
-| `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH, sandbox cap on/off, envs | `checks.<system>.runner` (`.default` alias) |
+| `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH creds, sandbox cap on/off, deploy map wiring, `runner.envs` | `checks.<system>.runner` |
+| `tests/deploy-target.nix` | the target side — apply unit, deploy user, polkit, health check, rollback wiring | `checks.<system>.deploy-target` |
+| `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify | `checks.<system>.ab-image` |
+| `tests/ab-existing.nix` | conformance of the implemented ab-image / deploy-target wiring (image layout, transfers, verify) | `checks.<system>.ab-existing` |
+| `tests/ab-contract.nix` | wiring + assertion contracts for ab-provision / overlay-nix / runner store modes | `checks.<system>.ab-contract` |
+| `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` 2×2 matrix (flag × all-documented) + prefix-filtering | `checks.<system>.mkDocs` |
+
+(`tests/ab-fixture.nix` and `tests/ab-anywhere-install.nix` are shared
+fixtures/helpers, not suites.)
+
+### Layout — KVM-only VM suites (`vmTests.x86_64-linux`, NOT a checked output)
+
+`nix flake check` skips `vmTests` entirely: the nspawn CI runner cannot chew
+through QEMU suites, so they carry `requiredSystemFeatures = [ "kvm" ]` and
+are run explicitly on a KVM host. Full inventory:
+
+`ab-deploy`, `ab-ota-e2e`, `ab-ota-e2e-erofs`, `ab-ota-e2e-none`,
+`ab-ota-e2e-percent`, `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
+`overlay-nix-vm`, `overlay-nix-install-vm`, `overlay-nix-ab-swap-vm`,
+`runner-store-mode-vm`, `ab-runner-compat-vm`, `ab-compression-vm`,
+`ab-staging-vm`, `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
 
 Every test file is a function `{ nixpkgs, self, system }:` returning a
 `pkgs.runCommand` derivation. Its builder prints a human-readable report (one
 `ok`/`FAIL` line per check) into `$out` and exits non-zero on any failure — so
 `nix build .#checks.<system>.<suite> && cat ./result` shows the whole matrix.
 
-A new test file MUST be registered in `flake.nix`:
+A new pure-eval test file MUST be registered in `flake.nix`; a new VM suite
+goes into `vmTests.x86_64-linux` (never into `checks`):
 ```nix
 checks.${system} = {
   runner = import ./tests/runner.nix { inherit nixpkgs self system; };
-  mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
+  # ...
 };
+vmTests.x86_64-linux.my-suite = import ./tests/my-suite.nix { inherit nixpkgs self; system = "x86_64-linux"; };
 ```
 
 ### Scenario shape (runner tests)
@@ -143,16 +165,23 @@ This is an **option-coverage** gate, honestly named — not a line-coverage clai
 # Everything (evaluates + builds all checks + packages):
 nix flake check --show-trace --all-systems
 
-# One suite, with the printed report:
+# One pure-eval suite, with the printed report:
 nix build .#checks.x86_64-linux.runner && cat ./result
 nix build .#checks.x86_64-linux.mkDocs && cat ./result
+
+# A KVM VM suite (KVM host only; never run by `nix flake check`):
+nix build .#vmTests.x86_64-linux.ab-deploy
+nix build .#vmTests.x86_64-linux.overlay-nix-vm
 
 # (future) coverage report:
 nix build .#checks.x86_64-linux.coverage && cat ./result
 ```
 
-In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then
-`nix build .#checks.x86_64-linux.runner` prints the report to the job log.
+In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then an
+explicit `nix build` loop prints each `checks.x86_64-linux.<suite>` report
+(runner, deploy-target, ab-image, mkDocs, ab-existing, ab-contract,
+auto-update) to the job log, and the `nixtache-options` docs artifact is
+generated.
 
 ---
 

@@ -14,11 +14,9 @@
 #     `nixtache-apply.service`. NO sudo/doas/run0 — activation is done by the
 #     root-owned apply unit, triggered via polkit (see apply.nix).
 #
-# This module is INDEPENDENT of the runner-side `deploy.targets` map (Batch A):
+# This module is INDEPENDENT of the runner-side `deploy.targets` map:
 # `criticalUnits`/`healthCheckTimeout` live here on the target, while the map
 # lives on the runner host.
-#
-# See doc/specs/direct-deploy/04-consumer-wiring.md and 05-rollback.md.
 { lib, ... }:
 
 with lib;

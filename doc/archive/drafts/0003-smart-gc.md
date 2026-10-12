@@ -1,5 +1,9 @@
 # Спека 0003 — Умный garbage collection в nixtache
 
+> **Status:** draft — not implemented, awaiting decision.
+> Moved from `doc/specs/` to `doc/drafts/`: unimplemented drafts do not
+> live next to the implemented spec corpus.
+
 > **Статус:** черновик (на ревью) — **до реализации жду подтверждения**
 > (см. «Контрольная точка» в §10)
 > **Дата:** 2026-08-06

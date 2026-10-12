@@ -6,19 +6,20 @@
 #
 #   1. `services.nixtache.deploy-target.ab.partitions.*` — declarative slot config
 #      (slot_a/slot_b submodules, slotSize, autoInit, onSizeMismatch,
-#      protectedLabels). See doc/specs/direct-deploy/08-ab-provisioning.md §4.
+#      protectedLabels).
 #   2. `nixtache-ab-provision.service` — idempotent oneshot that runs BEFORE
 #      `systemd-sysupdate.service` at boot: detects the current GPT state
 #      (normal / post-wipe / missing), migrates / size-checks / wipes as configured.
 #      Only provisioned for `type = "partition"` (regular-file targets let
 #      sysupdate create the backing files itself).
 #   3. `systemd.sysupdate.transfers` derivation — when `partitions.enable = true`
-#      this module is the SOLE owner of transfers (spec §11.7: normal priority
-#      overrides ab-image's `mkDefault`). Same-disk → one `10-nix-store` transfer
+#      this module is the SOLE owner of transfers: it sets them at normal
+#      priority so they cleanly override ab-image's `mkDefault` definitions.
+#      Same-disk → one `10-nix-store` transfer
 #      (InstancesMax=2); different disks → `10-nix-store-a` + `10-nix-store-b`
 #      (InstancesMax=1 each); regular-file → Target.Type = "regular-file".
 #
-# Stateless detection (spec §11.8 — review resolution): the provision script
+# Stateless detection: the provision script
 # derives the current state purely from GPT label counts, never from a state
 # file. Labels follow the sysupdate-native model: a WRITTEN slot carries
 # `nix-store_<v>` (version in the label), a FREE slot is `_empty` — the marker
@@ -45,7 +46,7 @@ let
   partitions = ab.partitions;
 
   # Whether the ab-image module is also imported on this target. The size-match
-  # assert (A2) only fires when ab-image is present (it compares slotSize against
+  # assertion only fires when ab-image is present (it compares slotSize against
   # ab-image.storeSize). When ab-image is absent (standalone ab-provision, e.g.
   # the contract tests), the size check is skipped — there's no storeSize to
   # compare against. `builtins.hasAttr` is a direct attrset check on
@@ -98,8 +99,8 @@ let
 
   # Source/Verify ownership rules (ab-image ships its transfers as one big
   # mkDefault attrset — same-priority ties on a scalar leaf are eval errors):
-  # - partitions.source set        → Source at NORMAL priority (sole owner,
-  #   spec §11.7) — cleanly overrides ab-image's mkDefault.
+  # - partitions.source set        → Source at NORMAL priority (sole owner)
+  #   — cleanly overrides ab-image's mkDefault.
   # - source null + ab-image active → Source omitted; ab-image's survives.
   # - source null + no ab-image     → mkDefault placeholder (consumer/test
   #   overrides individual keys directly, e.g. tests do).
@@ -118,7 +119,7 @@ let
     else { };
 
   # sysupdate transfer derivation. ab-provision owns the Target structure
-  # (slot discovery) at normal priority — spec §11.7.
+  # (slot discovery) at normal priority.
   mkStoreTransfer = storage: instances:
     mkSource "${imageId'}_@v.nix-store.raw" // {
       Target = {
@@ -211,7 +212,8 @@ let
   };
 
   # The provision script — bash, run as a oneshot BEFORE systemd-sysupdate.
-  # Implements the stateless detection + migration logic from spec 08 §2 + §11.8.
+  # Implements stateless detection (derive the slot layout from GPT labels,
+  # never from a state file) + migration/wipe per `onSizeMismatch`.
   # Config values are BAKED INTO the script via Nix interpolation (no env-var
   # dependency — systemd's `environment` is hard to reach reliably through the
   # NixOS `script` wrapper chain). Bash-level variable expansion uses `''${...}`.
@@ -400,7 +402,7 @@ in
         This is the runtime counterpart to `modules/ab-image` (build-time): the
         image is built with `image.repart`, but `systemd-sysupdate` on the
         target can only WRITE an already-existing slot — it cannot CREATE one.
-        See doc/specs/direct-deploy/08-ab-provisioning.md.
+        See doc/archive/specs/direct-deploy/08-ab-provisioning.md.
       '';
     };
 
@@ -486,7 +488,7 @@ in
       description = ''
         OTA source the target pulls staged images from — written into the
         sysupdate transfer `Source` (this module owns the transfers when
-        `partitions.enable = true`, spec §11.7). Two deploy types, derived
+        `partitions.enable = true`). Two deploy types, derived
         from the value:
         - remote: an `http(s)://...` URL → `Type = "url-file"` (target pulls
           from the runner host's staging over HTTP);
@@ -566,7 +568,8 @@ in
 
   config = mkIf (cfg.enable && ab.enable && partitions.enable) {
     assertions = [
-      # A1: types must match (sysupdate constraint).
+      # Both slots must share one type: a sysupdate transfer requires a
+      # uniform Target.Type across all its instances.
       {
         assertion = slotA.type == slotB.type;
         message = ''
@@ -575,7 +578,7 @@ in
           Target.Type. Set both to "partition" or both to "regular-file".
         '';
       }
-      # A2: slotSize must match ab-image.storeSize when both absolute.
+      # slotSize must match ab-image.storeSize when both are absolute.
       {
         assertion =
           hasSuffix "%" partitions.slotSize
@@ -590,12 +593,12 @@ in
           disk size. If using %, ensure storeSize is large enough in practice.
         '';
       }
-      # A3: autoInit=true requires type="partition".
+      # autoInit = true requires type = "partition".
       {
         assertion = !partitions.autoInit || isPartition;
         message = ''services.nixtache.deploy-target.ab.partitions: autoInit = true requires type = "partition" (can't auto-create regular files). '';
       }
-      # A4: partition type requires storage = "auto" or "/dev/...".
+      # Partition type requires storage = "auto" or a "/dev/..." node.
       {
         assertion =
           !isPartition
@@ -603,7 +606,7 @@ in
           && (slotB.storage == "auto" || hasPrefix "/dev/" slotB.storage);
         message = ''services.nixtache.deploy-target.ab.partitions: partition type requires storage = "auto" or "/dev/..." (got slot_a="${slotA.storage}", slot_b="${slotB.storage}"). '';
       }
-      # A5: verify=true requires the OpenPGP pubring on the target.
+      # verify = true requires the OpenPGP pubring on the target.
       {
         assertion =
           !partitions.verify
@@ -617,7 +620,7 @@ in
           services.nixtache.ab-image.publicKeyFile when ab-image is co-imported.
         '';
       }
-      # A6: publicKeyFile and publicKey are mutually exclusive (one suffices).
+      # Partition type requires storage = "auto" or a "/dev/..." node.
       {
         assertion = !(partitions.publicKeyFile != null && partitions.publicKey != null);
         message = ''
@@ -663,7 +666,7 @@ in
       '';
     };
 
-    # ── sysupdate transfers (sole owner when active, spec §11.7) ─────────────
+    # ── sysupdate transfers (sole owner when active) ─────────────────────────
     # Normal priority overrides ab-image's mkDefault. Same-disk → one transfer
     # (InstancesMax=2); different disks → two (InstancesMax=1 each); regular-
     # file → Target.Type = "regular-file" (sysupdate creates the files). The

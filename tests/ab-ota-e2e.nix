@@ -50,8 +50,8 @@ let
   pkgs = nixpkgs.legacyPackages.${system};
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
 
-  # Compression-matrix knobs (TEST-SPECS 08-A2/A3/A4/A5, design D12). Defaults
-  # reproduce the original suite (A2: squashfs + zstd); the flake registers
+  # Compression-matrix knobs. Defaults reproduce the base variant
+  # (squashfs + zstd); the flake registers
   # erofs / tool-default-compression / percent-slotSize variants as separate
   # vmTests keys.
   vCfg = {

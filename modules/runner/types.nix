@@ -93,8 +93,6 @@ in
   # of each target is serialized into the job env (`NIXTACHE_DEPLOY_TARGETS`);
   # the private key is bind-mounted via LoadCredential (`deploy_ssh_<name>`),
   # mirroring the `flake_ssh_*` / `update_ssh_*` pattern.
-  #
-  # See doc/specs/direct-deploy/01-map-contract.md.
   deployTargetType = types.submodule {
     options = {
       enable = mkOption {
@@ -152,7 +150,7 @@ in
             `systemd-sysupdate` and reboot. Required for the chicken-and-egg
             runner host (its live-switch would restart the container the job
             runs in) and needs consumer prep (repart/UKI/sysupdate/boot-counting)
-            — see doc/specs/direct-deploy/06-ab-image.md.
+            — see doc/archive/specs/direct-deploy/06-ab-image.md.
         '';
       };
 
@@ -198,7 +196,7 @@ in
           Target architecture. `null` (default) = derive from
           `nixosConfigurations.<name>.config.nixpkgs.hostPlatform` at deploy
           time. Cross-arch builds rely on `boot.binfmt.emulatedSystems` on the
-          runner host (see doc/specs/direct-deploy/07-cross-arch.md).
+          runner host (see doc/archive/specs/direct-deploy/07-cross-arch.md).
         '';
       };
 

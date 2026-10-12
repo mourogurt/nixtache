@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Дельта-требования к direct-deploy (карта целей → action/workflow → apply-юнит → ab-image/OTA → auto-update): багфиксы контракта, обнаруженные аудитом спек `doc/specs/0001-direct-deploy.md` и `doc/specs/direct-deploy/*` против кода, и доводка поведения до заявленных спек 01–09.
+Дельта-требования к direct-deploy (карта целей → action/workflow → apply-юнит → ab-image/OTA → auto-update): багфиксы контракта, обнаруженные аудитом спек `doc/archive/specs/0001-direct-deploy.md` и `doc/archive/specs/direct-deploy/*` против кода, и доводка поведения до заявленных спек 01–09.
 
 ## Requirements
 

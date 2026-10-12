@@ -1,5 +1,5 @@
-# Pure-eval CONTRACT tests for spec 08 (ab-provision / overlay-nix / runner
-# store.mode).
+# Pure-eval CONTRACT tests for the ab-provision / overlay-nix / runner
+# store.mode wiring.
 #
 # These pin the wiring + assertion contracts for:
 #   - modules/deploy-target/ab-provision.nix  → services.nixtache.deploy-target.ab.partitions.*

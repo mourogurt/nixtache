@@ -56,7 +56,7 @@ in
     # Numeric Forgejo port, derived from `forgejoUrl` by default. Consumed
     # cross-module by `services.nixtache.deploy-target.ab` (the runner-host's
     # ab-image gating unit polls `/api/v1/actions/runners` here to wait for
-    # runner idle before rebooting). S2 (doc/specs/direct-deploy/06-ab-image.md).
+    # runner idle before rebooting).
     forgejoPort = mkOption {
       type = types.port;
       description = ''

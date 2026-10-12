@@ -1,4 +1,4 @@
-# A/B image compression tests (spec 08 §5 / TEST-SPECS §3) — covers the
+# A/B image compression tests — covers the
 # EXISTING ab-image options `storeFs`, `storeCompression`,
 # `storeCompressionLevel`. Two parts in ONE derivation:
 #

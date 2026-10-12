@@ -6,7 +6,7 @@
 # triggers `systemd-sysupdate` when runners are idle) lives in
 # `modules/deploy-target/ab.nix`.
 #
-# Flow (see doc/specs/direct-deploy/06-ab-image.md):
+# Flow (CI stages centrally, each target atomically swaps its own slot):
 #   CI (container) builds `sysupdate-package` → writes versioned files into the
 #   central staging dir (bind-mounted into the container) → signs SHA256SUMS
 #   with the GPG key → signals the target. Each target's `systemd-sysupdate`

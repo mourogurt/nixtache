@@ -1,7 +1,7 @@
 # Direct-deploy target map: `services.nixtache.runner.deploy.targets`.
 #
-# Owns the `config → host → creds` map (doc/specs/direct-deploy/0001 §4/§5).
-# Each target's attribute name MUST match the consumer's
+# Owns the `config → host → creds` map. Each target's attribute name MUST
+# match the consumer's
 # `nixosConfigurations.<name>` — the `deploy-target` action pairs configs and
 # targets by that name. This module:
 #
@@ -63,7 +63,7 @@ in
       `LoadCredential`. Targets with `sshPrivateKey = null` or `enable = false`
       are skipped by the action (optionality by construction).
 
-      See `doc/specs/direct-deploy/01-map-contract.md`.
+      See `doc/archive/specs/direct-deploy/01-map-contract.md`.
     '';
   };
 

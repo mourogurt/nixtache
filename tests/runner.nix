@@ -1,11 +1,12 @@
 # Pure-evaluation tests for the runner module.
 #
 # The module is consumed by nixtache itself (dogfooding): each scenario imports
-# `self.nixosModules.runner` and feeds it a per-instance `tokenFile`
-# pointing at nixtache's own (sops-encrypted) `secrets/runner.env`. These
-# checks verify the module WIRING without running any container/VM — the token
-# file is ciphertext, which is fine since the module never reads it at eval
-# time (a live deployment would decrypt it via sops-nix first).
+# `self.nixosModules.runner` and feeds it a per-instance `tokenFile`. These
+# checks verify the module WIRING without running any container/VM — the
+# module only forwards `tokenFile` as a bind-mount hostPath at eval time and
+# never reads its content, so a dummy path exercises the wiring exactly like
+# a real consumer's secret path would (a live deployment decrypts the real
+# token via the consumer's secret backend first).
 #
 #   - "/srv" → relocate the store to <path>/nix: custom nix-daemon + storage
 #              oneshot, BindPaths onto /nix injected into every runner service
@@ -31,12 +32,9 @@ let
   pkgs = nixpkgs.legacyPackages.${system};
 
   # Dummy secret for paths the module forwards but never reads at eval time.
+  # Used for every secret-shaped option (token, SSH keys, cache key) — the
+  # repository deliberately stores no secrets, not even encrypted ones.
   dummySecret = /dev/null;
-
-  # nixtache's own (sops-encrypted) runner registration token — used as the
-  # per-instance `tokenFile` so the test consumes the module exactly like a
-  # real consumer would.
-  runnerToken = ../secrets/runner.env;
 
   # Minimal host + module config shared by every scenario. One `default`
   # instance, real token, cache key, and NO SSH keys (build-only / test — no
@@ -53,7 +51,7 @@ let
         domain = "bincache.test";
         port = 5000;
       };
-      instances.default.tokenFile = runnerToken;
+      instances.default.tokenFile = dummySecret;
       secrets.cachePrivateKey = dummySecret;
       # enableSandbox is NOT set here — each scenario that asserts on sandbox
       # state sets it explicitly (tests must not rely on the nixtache default).
@@ -139,8 +137,8 @@ self.nixosModules.runner
   # --- scenario D: multiple instances share the relocated store -----------
   hostMulti = mkHost "/srv" {
     services.nixtache.runner.instances = {
-      default.tokenFile = runnerToken;
-      test = { labels = [ "test:host" ]; tokenFile = runnerToken; };
+      default.tokenFile = dummySecret;
+      test = { labels = [ "test:host" ]; tokenFile = dummySecret; };
     };
   };
   svcMulti = servicesOf hostMulti;

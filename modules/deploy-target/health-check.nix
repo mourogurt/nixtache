@@ -5,15 +5,13 @@
 # critical unit and exits 0 once all are active. Ordered Before= and
 # RequiredBy= `boot-complete.target`, so a failure (any critical unit not active
 # in time) keeps boot-complete unreached → no `systemd-bless-boot` blessing →
-# with bootCounting enabled (consumer-scope, N1) the generation rolls back on
+# with bootCounting enabled (consumer scope) the generation rolls back on
 # the next boot.
 #
 # `RequiredBy` (not `WantedBy`) makes the gating strong: boot-complete cannot
 # reach "active" while this service is failed. Without bootCounting, Tier-0
-# merely withholds blessing; the live Tier-1 (`nixtache-apply.service`, Batch B)
-# or a manual `nixos-rebuild --rollback` is then the safety net.
-#
-# See doc/specs/direct-deploy/05-rollback.md Tier-0.
+# merely withholds blessing; the live Tier-1 (`nixtache-apply.service`) or a
+# manual `nixos-rebuild --rollback` is then the safety net.
 {
   config,
   lib,
@@ -27,8 +25,8 @@ let
   cfg = config.services.nixtache.deploy-target;
 
   # bootCounting turns Tier-0's withheld blessing into an actual generation
-  # rollback on the next boot. Warn when it is applicable but off — Tier-0 then
-  # only logs (spec 05: no rollback without the counter). GRUB users can't
+  # rollback on the next boot. Warn when it is applicable but off — without
+  # the counter Tier-0 only logs and never rolls back. GRUB users can't
   # enable it (systemd-boot only); no warning for them.
   bootCountingOff =
     cfg.criticalUnits != [ ]

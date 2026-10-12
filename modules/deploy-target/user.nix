@@ -27,8 +27,6 @@
 # still adds the group membership (needed for the pointer-dir write), asserts
 # the user exists, and warns about normal-user visibility + the recommended
 # gate prefix for the hand-managed key.
-#
-# See doc/specs/direct-deploy/04-consumer-wiring.md §B.
 {
   config,
   lib,
@@ -56,7 +54,7 @@ let
       exec ${pkgs.runtimeShell} -c "$cmd"
     }
 
-    # probe (R5): `ssh … true`
+    # connectivity probe: `ssh … true`
     if [ "$cmd" = "true" ]; then allow; fi
 
     # `nix copy --to ssh://` serves the store: `nix-store --serve [--write] …`

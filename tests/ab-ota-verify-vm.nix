@@ -1,5 +1,4 @@
-# ab-ota-verify-vm — signature verification scenarios (TEST-SPECS §1а.7,
-# C1–C4) via runNixOSTest. Needs KVM (runNixOSTest carries
+# ab-ota-verify-vm — signature verification scenarios via runNixOSTest. Needs KVM (runNixOSTest carries
 # requiredSystemFeatures = [ "kvm" "nixos-test" ] itself, like ab-provision-vm).
 #
 # Two nodes like ab-ota-e2e: a deployer (nginx staging + the REAL extracted

@@ -52,24 +52,24 @@
       # current system on every CI run, so anything heavier than eval must not
       # live here (see `vmTests` below). Build one with:
       #   nix build .#checks.x86_64-linux.<suite>
-      # See doc/testing.md for the strategy + the docStrictMode matrix.
+      # See doc/technical_details/testing.md for the strategy + the docStrictMode matrix.
       checks = forAllSystems (system: {
         runner = import ./tests/runner.nix { inherit nixpkgs self system; };
         deploy-target = import ./tests/deploy-target.nix { inherit nixpkgs self system; };
         # ab-image module pure-eval: fixed vs max-disk sizing + Verify (fast, no KVM).
         ab-image = import ./tests/ab-image.nix { inherit nixpkgs self system; };
         mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
-        # ── Conformance / contract tests for spec 06 + 08.
-        # See doc/specs/direct-deploy/TEST-SPECS.md. Pure-eval suites are fast
-        # (no KVM); the `*-vm` suites live in `vmTests` below.
+        # ── Conformance / contract tests for the landed A/B modules.
+        # Pure-eval suites are fast (no KVM); the `*-vm` suites live in
+        # `vmTests` below.
         #   ab-existing  : conformance of the implemented ab-image /
         #                  deploy-target wiring (image layout, transfers, verify).
         #   ab-contract  : wiring + assertion contracts for ab-provision /
         #                  overlay-nix / runner store.mode (all implemented).
         ab-existing = import ./tests/ab-existing.nix { inherit nixpkgs self system; };
         ab-contract = import ./tests/ab-contract.nix { inherit nixpkgs self system; };
-        # Auto-update module pure-eval (spec 09 + TEST-SPECS-AUTO-UPDATE.md,
-        # AU-1…AU-25); the VM suite (AU-F*/AU-A*) is in `vmTests`.
+        # Auto-update module pure-eval; its end-to-end VM suite
+        # (flake path + ab path) is in `vmTests`.
         auto-update = import ./tests/auto-update.nix { inherit nixpkgs self system; };
       });
 
@@ -89,10 +89,10 @@
         # + signing) + action.yml parser.
         ab-deploy = import ./tests/ab-deploy.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-ota-e2e: full combat OTA scenario via runNixOSTest (deployer+target VMs,
-        # action.yml parsed → sysupdate writes slot B). Base variant = A2
-        # (squashfs + zstd); the compression-matrix variants below cover
-        # TEST-SPECS 08-A3/A4/A5 through the OTA-deploy path (build-side matrix
-        # lives in ab-compression-vm, K1–K4).
+        # action.yml parsed → sysupdate writes slot B). Base variant = squashfs +
+        # zstd; the erofs / tool-default / percent-slotSize variants below cover
+        # the remaining matrix through the same OTA path (the build-side
+        # compression matrix lives in ab-compression-vm).
         ab-ota-e2e = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # A3: erofs store images.
         ab-ota-e2e-erofs = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; variant = { storeFs = "erofs"; storeCompression = "zstd"; }; };
@@ -119,25 +119,25 @@
         # into v2 → vim still works + v2 lower visible. 2-boot, heavy.
         overlay-nix-ab-swap-vm = import ./tests/overlay-nix-ab-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-runner-compat-vm: R1/R2 (TEST-SPECS §4) — runner clone/build on an
-        # appliance-style container (no system nix-daemon, §11.3) + the
-        # non-appliance mode.
+        # ab-runner-compat-vm: runner clone/build on an appliance-style
+        # container (no system nix-daemon) + the non-appliance mode.
         ab-runner-compat-vm = import ./tests/ab-runner-compat-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-compression-vm targets the ab-image compression matrix.
         ab-compression-vm = import ./tests/ab-compression-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-staging-vm: REAL run of the retain-GC (§11.1) — pre-stage 3 versions +
+        # ab-staging-vm: real run of the staging retain-GC — pre-stage 3 versions +
         # signed manifest → systemctl start nixtache-ab-gc → asserts v1 deleted,
         # v2/v3 kept, SHA256SUMS regenerated, .gpg re-signed + verifies.
         ab-staging-vm = import ./tests/ab-staging-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-deploy-self-vm: self-deploy + gating (B1–B4, TEST-SPECS §1а.3–§1а.6) —
-        # local staging, direct sysupdate + idle/busy/forced nixtache-ab-apply
-        # against a mocked Forgejo API.
+        # ab-deploy-self-vm: self-deploy + gating — local staging, direct
+        # sysupdate + idle/busy/forced nixtache-ab-apply against a mocked
+        # Forgejo API.
         ab-deploy-self-vm = import ./tests/ab-deploy-self-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # ab-ota-verify-vm: signature verification (C1–C4, TEST-SPECS §1а.7) —
-        # Transfer.Verify=yes target accepts the correctly-signed image (full
-        # action.yml run) and rejects wrong-key/tampered/unsigned staging.
+        # ab-ota-verify-vm: signature verification — a Transfer.Verify=yes
+        # target accepts the correctly-signed image (full action.yml run) and
+        # rejects wrong-key/tampered/unsigned staging.
         ab-ota-verify-vm = import ./tests/ab-ota-verify-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # auto-update-vm: AU-F1…F4 (flake path) + AU-A1…A5 (ab path), spec 09.
+        # auto-update-vm: the auto-update module end-to-end — flake path and
+        # ab path.
         auto-update-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
       };
 

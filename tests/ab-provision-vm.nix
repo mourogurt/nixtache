@@ -1,5 +1,5 @@
 # QEMU (runNixOSTest) BEHAVIORAL test for the module
-# `services.nixtache.deploy-target.ab.partitions.*` (spec 08 §1–§4).
+# `services.nixtache.deploy-target.ab.partitions.*`.
 #
 # Regular NixOS VM nodes (NOT an appliance image) with extra empty disks; each
 # node imports `self.nixosModules.deploy-target` and sets the

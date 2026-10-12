@@ -14,8 +14,8 @@
 #      a running CI job.
 #
 # The actual A/B slot write + reboot is done by `systemd-sysupdate` (enabled by
-# the consumer; the image/transfer config is consumer-side per
-# doc/specs/direct-deploy/06-ab-image.md). This module only GATES when it fires.
+# the consumer; the image/transfer config is consumer-side). This module only
+# GATES when it fires.
 {
   config,
   lib,
@@ -46,7 +46,7 @@ in
         authorization to start the ab-image apply units. The consumer MUST
         separately enable `systemd.sysupdate` + `boot.loader.systemd-boot.bootCounting`
         (asserted below) and provide the image/repart/transfer config
-        (doc/specs/direct-deploy/06-ab-image.md §1–6).
+        (see doc/archive/specs/direct-deploy/06-ab-image.md).
       '';
     };
 
@@ -120,11 +120,11 @@ in
     assertions = [
       {
         assertion = config.systemd.sysupdate.enable or false;
-        message = "services.nixtache.deploy-target.ab.enable = true requires systemd.sysupdate.enable = true on this target (configure the A/B image transfers — see doc/specs/direct-deploy/06-ab-image.md).";
+        message = "services.nixtache.deploy-target.ab.enable = true requires systemd.sysupdate.enable = true on this target (configure the A/B image transfers — see doc/archive/specs/direct-deploy/06-ab-image.md).";
       }
       {
         assertion = config.boot.loader.systemd-boot.bootCounting.enable or false;
-        message = "services.nixtache.deploy-target.ab.enable = true requires boot.loader.systemd-boot.bootCounting.enable = true on this target (A/B rollback relies on Automatic Boot Assessment — see doc/specs/direct-deploy/06-ab-image.md §5).";
+        message = "services.nixtache.deploy-target.ab.enable = true requires boot.loader.systemd-boot.bootCounting.enable = true on this target (A/B rollback relies on Automatic Boot Assessment — see doc/archive/specs/direct-deploy/06-ab-image.md §5).";
       }
       {
         assertion = !ab.gating || ab.forgejoApiTokenFile != null;

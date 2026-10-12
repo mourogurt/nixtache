@@ -1,32 +1,21 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context (shown to AI when creating artifacts).
+context: |
+  Working language: English. All documentation (README, doc/**), specs and
+  change artifacts are written in English. Frozen historical material under
+  doc/archive/ and the not-yet-translated specs (direct-deploy, deploy-user)
+  are the only exceptions. The canonical requirement corpus is
+  openspec/specs/ (capabilities); doc/archive/ holds frozen legacy specs.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
-
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+# Per-artifact rules (applied when writing that artifact).
+rules:
+  proposal:
+    - Write in English.
+  specs:
+    - Write in English.
+  design:
+    - Write in English.
+  tasks:
+    - Write in English.
+    - Every change touching functional surfaces (modules, workflows, actions, options) must include a task to update README.md and the affected doc/user_guide/ + doc/technical_details/ documents, with links to the relevant openspec specs (openspec/specs/).

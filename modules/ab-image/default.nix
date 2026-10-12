@@ -20,7 +20,7 @@
 # /etc/systemd/import-pubring.pgp and forces `Transfer.Verify=yes` so sysupdate
 # rejects unsigned/tampered manifests. systemd-sysupdate verifies ONLY OpenPGP.
 #
-# See doc/specs/direct-deploy/06-ab-image.md.
+# Design details: doc/archive/specs/direct-deploy/06-ab-image.md.
 { config, lib, pkgs, modulesPath, ... }:
 
 with lib;

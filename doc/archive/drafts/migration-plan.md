@@ -1,4 +1,4 @@
-> **ЧЕРНОВИК (историческая справка).** Актуальный дизайн — doc/specs/0001-direct-deploy.md; план миграции деплоя — doc/migration/direct-deploy.md.
+> **ЧЕРНОВИК (историческая справка).** Актуальный дизайн — doc/specs/0001-direct-deploy.md; план миграции деплоя — doc/user_guide/migration.md.
 # План миграции CI/CD: `nixos-configuration` → `nixtache`
 
 > **Статус:** план согласован (Q1–Q5 решены)

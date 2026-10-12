@@ -5,21 +5,18 @@
 #   - flake (non-OTA): the poll service builds the target toplevel from the
 #     configured flake ref and activates it THROUGH the shared
 #     `nixtache-apply.service` (pointer write + oneshot start) — never raw
-#     `nixos-rebuild` — so the Tier-1 probe/rollback history (05-rollback)
-#     applies to timer-driven updates exactly as to CI deploys.
+#     `nixos-rebuild` — so the probe/rollback safety net of the deploy
+#     pipeline applies to timer-driven updates exactly as to CI deploys.
 #   - ab-image (OTA): the poll service triggers `systemd-sysupdate` and owns
 #     ONLY the trigger + reboot policy. Transfers/Source/slots stay with
-#     ab-provision/ab-image (single-owner rule, spec §11.7); idle-gating on the
-#     runner host stays with `nixtache-ab-apply` (06 §gating) — on a gating
+#     ab-provision/ab-image (one owner per concern); idle-gating on the
+#     runner host stays with `nixtache-ab-apply` — on a gating
 #     host the service is a no-op by design (`ab.poll` derives false there).
 #
 # Standalone by contract: every access to a sibling module's config goes
 # through `builtins.hasAttr`/`or`-guards (pattern from ab-provision.nix), so a
 # consumer may import ONLY this module. Missing siblings are reported via
-# soft assertions (A2/A4) instead of `attribute missing` eval errors.
-#
-# See doc/specs/direct-deploy/09-auto-update.md (option tree §4, mechanics
-# §5–6, assert matrix §7, CI precedence §8, observability §11).
+# soft assertions instead of `attribute missing` eval errors.
 {
   config,
   lib,
@@ -43,7 +40,7 @@ let
   gating = dtAb.gating or false;
   sysupdateEnabled = config.systemd.sysupdate.enable or false;
   dtAbPartitions = dtAb.partitions or { };
-  # A4 — the ab path needs a resolvable update source: the ab-image module,
+  # The ab path needs a resolvable update source: the ab-image module,
   # ab.partitions with a source, or consumer-owned sysupdate transfers that
   # already carry a Source.
   sysupdateTransfers = config.systemd.sysupdate.transfers or { };
@@ -104,9 +101,9 @@ let
       fi
     '';
 
-  # Activation mechanics (§5): build → no-op check → CI-precedence skip →
+  # Activation mechanics: build → no-op check → CI-precedence skip →
   # atomic pointer write (tmp+rename, the pointer is shared with CI deploys)
-  # → shared apply oneshot. apply failure means the Tier-1 probe rolled the
+  # → shared apply oneshot. apply failure means the probe rolled the
   # profile back; propagate it so the run shows red.
   flakeScript = ''
     set -uo pipefail
@@ -132,9 +129,9 @@ let
     ${flakeRebootClause}
   '';
 
-  # AB mechanics (§6.1): sysupdate never reboots by itself (A7 warns if a
-  # transfer says otherwise) — this unit detects "a new version landed" from
-  # the sysupdate journal and applies the unified reboot policy.
+  # AB mechanics: sysupdate never reboots by itself (a transfer with
+  # `Reboot = yes` gets warned about below) — this unit detects "a new version
+  # landed" from the sysupdate journal and applies the unified reboot policy.
   abRebootClause =
     if cfg.rebootPolicy == "never" then ""
     else if cfg.rebootPolicy == "if-needed" then ''
@@ -165,7 +162,7 @@ let
     ${abRebootClause}
   '';
 
-  # Gating host (§6.2): activation + reboot are owned by nixtache-ab-apply
+  # Gating host: activation + reboot are owned by nixtache-ab-apply
   # (idle-gate over the CI signal). The timer channel is a deliberate no-op.
   abGatingScript = ''
     set -u
@@ -173,7 +170,7 @@ let
   '';
 
   # Transfers belong to ab-provision/ab-image; this only WARNS when one of
-  # them would reboot behind the reboot policy's back (A7).
+  # them would reboot behind the reboot policy's back.
   transferReboots = any
     (t: (t.Transfer.Reboot or "no") == "yes")
     (attrValues (config.systemd.sysupdate.transfers or { }));
@@ -186,8 +183,8 @@ in
       description = ''
         Enable the unified auto-update channel on this target (the nixtache
         replacement for `system.autoUpgrade`). Incompatible with
-        `system.autoUpgrade.enable = true` (asserted) — see the migration
-        recipe in doc/specs/direct-deploy/09-auto-update.md §10.
+        `system.autoUpgrade.enable = true` (asserted). Migration walkthrough:
+        doc/user_guide/migration.md.
       '';
     };
 
@@ -360,16 +357,14 @@ in
   config = mkIf cfg.enable (mkMerge [
     {
       assertions = [
-        # A1
         {
           assertion = !config.system.autoUpgrade.enable;
           message = ''
             services.nixtache.auto-update replaces system.autoUpgrade — set
-            system.autoUpgrade.enable = false (migration recipe:
-            doc/specs/direct-deploy/09-auto-update.md §10).
+            system.autoUpgrade.enable = false (migration walkthrough:
+            doc/user_guide/migration.md).
           '';
         }
-        # A2
         {
           assertion = !isFlake || dtEnabled;
           message = ''
@@ -380,7 +375,6 @@ in
             SSH facade).
           '';
         }
-        # A3
         {
           assertion = !isFlake || cfg.flake.url != null;
           message = ''
@@ -388,7 +382,7 @@ in
             method = "flake" (including method = "auto" deriving to flake).
           '';
         }
-        # A4 — the ab path needs BOTH a running sysupdate AND a resolvable
+        # The ab path needs BOTH a running sysupdate AND a resolvable
         # image source (ab-image module, or ab.partitions with a source).
         {
           assertion = !isAb || (sysupdateEnabled && abSourceResolvable);
@@ -400,7 +394,6 @@ in
             the transfers/source stay with those modules.
           '';
         }
-        # A5
         {
           assertion =
             cfg.rebootPolicy != "window"
@@ -411,7 +404,6 @@ in
             is an empty reboot window — the deferred reboot would never fire.
           '';
         }
-        # A6
         {
           assertion = !(isAb && gating && cfg.rebootPolicy != "never");
           message = ''
@@ -420,7 +412,6 @@ in
             (idle-gate) — rebootPolicy must be "never".
           '';
         }
-        # A8
         {
           assertion = !(cfg.method == "ab-image" && !abPresent && !sysupdateEnabled);
           message = ''
@@ -434,7 +425,7 @@ in
         }
       ];
 
-      # A7 — a transfer that reboots itself bypasses the unified rebootPolicy.
+      # A transfer that reboots itself bypasses the unified rebootPolicy.
       warnings = optional (isAb && transferReboots) ''
         services.nixtache.auto-update owns the reboot policy (rebootPolicy);
         remove Reboot=yes from the systemd.sysupdate transfers.

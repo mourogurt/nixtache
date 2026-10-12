@@ -141,7 +141,7 @@ runs:
           img=$(nix build --no-link --print-out-paths ${SANDBOX_FLAG:-} .#nixosConfigurations.$cfg.config.system.build.sysupdate-package 2>&1)
           img=$(grep -E '^/nix/store/' <<<"$img" | tail -n1)
           if [ -z "$img" ] || [ ! -d "$img" ]; then
-            echo "::error::$cfg: sysupdate-package build failed (no store path, or the config has no system.build.sysupdate-package — wire the consumer A/B prep, see doc/specs/direct-deploy/06-ab-image.md)"; return 1
+            echo "::error::$cfg: sysupdate-package build failed (no store path, or the config has no system.build.sysupdate-package — wire the consumer A/B prep, see doc/archive/specs/direct-deploy/06-ab-image.md)"; return 1
           fi
 
           echo "→ $cfg: staging image files into $stage (version $version)"

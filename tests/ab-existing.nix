@@ -1,4 +1,4 @@
-# Pure-eval tests against ALREADY-IMPLEMENTED nixtache modules (spec 06 + 08 §5/§7).
+# Pure-eval tests against ALREADY-IMPLEMENTED nixtache modules.
 #
 # These PASS NOW (green) — the regression baseline + coverage-gap fillers:
 #   - ab-image: storeFs/storeCompression/storeCompressionLevel forwarding to

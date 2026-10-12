@@ -15,8 +15,6 @@
 #   options: services.nixtache.deploy-target.{enable, criticalUnits,
 #             healthCheckTimeout, deployUser}
 #             services.nixtache.deploy-target.ab.*   (ab-image targets, Batch E)
-#
-# See doc/specs/direct-deploy/04-consumer-wiring.md §B.
 {
   ...
 }:
