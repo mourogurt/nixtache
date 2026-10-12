@@ -48,6 +48,23 @@
 #     consumed by the apply unit, the criticalUnits probe passed (the
 #     synchronous systemctl start returned 0; the journal shows "activated"),
 #     sshd still active.
+#   HOME-less run: a switch with HOME unset produces no `/.ssh` warnings and
+#     the host key lands in the workspace-pinned `.deploy-known-hosts`.
+#   matrix run (aa-full-disk + aadrift + livetest): the pre-copy disk gate
+#     refuses the starved target BEFORE `nix copy` (no closure pushed, apply
+#     unit not triggered), the drifted target (old gate, free-space query not
+#     whitelisted) is skipped with a warning, the healthy target still
+#     deploys, and the job exits red naming ONLY the failed target.
+#   drift-only run: when drift is the only anomaly the job exits 0.
+#   full-store run: the target's store filesystem is REALLY filled below
+#     minFreeBytes; nixtache-apply.service refuses before touching the
+#     profile (pointer consumed, generation unchanged), and after the filler
+#     is removed the same trigger succeeds without recovery steps.
+#
+# The "starved" target is the SAME node: the deploy map gains an
+# `aa-full-disk` config whose fake-nix build yields a synthetic toplevel path
+# whose stubbed `nix path-info` narSize (1 TiB) exceeds any plausible free
+# space — the runner-side gate does the refusing, no disk filling needed.
 #
 # Retains two orthogonal pieces of the old suite's coverage:
 #   - action.yml parse assertions (single-source contract on the live path);
@@ -67,6 +84,21 @@ let
 
   # The single config name the deploy map + fake `nix flake show` agree on.
   cfgName = "livetest";
+  # The space-starved matrix entry: sorts BEFORE livetest in jq keys[] so the
+  # failure is hit first and livetest deploying afterwards proves the loop
+  # continues. Its toplevel is synthetic — never built, never copied (the
+  # pre-copy gate refuses first); only the stubbed path-info narSize matters.
+  starvedCfg = "aa-full-disk";
+  starvedToplevel = "/nix/store/00000000000000000000000000000000-aa-full-disk-toplevel";
+  # The protocol-drift entry: a second deploy user on the same target, gated
+  # with the PRE-CHANGE protocol (the real gate script minus the free-space
+  # entry — see oldGateScript below). The action must skip it with a warning,
+  # never fail the job over it.
+  driftCfg = "aadrift";
+  driftUser = "nixos-deploy-old";
+  # 256 MiB preset for every test map entry — fits the VM's ~2 GiB store
+  # tmpfs (the 5 GiB default would refuse every VM deploy at stage 1).
+  testPreset = 256 * 1024 * 1024;
 
   actionYml = builtins.readFile ../.forgejo/actions/deploy-target/action.yml;
   actionYmlFile = pkgs.writeText "deploy-action.yml" actionYml;
@@ -88,17 +120,36 @@ let
     chmod +x "$out"
   '';
 
-  # Fake `nix` wrapper — stubs exactly the two commands that need flake
-  # evaluation (no internet in the VM), delegates everything else (notably
-  # `nix copy`) to the real nix binary.
+  # Fake `nix` wrapper — stubs exactly the commands that need flake evaluation
+  # or a nonexistent store path (no internet in the VM): `nix flake show`
+  # answers both matrix config names, `nix build` echoes a PREBUILT toplevel
+  # (the synthetic 1-TiB path for the starved config), `nix path-info` on the
+  # starved path reports a 1 TiB narSize. Everything else the live path uses
+  # runs for REAL, delegated to the real nix binary — including
+  # `nix copy --to ssh://` and the remote store inventory
+  # (`nix path-info --store ssh://… --all`, served through the gate).
   fakeNix = pkgs.writeShellScript "fake-nix" ''
     if [ "$1" = "flake" ] && [ "$2" = "show" ]; then
-      echo '${builtins.toJSON { nixosConfigurations.${cfgName} = { }; }}'
+      echo '${builtins.toJSON { nixosConfigurations = { ${cfgName} = { }; ${starvedCfg} = { }; ${driftCfg} = { }; }; }}'
       exit 0
     fi
     if [ "$1" = "build" ]; then
-      echo '${newToplevel}'
+      case "$*" in
+        *${starvedCfg}*) echo '${starvedToplevel}' ;;
+        *) echo '${newToplevel}' ;;
+      esac
       exit 0
+    fi
+    if [ "$1" = "path-info" ]; then
+      case "$*" in
+        # remote store inventory → real nix (ssh store through the gate)
+        *--all*) ;;
+        # local closure listings / sizes (`-r -S` / `-s` two-column text) —
+        # the deployer store does not hold the full closure (no internet), so
+        # these are stubbed: 1 TiB for the starved config, 100 MB otherwise.
+        *${starvedCfg}*) echo '${starvedToplevel} 1099511627776'; exit 0 ;;
+        *${newToplevel}*) echo '${newToplevel} 100000000'; exit 0 ;;
+      esac
     fi
     exec ${pkgs.nix}/bin/nix "$@"
   '';
@@ -114,6 +165,67 @@ let
       hasKey = true;
       enable = true;
       extraOptions = [ ];
+      minFreeBytes = testPreset;
+    };
+  };
+
+  # Three-config matrix: the starved entry + a protocol-drift entry + the
+  # healthy one (same target node; the starved config's "closure" is what is
+  # too big — see fakeNix; the drift config rides the old-gate deploy user).
+  deployTargetsMatrix = builtins.toJSON {
+    ${cfgName} = {
+      method = "live";
+      sshUser = "nixos-deploy";
+      host = "target";
+      sshPort = "22";
+      hasKey = true;
+      enable = true;
+      extraOptions = [ ];
+      minFreeBytes = testPreset;
+    };
+    ${starvedCfg} = {
+      method = "live";
+      sshUser = "nixos-deploy";
+      host = "target";
+      sshPort = "22";
+      hasKey = true;
+      enable = true;
+      extraOptions = [ ];
+      minFreeBytes = testPreset;
+    };
+    ${driftCfg} = {
+      method = "live";
+      sshUser = driftUser;
+      host = "target";
+      sshPort = "22";
+      hasKey = true;
+      enable = true;
+      extraOptions = [ ];
+      minFreeBytes = testPreset;
+    };
+  };
+
+  # Drift-only matrix: proves a drifted target alone never fails the job.
+  deployTargetsDriftOnly = builtins.toJSON {
+    ${cfgName} = {
+      method = "live";
+      sshUser = "nixos-deploy";
+      host = "target";
+      sshPort = "22";
+      hasKey = true;
+      enable = true;
+      extraOptions = [ ];
+      minFreeBytes = testPreset;
+    };
+    ${driftCfg} = {
+      method = "live";
+      sshUser = driftUser;
+      host = "target";
+      sshPort = "22";
+      hasKey = true;
+      enable = true;
+      extraOptions = [ ];
+      minFreeBytes = testPreset;
     };
   };
 
@@ -124,6 +236,22 @@ let
     export GITHUB_EVENT_NAME=push
     export SANDBOX_OK=0
     export NIXTACHE_DEPLOY_TARGETS='${deployTargets}'
+    export CREDENTIALS_DIRECTORY=/run/credentials
+    export PATH=/etc/fake-nix:$PATH
+  '';
+
+  deployEnvFileMatrix = pkgs.writeText "deploy-env-matrix" ''
+    export GITHUB_EVENT_NAME=push
+    export SANDBOX_OK=0
+    export NIXTACHE_DEPLOY_TARGETS='${deployTargetsMatrix}'
+    export CREDENTIALS_DIRECTORY=/run/credentials
+    export PATH=/etc/fake-nix:$PATH
+  '';
+
+  deployEnvFileDriftOnly = pkgs.writeText "deploy-env-drift" ''
+    export GITHUB_EVENT_NAME=push
+    export SANDBOX_OK=0
+    export NIXTACHE_DEPLOY_TARGETS='${deployTargetsDriftOnly}'
     export CREDENTIALS_DIRECTORY=/run/credentials
     export PATH=/etc/fake-nix:$PATH
   '';
@@ -164,13 +292,45 @@ let
       enable = true;
       criticalUnits = [ "sshd.service" ]; # trivial, always active
       healthCheckTimeout = 60;
+      # The VM's writable store is a ~2 GiB tmpfs — below the 5 GiB default;
+      # lower the activation guard to fit (the guard's behavior itself is
+      # covered by the stubbed-df module test in tests/deploy-target.nix).
+      minFreeBytes = 256 * 1024 * 1024;
       deployUser = {
         name = "nixos-deploy";
         authorizedKey = fixture.deployKeyPub;
         autoProvision = true;
       };
     };
+
+    # Protocol-drift fixture: a second deploy user gated with the PRE-CHANGE
+    # protocol (the free-space query is NOT whitelisted for it). Same deploy
+    # key — only the forced command differs. Lives in targetCommon so BOTH
+    # the running target and the deployed targetNew generation carry it (the
+    # RUN 2 switch would otherwise wipe it from /etc/passwd).
+    users.users.${driftUser} = {
+      isSystemUser = true;
+      useDefaultShell = true;
+      group = "nixtache-deploy";
+      openssh.authorizedKeys.keys = [ "restrict,command=\"${oldGateScript}\" ${fixture.deployKeyPub}" ];
+    };
   };
+
+  # The pre-change gate: the REAL gate script with the free-space entry
+  # removed by text subtraction (its comment block + the exact-match line) —
+  # a stand-in for a target still running a pre-change generation. If the
+  # gate text ever changes shape, the build-time grep fails loudly instead of
+  # silently testing nothing.
+  gateScriptPath = lib.elemAt (lib.splitString "\"" (lib.head
+    test.nodes.target.config.users.users.nixos-deploy.openssh.authorizedKeys.keys)) 1;
+  oldGateScript = pkgs.runCommand "nixtache-ssh-gate-pre-disk-gate" { } ''
+    sed '/read-only free-space query/,+3d' ${gateScriptPath} > "$out"
+    chmod +x "$out"
+    if grep -q "df -B1" "$out"; then
+      echo "free-space entry was not stripped from the old-gate fixture" >&2
+      exit 1
+    fi
+  '';
 
   test = pkgs.testers.runNixOSTest {
     name = "ab-deploy";
@@ -205,6 +365,8 @@ let
       environment.systemPackages = with pkgs; [ curl jq openssh ];
       environment.etc."deploy-action.sh".source = "${actionRunScript}";
       environment.etc."deploy-env.sh".source = "${deployEnvFile}";
+      environment.etc."deploy-env-matrix.sh".source = "${deployEnvFileMatrix}";
+      environment.etc."deploy-env-drift.sh".source = "${deployEnvFileDriftOnly}";
       environment.etc."fake-nix/nix".source = "${fakeNix}";
       # Deploy SSH key (copied into CREDENTIALS_DIRECTORY by the test script).
       environment.etc."deploy-key".source = "${fixture.testDeployKey}/id_ed25519";
@@ -236,6 +398,14 @@ let
       assert "NIX_SSHOPTS" in run_text, "action.yml must pass the deploy key to nix copy"
       assert "pending-system" in run_text, "action.yml missing the apply pointer file"
       assert "nixtache-apply.service" in run_text, "action.yml missing the apply-unit trigger"
+      assert "df -B1 --output=avail /nix/store" in run_text, \
+          "action.yml missing the pre-copy free-space query (gate-whitelisted form)"
+      assert "UserKnownHostsFile=$PWD/.deploy-known-hosts" in run_text, \
+          "action.yml must pin known_hosts into the job workspace (HOME-less runners)"
+      assert "failed_targets" in run_text, \
+          "action.yml must collect per-target failures and fail at the end"
+      assert "minFreeBytes // 5368709120" in run_text, \
+          "action.yml must read the per-target minFreeBytes preset (default 5 GiB)"
       print("OK: parsed action.yml (%d chars of run text)" % len(run_text))
 
       # ── Boot both nodes ──────────────────────────────────────────────────────
@@ -263,7 +433,9 @@ let
       deployer.succeed(
         "mkdir -p /run/credentials && "
         "cp /etc/deploy-key /run/credentials/deploy_ssh_${cfgName} && "
-        "chmod 600 /run/credentials/deploy_ssh_${cfgName}"
+        "cp /etc/deploy-key /run/credentials/deploy_ssh_${starvedCfg} && "
+        "cp /etc/deploy-key /run/credentials/deploy_ssh_${driftCfg} && "
+        "chmod 600 /run/credentials/deploy_ssh_*"
       )
 
       # Baselines for the dry-run no-mutation asserts. NB: on these test VMs
@@ -274,23 +446,26 @@ let
       pre_profile = target.succeed("readlink -f /nix/var/nix/profiles/system").strip()
       pre_cur = target.succeed("readlink -f /run/current-system").strip()
 
-      def run_action(ref):
+      def run_action(ref, envfile="/etc/deploy-env.sh", unset_home=False, must_fail=False):
           """Run the REAL action.yml script with the given git ref (mode).
-          Returns the per-target deploy log."""
-          deployer.succeed("rm -f /tmp/artifacts/deploy_${cfgName}.log")
-          # fake-nix on PATH intercepts `nix flake show` + `nix build`;
-          # `nix copy` delegates to the REAL nix — closure push + ssh trigger
-          # run verbatim from action.yml's run text.
-          deployer.succeed(
-            f"cd /tmp && . /etc/deploy-env.sh && GITHUB_REF={ref} bash /etc/deploy-action.sh",
-            timeout=600
-          )
-          return deployer.succeed("cat /tmp/artifacts/deploy_${cfgName}.log")
+          Returns (action stdout, concatenated per-target artifact logs).
+          fake-nix on PATH intercepts `nix flake show` + `nix build`;
+          `nix copy` delegates to the REAL nix — closure push + ssh trigger
+          run verbatim from action.yml's run text."""
+          deployer.succeed("rm -rf /tmp/artifacts")
+          prefix = "env -u HOME " if unset_home else ""
+          cmd = (f"cd /tmp && {prefix}bash -c "
+                 f"'. {envfile} && export GITHUB_REF={ref} && bash /etc/deploy-action.sh'")
+          if must_fail:
+              out = deployer.fail(cmd, timeout=600)
+          else:
+              out = deployer.succeed(cmd, timeout=600)
+          return out, deployer.succeed("cat /tmp/artifacts/*.log 2>/dev/null || true")
 
       # ── RUN 1: dry-activate (non-main ref) — REAL dry branch, no mutation ──
       # V2: the branch pushes the closure and triggers the root
       # nixtache-apply-dry.service through the gate (no nixos-rebuild stub).
-      log = run_action("refs/heads/staging")
+      _, log = run_action("refs/heads/staging")
       assert "dry-activate via nixtache-apply-dry.service" in log, \
           "dry run did not take the V2 dry branch: " + log[-500:]
       # The root dry unit ran on the target and reported a clean no-mutation run.
@@ -315,7 +490,7 @@ let
       # On failure, dump the apply unit's journal — the probe/rollback detail
       # lives on the target, not in the deploy log.
       try:
-          log = run_action("refs/heads/main")
+          _, log = run_action("refs/heads/main")
       except Exception:
           print("--- nixtache-apply.service journal on target ---")
           print(target.succeed("journalctl -u nixtache-apply.service --no-pager -o cat || true"))
@@ -342,6 +517,107 @@ let
       journal = target.succeed("journalctl -u nixtache-apply.service --no-pager -o cat")
       assert "activated ${newToplevel}" in journal, "apply unit journal: " + journal[-500:]
       print("OK: RUN 2 — closure copied, profile switched, criticalUnits probe passed")
+
+      # ── RUN 3: HOME-less runner env — no /.ssh warnings, workspace known_hosts
+      # The runner job env has no HOME; the action pins UserKnownHostsFile to
+      # $PWD/.deploy-known-hosts (probe + copy + triggers), so ssh never tries
+      # to create /.ssh and the host key (accepted in RUN 1) verifies.
+      out, log = run_action("refs/heads/main", unset_home=True)
+      assert "activated ${newToplevel}" in log, "HOME-less deploy did not complete: " + log[-500:]
+      combined = out + log
+      assert "/.ssh" not in combined, \
+          "ssh emitted /.ssh warnings despite the pinned UserKnownHostsFile: " + combined[-500:]
+      deployer.succeed("test -s /tmp/.deploy-known-hosts")
+      deployer.succeed("grep -q '^target ' /tmp/.deploy-known-hosts")
+      print("OK: RUN 3 — HOME-less deploy: no /.ssh warnings, host key in workspace known_hosts")
+
+      # ── RUN 4: matrix — starved target + drifted gate + healthy ────────────
+      # jq keys[] order: aa-full-disk < aadrift < livetest, so both anomalies
+      # are hit BEFORE livetest deploys (proving the loop continues).
+      out, _ = run_action("refs/heads/main", envfile="/etc/deploy-env-matrix.sh", must_fail=True)
+      starved_log = deployer.succeed("cat /tmp/artifacts/deploy_${starvedCfg}.log")
+      drift_log = deployer.succeed("cat /tmp/artifacts/deploy_${driftCfg}.log")
+      live_log = deployer.succeed("cat /tmp/artifacts/deploy_${cfgName}.log")
+      # starved target: refused BEFORE any data movement, naming avail + need
+      assert "low on disk" in starved_log, "starved log: " + starved_log[-500:]
+      assert "B free" in starved_log and "B needed" in starved_log, \
+          "error must name available + required bytes: " + starved_log[-500:]
+      assert "nix copy" not in starved_log, \
+          "closure copy must not start on a low-disk target: " + starved_log[-500:]
+      assert "nixtache-apply.service" not in starved_log, \
+          "apply unit must not be triggered on a low-disk target"
+      target.fail("nix path-info ${starvedToplevel} 2>/dev/null")
+      # drifted target: gate rejects the free-space query → warning + skip,
+      # NOT an error, and the deploy never even builds
+      assert "protocol drift" in drift_log, "drift log: " + drift_log[-500:]
+      assert "building toplevel" not in drift_log
+      # the healthy target deployed in the SAME run
+      assert "activated ${newToplevel}" in live_log, "livetest log: " + live_log[-500:]
+      # job-level: red — but only because of the STARVED target; the failed
+      # summary names it and must NOT list the drifted one
+      assert "::error::" in out and "${starvedCfg}" in out
+      assert "low on disk" in out
+      summary = [l for l in out.splitlines() if "failed targets" in l]
+      assert summary and "${starvedCfg}" in summary[0], "summary lines: " + str(summary)
+      assert "${driftCfg}" not in summary[0], \
+          "drift must not count as a failure: " + summary[0]
+      assert any("::warning::" in l and "${driftCfg}" in l for l in out.splitlines()), \
+          "drift must surface as a per-target warning"
+      print("OK: RUN 4 — starved refused pre-copy (red), drifted skipped (warning), healthy deployed")
+
+      # ── RUN 5: drift-only — the job stays GREEN ────────────────────────────
+      out, log = run_action("refs/heads/main", envfile="/etc/deploy-env-drift.sh")
+      assert "activated ${newToplevel}" in log, "livetest log: " + log[-500:]
+      assert any("::warning::" in l and "${driftCfg}" in l for l in out.splitlines())
+      assert "failed targets" not in out, "drift alone must not fail the job"
+      print("OK: RUN 5 — drift-only run: healthy target deployed, job green")
+
+      # ── RUN 6: apply-unit low-disk guard on a REALLY full store ───────────
+      # Fill the target's store filesystem until free space drops below the
+      # target's minFreeBytes (256 MiB in this suite), then trigger the apply
+      # unit directly — the guard must refuse BEFORE touching the profile,
+      # consume the pointer, and log the deficit + GC hint. After the filler
+      # is removed, the same trigger succeeds with no recovery steps.
+      # NB: /nix/store is read-only outside the nix-daemon's mount namespace,
+      # so the filler is added THROUGH the daemon as uniquely-contented
+      # store paths (a trailing counter defeats content dedup).
+      profile_before = target.succeed("readlink -f /nix/var/nix/profiles/system").strip()
+      cur_before = target.succeed("readlink -f /run/current-system").strip()
+
+      def store_avail():
+          return int(target.succeed("df -B1 --output=avail /nix/store | tail -n1").strip())
+
+      fillers = []
+      target.succeed("dd if=/dev/zero of=/tmp/chunk bs=1M count=224 status=none")
+      i = 0
+      # stop once free space is safely below the 256 MiB threshold
+      while store_avail() >= 224 * 1024 * 1024:
+          i += 1
+          target.succeed(f"cp /tmp/chunk /tmp/chunk{i} && echo chunk-{i} >> /tmp/chunk{i}")
+          fillers.append(target.succeed(f"nix store add-path /tmp/chunk{i}").strip())
+          target.succeed(f"rm /tmp/chunk{i}")
+          assert i < 64, "store filler loop did not converge"
+      target.succeed("rm /tmp/chunk")
+      assert store_avail() < 256 * 1024 * 1024, \
+          f"filler did not starve the store: {store_avail()} B free"
+
+      target.succeed("echo '${newToplevel}' > /var/lib/nixtache/pending-system")
+      target.fail("systemctl start nixtache-apply.service")
+      journal = target.succeed("journalctl -u nixtache-apply.service --no-pager -o cat")
+      assert "refusing to activate" in journal, "guard did not refuse: " + journal[-500:]
+      assert "minFreeBytes" in journal and "nix-collect-garbage" in journal, \
+          "refusal must name the threshold + GC hint: " + journal[-500:]
+      # nothing mutated: profile + current-system unchanged, pointer consumed
+      target.fail("test -e /var/lib/nixtache/pending-system")
+      assert target.succeed("readlink -f /nix/var/nix/profiles/system").strip() == profile_before
+      assert target.succeed("readlink -f /run/current-system").strip() == cur_before
+
+      # after freeing space the next attempt succeeds without recovery steps
+      target.succeed("nix-store --delete " + " ".join(fillers))
+      target.succeed("echo '${newToplevel}' > /var/lib/nixtache/pending-system")
+      target.succeed("systemctl start nixtache-apply.service")
+      target.fail("test -e /var/lib/nixtache/pending-system")
+      print("OK: RUN 6 — apply unit refused on a full store (no mutation, pointer consumed), activated after freeing space")
 
       # ── deploy-user is a SYSTEM user — invisible in display managers ────────
       # SDDM & co. only list normal users (uid >= 1000); the deploy account

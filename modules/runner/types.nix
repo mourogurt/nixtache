@@ -228,6 +228,23 @@ in
           `timeout(1)`; exceeding it fails that target's job.
         '';
       };
+
+      minFreeBytes = mkOption {
+        type = types.ints.unsigned;
+        default = 5 * 1024 * 1024 * 1024;
+        defaultText = lib.literalExpression "5 * 1024 * 1024 * 1024";
+        description = ''
+          Free-space preset (bytes) for this target's runner-side pre-copy
+          disk check. The action refuses the deploy pre-build when the
+          target's store filesystem has less free space than this preset, and
+          post-build when it has less than (missing-closure-paths estimate ×
+          1.1 + preset). `0` disables the pre-copy check entirely (no
+          free-space query is issued — also useful while a target's SSH gate
+          predates the query command). Keep this ≥ the target-side
+          `services.nixtache.deploy-target.minFreeBytes` (the apply-unit
+          guard), which it does not read.
+        '';
+      };
     };
   };
 

@@ -12,7 +12,11 @@
 #                  autoProvision=false with no user fires the assertion;
 #   - tier0      → criticalUnits non-empty wires nixtache-health-check.service
 #                  Before= + RequiredBy= boot-complete.target; default timeout 300;
-#   - timeout    → healthCheckTimeout propagates into the apply + health-check scripts.
+#   - timeout    → healthCheckTimeout propagates into the apply + health-check scripts;
+#   - minFreeBytes → default/custom/refused eval + the apply unit's low-disk
+#                  guard BEHAVIOR (drives the real unit script with a stubbed df)
+#                  and the SSH gate's exact-match free-space entry (drives the
+#                  real gate script extracted from the provisioned key line).
 #
 # Exposed via the flake as `checks.<system>.deploy-target`.
 {
@@ -227,6 +231,34 @@ let
     };
   };
 
+  # --- scenario F: minFreeBytes option + apply-unit guard wiring -------------
+  hostMinFree = mkHost {
+    services.nixtache.deploy-target.minFreeBytes = 123456789;
+  };
+  applyScriptMinFree = (servicesOf hostMinFree)."nixtache-apply".script;
+  # 0 disables the guard: evaluates fine and the script omits the df check.
+  hostMinFreeZero = mkHost {
+    services.nixtache.deploy-target.minFreeBytes = 0;
+  };
+  applyScriptZero = (servicesOf hostMinFreeZero)."nixtache-apply".script;
+  scenarioMinFree = {
+    name = "minFreeBytes: default 5 GiB, custom round-trips into the guard, guard precedes profile set, dry unit exempt, 0 disables";
+    checks = {
+      defaultIs5GiB = hostDefaultTimeout.config.services.nixtache.deploy-target.minFreeBytes == 5 * 1024 * 1024 * 1024;
+      customRoundTrips = hostMinFree.config.services.nixtache.deploy-target.minFreeBytes == 123456789;
+      customInScript = lib.hasInfix "below minFreeBytes (123456789)" applyScriptMinFree;
+      defaultInScript = lib.hasInfix "below minFreeBytes (5368709120)" (servicesOf hostDefaultTimeout)."nixtache-apply".script;
+      # The guard runs BEFORE the profile-set step (the rollback() helper
+      # textually precedes it, so anchor on the step-1 marker, not nix-env).
+      guardBeforeProfileSet =
+        (posOf "df -B1 --output=avail" applyScriptMinFree) < (posOf "set system profile" applyScriptMinFree);
+      # The dry-apply unit is exempt: dry-activate mutates nothing.
+      dryExempt = !(lib.hasInfix "df -B1" dryScript);
+      zeroEvaluates = hostMinFreeZero.config.services.nixtache.deploy-target.minFreeBytes == 0;
+      zeroOmitsGuard = !(lib.hasInfix "df -B1" applyScriptZero);
+    };
+  };
+
   # --- scenario E: autoProvision=false without user → assertion fires -------
   tryAutoOff = builtins.tryEval
     (mkHost {
@@ -395,6 +427,7 @@ let
     scenarioCritical
     scenarioNoCritical
     scenarioDefaultTimeout
+    scenarioMinFree
     scenarioAutoOffAssert
     scenarioManualUserWarns
     scenarioBootCountingWarn
@@ -424,6 +457,118 @@ let
     scenarios));
 
   failMsg = lib.optionalString (!allOk) "FAILED: ${lib.concatStringsSep ", " failed}";
+
+  # --- behavioral: drive the REAL apply-unit script with a stubbed df --------
+  # The unit text comes from the evaluated config (hostApply — default
+  # minFreeBytes = 5 GiB); its absolute paths are redirected into the sandbox
+  # and nix-env / switch-to-configuration are stubs that only log their
+  # invocation, so "profile untouched" is observable.
+  applyScriptFile = pkgs.writeText "nixtache-apply-script" svcApply."nixtache-apply".script;
+  applyGuardTest = pkgs.runCommand "apply-guard-test" { } ''
+    set -u
+    work=$TMPDIR/guard
+    mkdir -p "$work/bin" "$work/state" "$work/profiles" "$work/fake-top/bin" "$work/prev-system"
+
+    sed -e "s|/var/lib/nixtache|$work/state|g" \
+        -e "s|/nix/var/nix/profiles|$work/profiles|g" \
+        ${applyScriptFile} > "$work/apply.sh"
+
+    printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$GUARD_WORK/nix-env.log"' > "$work/bin/nix-env"
+    printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$GUARD_WORK/switch.log"' > "$work/fake-top/bin/switch-to-configuration"
+    chmod +x "$work/bin/nix-env" "$work/fake-top/bin/switch-to-configuration"
+
+    echo "$work/fake-top" > "$work/state/pending-system"
+    ln -s "$work/prev-system" "$work/profiles/system"
+
+    run_apply() {
+      env GUARD_WORK="$work" PATH="$work/bin:$PATH" bash "$work/apply.sh" \
+        > "$work/$1.out" 2> "$work/$1.err" && rc=0 || rc=$?
+      echo "$rc"
+    }
+
+    echo "== healthy target (df reports ~93 GiB free) =="
+    printf '%s\n' '#!/bin/sh' 'echo 99999999999' > "$work/bin/df"
+    chmod +x "$work/bin/df"
+    rc=$(run_apply healthy)
+    [ "$rc" -eq 0 ] || { echo "FAIL: healthy run exited $rc"; cat "$work/healthy.out" "$work/healthy.err"; exit 1; }
+    [ -f "$work/nix-env.log" ] || { echo "FAIL: healthy run did not set the profile"; exit 1; }
+    [ -f "$work/switch.log" ] || { echo "FAIL: healthy run did not switch"; exit 1; }
+    [ ! -e "$work/state/pending-system" ] || { echo "FAIL: healthy run left the pointer behind"; exit 1; }
+    echo "ok: healthy run activates (profile set, switch, pointer consumed)"
+
+    echo "== low-disk target (df reports 1 MB free) =="
+    printf '%s\n' '#!/bin/sh' 'echo 1000000' > "$work/bin/df"
+    rm -f "$work/nix-env.log" "$work/switch.log"
+    echo "$work/fake-top" > "$work/state/pending-system"
+    rc=$(run_apply low)
+    [ "$rc" -eq 1 ] || { echo "FAIL: low-disk run exited $rc (want 1)"; cat "$work/low.out" "$work/low.err"; exit 1; }
+    [ ! -f "$work/nix-env.log" ] || { echo "FAIL: low-disk refusal touched the system profile"; exit 1; }
+    [ ! -f "$work/switch.log" ] || { echo "FAIL: low-disk refusal ran switch-to-configuration"; exit 1; }
+    [ ! -e "$work/state/pending-system" ] || { echo "FAIL: low-disk refusal must consume the pointer"; exit 1; }
+    [ "$(readlink "$work/profiles/system")" = "$work/prev-system" ] || { echo "FAIL: low-disk refusal changed the profile symlink"; exit 1; }
+    grep -q "5368709120" "$work/low.err" || { echo "FAIL: refusal must name the threshold bytes"; cat "$work/low.err"; exit 1; }
+    grep -q "nix-collect-garbage" "$work/low.err" || { echo "FAIL: refusal must hint at garbage collection"; cat "$work/low.err"; exit 1; }
+    echo "ok: low-disk refusal — no mutation, pointer consumed, threshold + GC hint logged"
+
+    echo "== df unparseable — refuse WITHOUT consuming the pointer =="
+    printf '%s\n' '#!/bin/sh' 'echo garbage' > "$work/bin/df"
+    echo "$work/fake-top" > "$work/state/pending-system"
+    rc=$(run_apply baddf)
+    [ "$rc" -eq 1 ] || { echo "FAIL: unparseable-df run exited $rc (want 1)"; exit 1; }
+    [ -e "$work/state/pending-system" ] || { echo "FAIL: df failure must keep the pointer for a retry"; exit 1; }
+    [ ! -f "$work/nix-env.log" ] || { echo "FAIL: df failure touched the system profile"; exit 1; }
+    echo "ok: df failure refuses without consuming the pointer"
+
+    echo "apply-guard: all scenarios passed" > "$out"
+  '';
+
+  # --- behavioral: the SSH gate's exact-match free-space entry ---------------
+  # The gate script is extracted from the provisioned key line of hostApply
+  # (`restrict,command="<store path>" ssh-ed25519 …`) — the REAL artifact the
+  # target's sshd would force on the deploy key.
+  gateScriptPath = lib.elemAt (lib.splitString "\"" (lib.head
+    hostApply.config.users.users.nixos-deploy.openssh.authorizedKeys.keys)) 1;
+  gateTest = pkgs.runCommand "ssh-gate-df-test" { } ''
+    set -u
+    rc_of() {
+      SSH_ORIGINAL_COMMAND="$1" ${gateScriptPath} > "$TMPDIR/g.out" 2> "$TMPDIR/g.err" && rc=0 || rc=$?
+      echo "$rc"
+    }
+    fails=""
+
+    rc=$(rc_of "df -B1 --output=avail /nix/store")
+    if [ "$rc" -eq 0 ] && grep -qE '^[0-9]+$' "$TMPDIR/g.out"; then
+      echo "ok: exact free-space query passes the gate (byte output)"
+    else
+      echo "FAIL: exact query rejected (rc=$rc)"; cat "$TMPDIR/g.out" "$TMPDIR/g.err"; fails=1
+    fi
+
+    rc=$(rc_of "true")
+    if [ "$rc" -eq 0 ]; then
+      echo "ok: 'true' probe still allowed"
+    else
+      echo "FAIL: 'true' probe rejected"; fails=1
+    fi
+
+    reject() {
+      rc=$(rc_of "$1")
+      if [ "$rc" -ne 0 ] && grep -q "command not allowed by the nixtache deploy gate" "$TMPDIR/g.err"; then
+        echo "ok: rejected: $1"
+      else
+        echo "FAIL: variant NOT rejected: $1 (rc=$rc)"; cat "$TMPDIR/g.out" "$TMPDIR/g.err"; fails=1
+      fi
+    }
+
+    reject "df --output=avail -B1 /nix/store"
+    reject "df -B1 --output=avail /nix/store/"
+    reject "df -h /nix/store"
+    reject "df -B1 --output=avail /nix/store; id"
+    reject "df -B1 --output=avail /nix/store && id"
+    reject "df -B1 --output=avail /nix/store > /tmp/x"
+
+    [ -z "$fails" ] || exit 1
+    echo "ssh-gate df: all scenarios passed" > "$out"
+  '';
 in
 pkgs.runCommand "deploy-target-module-test"
   {
@@ -432,7 +577,11 @@ pkgs.runCommand "deploy-target-module-test"
   }
   ''
     cat "$reportPath"
+    # Behavioral sub-suites (build dependencies — a failure there fails this
+    # build before the report is even printed).
+    cat ${applyGuardTest} ${gateTest}
     cp "$reportPath" "$out"
+    cat ${applyGuardTest} ${gateTest} >> "$out"
     if [ -s "$failMsgPath" ]; then
       echo
       cat "$failMsgPath"

@@ -14,7 +14,9 @@ One module, two mechanisms chosen per system type:
   (pointer write + oneshot start) — never raw `nixos-rebuild`. The probe +
   rollback of the deploy pipeline
   ([`deploy.md`](deploy.md)) therefore applies to timer-driven updates
-  exactly as to CI deploys.
+  exactly as to CI deploys — including the apply-unit disk-space guard: a
+  machine below `services.nixtache.deploy-target.minFreeBytes` refuses the
+  activation (unit red, GC hint in the journal) until space is freed.
 - **ab-image** (OTA): the poll service triggers `systemd-sysupdate` and owns
   only the trigger + reboot policy; the runner host self-updates through the
   idle-gated `nixtache-ab-apply` unit.

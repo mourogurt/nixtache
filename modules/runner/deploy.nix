@@ -8,7 +8,7 @@
 #   1. serializes the NON-secret subset of the map into the job env
 #      `NIXTACHE_DEPLOY_TARGETS` (via the `_extraRunnerEnvs` aggregator owned by
 #      instances.nix) — `{name, enable, host, sshUser, sshPort, method, system,
-#      tags, timeout, extraOptions, hasKey}`;
+#      tags, timeout, extraOptions, minFreeBytes, hasKey}`;
 #   2. bind-mounts each target's private key into the container at a fixed path
 #      `/var/secrets/runner/deploy/<name>/id_ed25519` (and, when `sshPublicKey`
 #      is set, the matching `.pub`) and exposes them to every
@@ -85,6 +85,7 @@ in
           tags
           timeout
           extraOptions
+          minFreeBytes
           ;
         hasKey = t.sshPrivateKey != null;
       }) cfg.targets);

@@ -311,6 +311,7 @@ self.nixosModules.runner
         host = "10.13.37.2";
         sshUser = "nixos-deploy";
         sshPrivateKey = dummySecret;
+        minFreeBytes = 123456789;
       };
     };
   };
@@ -326,6 +327,9 @@ self.nixosModules.runner
       desktopHost = parsedTargets.desktop.host == "10.13.37.3";
       desktopTags = parsedTargets.desktop.tags == [ "lan" "vpn" ];
       noBuildHostDesktop = !(parsedTargets.desktop ? buildHost);
+      # minFreeBytes preset ships in the env JSON: default 5 GiB, custom round-trips
+      desktopMinFreeDefault = parsedTargets.desktop.minFreeBytes == 5 * 1024 * 1024 * 1024;
+      laptopMinFreeCustom = parsedTargets.laptop.minFreeBytes == 123456789;
       # secret path must NOT leak into the env JSON
       noSecretLeak = !(builtins.elem (toString dummySecret)
         (lib.concatLists (map (t: builtins.attrValues t) (builtins.attrValues parsedTargets))));
@@ -357,6 +361,24 @@ self.nixosModules.runner
       keylessHasKeyFalse = parsedNoKey.keyless.hasKey == false;
       noKeylessMount = !(has (bindMountsOf hostNoKey) "deploy_ssh_keyless");
       noKeylessCred = !(lib.elem "deploy_ssh_keyless:/var/secrets/runner/deploy/keyless/id_ed25519" (loadCred svcNoKey));
+    };
+  };
+
+  # minFreeBytes = 0 (pre-copy check disabled) serialises intact — the action
+  # reads 0 as "no free-space query for this target".
+  hostMinFreeZero = mkHost "/srv" {
+    services.nixtache.runner.deploy.targets.ungated = {
+      host = "10.13.37.10";
+      sshPrivateKey = dummySecret;
+      minFreeBytes = 0;
+    };
+  };
+  parsedMinFreeZero = builtins.fromJSON
+    ((instancesOf hostMinFreeZero)."default".settings.runner.envs.NIXTACHE_DEPLOY_TARGETS);
+  scenarioMinFreeZero = {
+    name = "deploy.targets.<name>.minFreeBytes=0 → 0 ships in env JSON (check disabled)";
+    checks = {
+      zeroShips = parsedMinFreeZero.ungated.minFreeBytes == 0;
     };
   };
 
@@ -605,6 +627,7 @@ self.nixosModules.runner
     scenarioNoTargets
     scenarioTargets
     scenarioNoKey
+    scenarioMinFreeZero
     scenarioAbImage
     scenarioLiveDefault
     scenarioExtraEnvsAggregated
@@ -691,7 +714,9 @@ pkgs.runCommand "runner-module-test"
     mkdir -p "$work/fakebin" "$work/cred" "$work/run"
 
     # stub `nix`: flake show lists the 3 configs; build yields a fake path;
-    # anything else (notably `nix copy`) succeeds.
+    # path-info answers the pre-copy disk check (remote inventory → empty
+    # store, local closure → the fake path with a tiny narSize); anything
+    # else (notably `nix copy`) succeeds.
     cat > "$work/fakebin/nix" <<'NIXEOF'
     #!/bin/sh
     if [ "$1" = "flake" ] && [ "$2" = "show" ]; then
@@ -702,12 +727,26 @@ pkgs.runCommand "runner-module-test"
       echo "/nix/store/0000000000000000000000000000000-fake-toplevel"
       exit 0
     fi
+    if [ "$1" = "path-info" ]; then
+      case "$*" in
+        *--all*) : ;;  # empty remote store inventory
+        *) echo "/nix/store/0000000000000000000000000000000-fake-toplevel 1000" ;;
+      esac
+      exit 0
+    fi
     exit 0
     NIXEOF
     chmod +x "$work/fakebin/nix"
 
-    # stub `ssh`: the probe / copy-channel / triggers all succeed.
-    printf '#!/bin/sh\nexit 0\n' > "$work/fakebin/ssh"
+    # stub `ssh`: the probe / copy-channel / triggers all succeed; the
+    # pre-copy free-space query answers with ~93 GiB.
+    cat > "$work/fakebin/ssh" <<'SSHEOF'
+    #!/bin/sh
+    case "$*" in
+      *"df -B1 --output=avail /nix/store"*) echo 99999999999 ;;
+    esac
+    exit 0
+    SSHEOF
     chmod +x "$work/fakebin/ssh"
 
     # fake deploy credentials for the two keyed targets (content irrelevant).

@@ -57,6 +57,11 @@ let
     # connectivity probe: `ssh … true`
     if [ "$cmd" = "true" ]; then allow; fi
 
+    # read-only free-space query (the deploy action's pre-copy disk check).
+    # Byte output, single line. Exact match — any extra argument, reordering,
+    # redirection or chaining falls through to the standard rejection below.
+    if [ "$cmd" = "df -B1 --output=avail /nix/store" ]; then allow; fi
+
     # `nix copy --to ssh://` serves the store: `nix-store --serve [--write] …`
     case "$cmd" in
       "nix-store --serve"*) allow ;;

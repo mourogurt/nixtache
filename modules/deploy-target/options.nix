@@ -65,6 +65,25 @@ with lib;
       '';
     };
 
+    minFreeBytes = mkOption {
+      type = types.ints.unsigned;
+      default = 5 * 1024 * 1024 * 1024;
+      defaultText = literalExpression "5 * 1024 * 1024 * 1024";
+      description = ''
+        Minimum free bytes on the store filesystem (`df -B1 --output=avail
+        /nix/store`) required for `nixtache-apply.service` to start an
+        activation. Below the threshold the unit refuses BEFORE touching the
+        system profile: it consumes the pointer file, logs the deficit with a
+        garbage-collection hint, and exits non-zero — the previously active
+        generation stays active and no rollback runs (nothing was mutated).
+        `0` disables the guard entirely. Activation headroom only; retention
+        policy (what to GC) stays a consumer-side concern. The runner-side
+        pre-copy check has its own preset
+        (`services.nixtache.runner.deploy.targets.<name>.minFreeBytes`) —
+        keep that one ≥ this one.
+      '';
+    };
+
     deployUser = mkOption {
       type = types.nullOr (types.submodule {
         options = {
@@ -105,7 +124,8 @@ with lib;
                 `restrict,command=<nixtache-ssh-gate>` prefix. The gate allows
                 exactly the deploy protocol's remote commands (`nix-store
                 --serve` for `nix copy --to`, the apply-unit trigger,
-                `systemd-sysupdate` triggers, the `true` probe) and rejects
+                `systemd-sysupdate` triggers, the `true` probe, the read-only
+                `df -B1 --output=avail /nix/store` free-space query) and rejects
                 anything else — no shell, no port forwarding, no agent/X11
                 (`restrict`).
               - `"restrict"`: only the `restrict` prefix (no command gate) —

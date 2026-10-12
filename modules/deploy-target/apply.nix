@@ -103,6 +103,28 @@ in
           fi
         }
 
+        ${
+          optionalString (cfg.minFreeBytes > 0) ''
+            # Disk-space gate: refuse activation when the store filesystem has less
+            # free space than services.nixtache.deploy-target.minFreeBytes. Runs
+            # BEFORE any mutation (the profile set below), so a refusal needs no
+            # rollback — consume the pointer so the next deploy attempt starts
+            # clean, and exit. df unparseable → exit without consuming the pointer
+            # (nothing mutated; the trigger can be retried).
+            avail=$(df -B1 --output=avail /nix/store | tail -n1 | tr -d ' ')
+            case "$avail" in
+              ""|*[!0-9]*)
+                echo "nixtache-apply: cannot determine free space on /nix/store (df printed '$avail') — refusing to activate" >&2
+                exit 1 ;;
+            esac
+            if [ "$avail" -lt ${toString cfg.minFreeBytes} ]; then
+              echo "nixtache-apply: refusing to activate — /nix/store has $avail bytes free, below minFreeBytes (${toString cfg.minFreeBytes}). Free space on the target (e.g. nix-collect-garbage -d) and redeploy." >&2
+              rm -f "${pendingFile}"
+              exit 1
+            fi
+          ''
+        }
+
         # 1) set system profile + activate
         if ! nix-env -p /nix/var/nix/profiles/system --set "$P"; then
           echo "nixtache-apply: nix-env --set failed" >&2; rollback; exit 1

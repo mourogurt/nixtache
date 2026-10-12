@@ -9,8 +9,15 @@ description: |
   `method=ab-image` (Batch E) builds the `sysupdate-package`, stages it into the
   central A/B store, GPG-signs the manifest, and signals the target's
   `systemd-sysupdate` (idle-gated on the runner host; immediate on remote
-  targets). Offline / unmapped / keyless targets are skipped with a warning
-  (R1/R5) — they never fail the whole job.
+  targets).   Offline / unmapped / keyless targets are skipped with a warning
+  (R1/R5) — they never fail the whole job. Each `live` target's free store
+  space is checked twice against its `minFreeBytes` preset: pre-build (fast
+  refuse below the preset) and post-build (missing-closure-paths estimate ×
+  1.1 + preset; full closure as fallback). A target that cannot hold the
+  deployment records a per-target error, the loop continues with the
+  remaining targets, and the job fails at the end if any target errored. A
+  target whose SSH gate predates the free-space query (protocol drift) is
+  skipped with a warning and never fails the job.
 
 runs:
   using: "composite"
@@ -58,12 +65,48 @@ runs:
         fi
 
         # --- per-target activate -------------------------------------------------
-        # _liveApply cfg t mode key: build toplevel → copy → trigger apply-unit
+        # _liveApply cfg t mode key: pre-copy disk check → build toplevel →
+        # sized disk check → copy → trigger apply-unit. Exit codes: 1 = the
+        # target FAILED (job goes red at the end); 2 = protocol drift (the
+        # target's gate predates the free-space query) — the loop skips such
+        # targets with a warning; drift alone never fails the job.
         _liveApply() {
           local cfg="$1" t="$2" mode="$3" key="$4"
           local user host port extra
           user=$(jq -r .sshUser <<<"$t"); host=$(jq -r .host <<<"$t"); port=$(jq -r .sshPort <<<"$t")
           extra=$(jq -r '.extraOptions[]?' <<<"$t")
+          # Free-space preset for this target (absent on older runner modules →
+          # 5 GiB default). 0 = pre-copy check disabled for this target.
+          local preset
+          preset=$(jq -r '.minFreeBytes // 5368709120' <<<"$t")
+
+          # NIX_SSHOPTS so `nix copy --to ssh://` uses the deploy key + port.
+          # UserKnownHostsFile is pinned into the job workspace: the runner job
+          # env has no HOME, so default known-hosts handling warns (`/.ssh`) on
+          # every connection and persists nothing; a workspace file gives
+          # host-key verification a stable per-job location (TOFU once per job
+          # per host via accept-new).
+          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$PWD/.deploy-known-hosts"
+          export NIX_SSHOPTS="$ssh_opts"
+
+          # Stage 1 (pre-build fast refuse): one df round-trip, reused by
+          # stage 2. The df query is whitelisted verbatim by the target's SSH
+          # gate; a rejected or unparseable answer means protocol drift (a
+          # pre-change gate on the target) — a transition condition, NOT a
+          # target failure: return 2 so the loop skips with a warning.
+          local avail=""
+          if [ "$preset" -gt 0 ]; then
+            avail=$(ssh $ssh_opts "$user@$host" "df -B1 --output=avail /nix/store" 2>/dev/null | tail -n1 | tr -d ' ')
+            case "$avail" in
+              ""|*[!0-9]*)
+                echo "::warning::$cfg: target $host rejected the free-space query — its gate predates this action (protocol drift). Skipped. Transition hatch: set services.nixtache.deploy-target.deployUser.sshGate = \"restrict\" on the target until both sides carry the new protocol (see doc/user_guide/migration.md)."
+                return 2 ;;
+            esac
+            if [ "$avail" -lt "$preset" ]; then
+              echo "::error::$cfg: target $host low on disk ($avail B free, preset $preset B minimum)"
+              return 1
+            fi
+          fi
 
           echo "→ $cfg: live (mode=$mode) — building toplevel…"
           # stdout (--print-out-paths) = the store path; stderr (build log) → artifact.
@@ -76,9 +119,44 @@ runs:
             echo "::error::$cfg: toplevel build failed (no store path in output)"; return 1
           fi
 
-          # NIX_SSHOPTS so `nix copy --to ssh://` uses the deploy key + port.
-          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-          export NIX_SSHOPTS="$ssh_opts"
+          # Stage 2 (post-build sized check): need = Σ narSize of closure paths
+          # MISSING on the target (remote store inventory through the serve
+          # channel) × 1.1 + preset headroom. Text output (`-r -S` / `--all`)
+          # rather than `--json` (deprecated without --json-format; shape
+          # differs across nix versions). When either side of the inventory
+          # fails, fall back to the conservative full closure size × 1.1 +
+          # preset (a conservative refusal is safe; a delta-unaware one would
+          # falsely block routine deploys).
+          if [ "$preset" -gt 0 ]; then
+            local need sum inv local_closure
+            inv=$(mktemp); local_closure=$(mktemp)
+            need=""
+            if nix path-info -r -S "$P" > "$local_closure" 2>/dev/null \
+               && nix path-info --store "ssh://$user@$host" --all > "$inv" 2>/dev/null; then
+              sum=$(awk 'NR==FNR { present[$1]=1; next } !($1 in present) { s += $NF } END { print s+0 }' \
+                "$inv" "$local_closure")
+              case "$sum" in
+                ""|*[!0-9]*) sum="" ;;
+              esac
+              [ -n "$sum" ] && need=$(( sum * 11 / 10 + preset ))
+            fi
+            if [ -z "$need" ]; then
+              need=$(nix path-info -s "$P" 2>/dev/null | awk '{print $NF}')
+              case "$need" in
+                ""|*[!0-9]*)
+                  echo "::error::$cfg: cannot estimate the closure size of $P"
+                  rm -f "$inv" "$local_closure"; return 1 ;;
+              esac
+              need=$(( need * 11 / 10 + preset ))
+              echo "→ $cfg: remote store inventory unavailable — conservative full-closure estimate"
+            fi
+            rm -f "$inv" "$local_closure"
+            if [ "$avail" -lt "$need" ]; then
+              echo "::error::$cfg: target $host low on disk ($avail B free, $need B needed)"
+              return 1
+            fi
+            echo "→ $cfg: disk check ok ($avail B free, $need B needed)"
+          fi
 
           if [ "$mode" = "dry-activate" ]; then
             echo "→ $cfg: dry-activate via nixtache-apply-dry.service (diff, no mutation)"
@@ -168,7 +246,7 @@ runs:
             echo "✓ $cfg: staged (dry-activate, no apply)"; return 0
           fi
 
-          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          local ssh_opts="-i $key -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$PWD/.deploy-known-hosts"
           if [ "$host" = "${NIXTACHE_RUNNER_HOST:-}" ]; then
             echo "→ $cfg: local-self ab-image — signal nixtache-ab-apply (idle-gated sysupdate on runner host)"
             ssh $ssh_opts "$user@$host" \
@@ -190,6 +268,10 @@ runs:
         export SANDBOX_FLAG
         export -f _liveApply _abImage
 
+        # Per-target failures (timeout, low disk, copy/apply errors) are
+        # recorded and the loop CONTINUES — one bad target must not starve
+        # the rest; the job goes red at the end if any target errored.
+        failed_targets=""
         for cfg in $configs; do
           echo ""
           echo "=== target: $cfg ==="
@@ -208,6 +290,7 @@ runs:
           # probe (R5): short SSH ping with the same key; skip+warn if down.
           user=$(jq -r .sshUser <<<"$t"); host=$(jq -r .host <<<"$t"); port=$(jq -r .sshPort <<<"$t")
           if ! ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+                  -o UserKnownHostsFile="$PWD/.deploy-known-hosts" \
                   -i "$key" -p "$port" "$user@$host" true 2>>"artifacts/deploy_${cfg}.log"; then
             echo "::warning::$cfg: host $host unreachable (probe failed) — skipping, not failing CI."; continue
           fi
@@ -219,15 +302,24 @@ runs:
           case "$method" in
             live)     timeout "${tmo}m" bash -c '_liveApply "$@"' _ "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1
                       rc=$?
-                      if [ "$rc" -eq 124 ]; then echo "::error::$cfg: exceeded per-target timeout (${tmo}m)"; exit 1; fi
-                      if [ "$rc" -ne 0 ]; then echo "::error::$cfg: live deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; fi ;;
+                      # rc=2: protocol drift (target gate predates the free-space
+                      # query) — a transition condition, not a target failure:
+                      # warn + skip; the job stays green if drift is the only anomaly.
+                      if [ "$rc" -eq 2 ]; then echo "::warning::$cfg: skipped — target $host rejected the free-space query (protocol drift); transition: deployUser.sshGate=\"restrict\" (see artifacts/deploy_${cfg}.log)"; continue; fi
+                      if [ "$rc" -eq 124 ]; then echo "::error::$cfg: exceeded per-target timeout (${tmo}m)"; failed_targets="$failed_targets $cfg"; continue; fi
+                      if [ "$rc" -ne 0 ]; then echo "::error::$cfg: live deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; failed_targets="$failed_targets $cfg"; continue; fi ;;
             ab-image) timeout "${tmo}m" bash -c '_abImage "$@"' _ "$cfg" "$t" "$mode" "$key" >>"artifacts/deploy_${cfg}.log" 2>&1
                       rc=$?
-                      if [ "$rc" -eq 124 ]; then echo "::error::$cfg: exceeded per-target timeout (${tmo}m)"; exit 1; fi
-                      if [ "$rc" -ne 0 ]; then echo "::error::$cfg: ab-image deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; exit 1; fi ;;
+                      if [ "$rc" -eq 124 ]; then echo "::error::$cfg: exceeded per-target timeout (${tmo}m)"; failed_targets="$failed_targets $cfg"; continue; fi
+                      if [ "$rc" -ne 0 ]; then echo "::error::$cfg: ab-image deploy failed"; tail -n 50 "artifacts/deploy_${cfg}.log"; failed_targets="$failed_targets $cfg"; continue; fi ;;
             *) echo "::error::$cfg: unknown method '$method'"; exit 1 ;;
           esac
         done
+
+        if [ -n "$failed_targets" ]; then
+          echo "::error::deploy-target: failed targets:${failed_targets}"
+          exit 1
+        fi
 
         echo ""
         echo "deploy-target: done (mode=$mode)."

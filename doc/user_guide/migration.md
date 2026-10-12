@@ -110,3 +110,26 @@ for A/B targets set `method = "ab-image"` (or leave `auto`). It requires
    provisions the system deploy user and the gate.
 4. Smoke test: PR → dry-activate → merge to main → switch; inspect the
    target's `journalctl -u nixtache-apply.service`.
+
+## 5. Two-phase rollout of protocol extensions (the disk-space gate)
+
+The deploy-disk-space-gate change extends the gated SSH protocol with a new
+command: the action's pre-copy check issues `df -B1 --output=avail
+/nix/store` through the deploy key (see
+[`deploy.md`](deploy.md) → "Pre-flight disk-space check"; canonical:
+[`openspec/specs/deploy-user/spec.md](../../openspec/specs/deploy-user/spec.md)
+"Gate allows the disk-space query"). A **new action against an old gate**
+gets the query rejected and **skips that target with a per-target warning**
+(the job stays green — drift is a transition condition, not a failure).
+Upgrade order:
+
+1. **Module first**: bump nixtache and deploy every target once with the
+   *current* action — the new generation carries the extended gate (plus
+   the apply-unit `minFreeBytes` guard, which needs no protocol change).
+2. **Then the action**: the next run of the new action finds the query
+   whitelisted everywhere.
+
+If a target lags (still on a pre-change generation), temporarily set
+`services.nixtache.deploy-target.deployUser.sshGate = "restrict"` on it and
+revert to `"gate"` once it catches up — the same protocol-drift escape
+hatch as §3.

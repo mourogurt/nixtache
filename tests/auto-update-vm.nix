@@ -148,6 +148,10 @@ let
     services.nixtache.deploy-target = {
       enable = true;
       inherit criticalUnits healthCheckTimeout;
+      # The VM's store filesystem is a fraction of its 8 GiB disk — below the
+      # 5 GiB default; lower the activation guard to fit (guard behavior is
+      # covered by the stubbed-df module test in tests/deploy-target.nix).
+      minFreeBytes = 256 * 1024 * 1024;
     };
     services.nixtache.auto-update = {
       enable = true;

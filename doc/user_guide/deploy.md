@@ -23,6 +23,7 @@ services.nixtache.runner.deploy.targets.desktop = {
   sshPublicKey  = config.sops.secrets.deploy-desktop-key-pub.path;
   method = "live";                                      # "live" (default) | "ab-image"
   # sshUser = "nixos-deploy"; sshPort = 22; timeout = 240; tags = [ ... ]; extraOptions = "...";
+  # minFreeBytes = 5 * 1024**3;                          # pre-copy disk preset; 0 disables the check
 };
 ```
 
@@ -66,6 +67,19 @@ closure on failure), polkit rules authorizing the deploy user to **start**
 that one unit, the `nixtache-deploy` group owning the pointer dir, and a
 Tier-0 health check gated on `boot-complete.target`.
 
+### Disk-space guard
+
+| Option | Default | Meaning |
+|---|---|---|
+| `services.nixtache.deploy-target.minFreeBytes` | `5 * 1024 * 1024 * 1024` (5 GiB) | Minimum free bytes on the store filesystem for `nixtache-apply.service` to start an activation. Below the threshold the unit refuses **before** touching the system profile: it consumes the pointer file, logs the deficit with a garbage-collection hint, and exits non-zero — the running generation stays active, no rollback runs (nothing was mutated). `0` disables the guard. |
+
+This is activation headroom, not retention policy — what to collect stays a
+consumer-side concern. Canonical requirement:
+[`openspec/specs/direct-deploy/spec.md](../../openspec/specs/direct-deploy/spec.md)
+("Apply-unit low-disk guard"); the runner-side pre-copy check is described in
+[Pre-flight disk-space check](#pre-flight-disk-space-check) below.
+
+
 ## Methods: `live` vs `ab-image`
 
 - **`live`** (default): the runner builds the toplevel, pushes the closure
@@ -78,12 +92,58 @@ Tier-0 health check gated on `boot-complete.target`.
   reboots. The runner host itself self-updates through the idle-gated
   `nixtache-ab-apply` unit.
 
+## Pre-flight disk-space check
+
+Before any closure data moves, the action checks each `live` target's free
+store space against its preset — the deploy-map option
+`services.nixtache.runner.deploy.targets.<name>.minFreeBytes` (default
+5 GiB; `0` disables the check for that target entirely). The free space
+itself is queried through the gated SSH channel — the exact, read-only
+command `df -B1 --output=avail /nix/store` is whitelisted by
+`nixtache-ssh-gate`. Two stages:
+
+1. **Pre-build** (fast refuse): free space below the preset fails the
+   target immediately — nearly-full machines are skipped in seconds,
+   without a build.
+2. **Post-build** (sized check): the deployment need is estimated as the
+   narSize sum of the closure paths **missing** on the target (remote store
+   inventory through the serve channel) × 1.1 **+ preset**; if the
+   inventory query fails, the conservative fallback is the full closure
+   size × 1.1 + preset.
+
+A target short on space records `::error::<name>: target <host> low on disk
+(<avail> B free, <need> B needed)` — no `nix copy` runs and the apply unit
+is not triggered for it — while the loop continues with the remaining
+targets; the job fails at the end if any target errored. A **rejected**
+query means protocol drift (the target's gate predates the action) and is a
+*transition* condition, not a failure: the target is skipped with a
+per-target `::warning::` naming the `sshGate = "restrict"` escape hatch,
+and drift alone never fails the job — see [`migration.md`](migration.md)
+§5. The target-side activation guard (`deploy-target.minFreeBytes`) is the
+second line of defence — see [Disk-space guard](#disk-space-guard) above;
+keep the runner-side preset ≥ the target-side guard (the runner cannot read
+the target's module config).
+
+All action SSH invocations (probe, copy, triggers) pin
+`UserKnownHostsFile` to `$PWD/.deploy-known-hosts` instead of relying on
+the job's `HOME` (which runner job environments do not have): no `/.ssh`
+warnings, and target host keys verify against a stable per-job file.
+
+Canonical requirements:
+[`openspec/specs/direct-deploy/spec.md`](../../openspec/specs/direct-deploy/spec.md)
+("Pre-copy target disk-space check", "Deploy SSH does not depend on the job
+HOME") and
+[`openspec/specs/deploy-user/spec.md`](../../openspec/specs/deploy-user/spec.md)
+("Gate allows the disk-space query").
+
 ## Security model
 
 - The deploy user is a **system user** (uid < 1000, invisible on login
   screens) whose key is gated by `nixtache-ssh-gate` — an authorized_keys
   `restrict,command=` prefix allowing exactly the probe, `nix-store --serve`,
-  the apply trigger and the A/B triggers; everything else is rejected.
+  the apply trigger, the A/B triggers and the read-only free-space query
+  (`df -B1 --output=avail /nix/store`, exact match); everything else is
+  rejected.
 - It may **start** `nixtache-apply.service` (polkit, start-only) and write
   the pointer file (`nixtache-deploy` group). No sudo/doas/run0 anywhere.
 - It is added to `nix.settings.trusted-users` **unconditionally**: `nix copy
