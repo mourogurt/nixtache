@@ -66,6 +66,7 @@ system.autoUpgrade = {            services.nixtache.auto-update = {
                                  };
 ```
 
-Keeping `system.autoUpgrade` enabled alongside is an eval error. The full
-consumer migration walkthrough (including deploy-feature BREAKING changes) is
-[`migration.md`](migration.md).
+Keeping `system.autoUpgrade` enabled alongside is an eval error. On A/B
+targets the ab path is the timer-driven side of
+[`ota.md`](ota.md) — the pull triggers `systemd-sysupdate`, which installs
+into the inactive slot; `rebootPolicy` governs the cutover.

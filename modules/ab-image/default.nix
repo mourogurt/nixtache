@@ -76,11 +76,11 @@ let
       Source = {
         Path = srcPath;
         Type = srcType;
-        MatchPattern = [ "${cfg.imageId}_@v.efi" ];
+        MatchPattern = [ "${cfg.imageId}_@v+@l.efi" ];
       };
       Target = {
         InstancesMax = 2;
-        MatchPattern = [ "${cfg.imageId}_@v.efi" ];
+        MatchPattern = [ "${cfg.imageId}_@v+@l.efi" ];
         Mode = "0444";
         Path = "/EFI/Linux";
         PathRelativeTo = "boot";
@@ -444,6 +444,12 @@ in
     systemd.services.systemd-sysupdate = mkIf verify {
       path = [ pkgs.gnupgMinimal ];
     };
+    # The remote-update-with-reboot variant (remote A/B targets are
+    # triggered through it) verifies the same manifests — it needs the
+    # verifier on its PATH just as much.
+    systemd.services."systemd-sysupdate-reboot" = mkIf verify {
+      path = [ pkgs.gnupgMinimal ];
+    };
     # mkDefault: ab-provision (deploy-target/ab.nix) overrides these when
     # partitions.enable = true, deriving transfers from slot_a/slot_b (e.g.
     # different disks → two InstancesMax=1 transfers instead of one =2).
@@ -451,14 +457,16 @@ in
     systemd.sysupdate.transfers = mkDefault cfg.transfers;
 
     # The update artifact the deploy action stages + signs: the split nix-store
-    # squashfs + the UKI + a SHA256SUMS manifest. The UKI is renamed to drop the
-    # `+tries` suffix (ukify bakes boot-counting tries into the FILENAME like
-    # `abtest_2+3.efi`, which breaks sysupdate's `MatchPattern abtest_@v.efi`;
-    # sd-stub reads the tries from the UKI section regardless of the filename).
+    # squashfs + the UKI + a SHA256SUMS manifest. The UKI KEEPS its ukify
+    # `+tries` filename (`abtest_2+3.efi`): the boot-counting counter lives in
+    # the FILENAME (systemd-boot decrements it by renaming; an exhausted
+    # counter makes the loader skip the entry — the rollback mechanism), so
+    # stripping it would disable boot counting entirely. The transfers match
+    # it via sysupdate's `@l` (tries left) wildcard alongside `@v`.
     system.build.sysupdate-package =
       pkgs.runCommand "sysupdate-package-${cfg.imageVersion}" { } ''
         mkdir $out
-        cp ${config.system.build.uki}/${config.system.boot.loader.ukiFile} $out/${cfg.imageId}_${cfg.imageVersion}.efi
+        cp ${config.system.build.uki}/${config.system.boot.loader.ukiFile} $out/
         cp ${config.system.build.image}/${cfg.imageId}_${cfg.imageVersion}.nix-store.raw $out/
         cd $out && sha256sum * > SHA256SUMS
       '';

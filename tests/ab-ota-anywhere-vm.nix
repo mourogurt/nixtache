@@ -496,7 +496,7 @@ pkgs.testers.runNixOSTest {
     deploy_log = deployer.succeed("cat artifacts/deploy_abanywhere.log")
     assert "assigning runtime version 2" in deploy_log, "v2 run did not assign runtime version 2: " + deploy_log[-500:]
     deployer.succeed("test -f /var/lib/nixtache/ab-stage/abanywhere/abtest_2.nix-store.raw")
-    deployer.succeed("test -f /var/lib/nixtache/ab-stage/abanywhere/abtest_2.efi")
+    deployer.succeed("test -f /var/lib/nixtache/ab-stage/abanywhere/abtest_2+*.efi")
     deployer.succeed("test -f /var/lib/nixtache/ab-stage/abanywhere/SHA256SUMS.gpg")
     deployer.succeed("grep abtest_2 /var/lib/nixtache/ab-stage/abanywhere/SHA256SUMS")
     print("OK: v2 staged + manifest GPG-signed, sysupdate triggered over SSH")
@@ -505,7 +505,7 @@ pkgs.testers.runNixOSTest {
     #    slot B. The .efi transfer runs after the nix-store one, so its
     #    arrival means the whole service finished. ───────────────────────────
     installed.wait_until_succeeds(
-      "test -f /boot/EFI/Linux/abtest_2.efi",
+      "test -f /boot/EFI/Linux/abtest_2+*.efi",
       timeout=300
     )
     # The _empty partition was relabelled nix-store_2 — the runtime version

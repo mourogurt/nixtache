@@ -365,7 +365,7 @@ pkgs.testers.runNixOSTest {
     # prebuilt package carries the placeholder version 0 — renamed by the
     # build step, like the real imageVersionFile flow).
     deployer.succeed("test -f /var/lib/nixtache/ab-stage/abtest-remote/abtest_1.nix-store.raw")
-    deployer.succeed("test -f /var/lib/nixtache/ab-stage/abtest-remote/abtest_1.efi")
+    deployer.succeed("test -f /var/lib/nixtache/ab-stage/abtest-remote/abtest_1+*.efi")
     deployer.succeed("grep abtest_1 /var/lib/nixtache/ab-stage/abtest-remote/SHA256SUMS")
     deployer.succeed("test -f /var/lib/nixtache/ab-stage/abtest-remote/SHA256SUMS.gpg")
     print("OK: RUN 1 — runtime version 1 → image-version file → staged abtest_1.* (signed, dry-activate)")
@@ -403,7 +403,7 @@ pkgs.testers.runNixOSTest {
     # label is visible early — use wait_until_succeeds on the .efi (the last
     # transfer) to know sysupdate is truly done.
     target.wait_until_succeeds(
-      "test -f /var/lib/nixtache/ab-slots/abtest_2.efi",
+      "test -f /var/lib/nixtache/ab-slots/abtest_2+*.efi",
       timeout=180
     )
     # The _empty partition was relabelled to nix-store_2 — the runtime

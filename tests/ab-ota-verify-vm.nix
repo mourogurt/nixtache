@@ -26,7 +26,7 @@
 # (rm + cp + sha256sum + gpg). The target needs no reset — a REJECTED update
 # leaves no v3 state (asserted), and the vacuum of the empty nix-store_1 slot is
 # harmless. The key negative assertion is "slot B has no committed v3": no
-# abtest_3.efi in the boot-target dir and no nix-store_3 GPT label, while the
+# abtest_3+*.efi in the boot-target dir and no nix-store_3 GPT label, while the
 # good nix-store_2 stays intact. Whether `systemctl start systemd-sysupdate`
 # exits non-zero on rejection is recorded per case (spec allows either a failed
 # unit or a "successful" one that did not write slot B).
@@ -34,7 +34,7 @@
 # OBSERVED on this tree: all three negative cases exit 0 ("success-but-rejected"
 # — sysupdate treats an update whose manifest/payload verification fails as "no
 # applicable update", not a unit failure). The rejection IS logged
-# ("Signature verification failed" / SHA256 mismatch), no abtest_3.efi lands in
+# ("Signature verification failed" / SHA256 mismatch), no abtest_3+*.efi lands in
 # the boot-target dir and no nix-store_3 label ever appears in the GPT.
 { nixpkgs, self, system ? "x86_64-linux" }:
 
@@ -174,6 +174,18 @@ pkgs.testers.runNixOSTest {
         enable = true;
         slotSize = "512M";
         autoInit = true;
+        # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
+        # IMAGE_VERSION from os-release to assess the booted version — a
+        # plain VM has none and sysupdate exits 1 silently. Mirror the
+        # appliance baseline (slot A = version 1).
+        system.image.id = "abtest";
+        system.image.version = "1";
+        # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
+        # IMAGE_VERSION from os-release to assess the booted version — a
+        # plain VM has none and sysupdate exits 1 silently. Mirror the
+        # appliance baseline (slot A = version 1).
+        system.image.id = "abtest";
+        system.image.version = "1";
         imageId = "abtest";
         source = "http://deployer/ab-stage/abtest-remote";
         bootTarget = "/var/lib/nixtache/ab-slots/";
@@ -226,10 +238,10 @@ pkgs.testers.runNixOSTest {
     )
     deployer.succeed(f"test -f {stage}/abtest_2.nix-store.raw")
     deployer.succeed(f"test -f {stage}/SHA256SUMS.gpg")
-    target.wait_until_succeeds(f"test -f {slots}/abtest_2.efi", timeout=300)
+    target.wait_until_succeeds(f"test -f {slots}/abtest_2+*.efi", timeout=300)
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
     target.succeed("unsquashfs -l /dev/vdb2 | grep hello")
-    print("C4 OK: correctly-signed v2 accepted — nix-store_2 written, abtest_2.efi installed")
+    print("C4 OK: correctly-signed v2 accepted — nix-store_2 written, abtest_2+*.efi installed")
 
     def stage_v3(sign_key):
         """Manual staging of v3 (the action pipeline is proven by C4): reset the
@@ -253,11 +265,11 @@ pkgs.testers.runNixOSTest {
         status, out = target.execute("systemctl start systemd-sysupdate.service", timeout=300)
         print(f"{case}: systemd-sysupdate exit status = {status} ({'failed unit' if status != 0 else 'success-but-rejected'})")
         # Key assertion: no v3 committed — no UKI, no GPT label.
-        target.fail(f"test -f {slots}/abtest_3.efi")
+        target.fail(f"test -f {slots}/abtest_3+*.efi")
         target.fail("sgdisk -p /dev/vdb | grep nix-store_3")
         # The good version survives the rejected update.
         target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
-        target.succeed(f"test -f {slots}/abtest_2.efi")
+        target.succeed(f"test -f {slots}/abtest_2+*.efi")
         # Journal of THIS run shows the rejection (tail = latest attempt).
         target.succeed(
           "journalctl -u systemd-sysupdate --no-pager -n 40 | "

@@ -18,8 +18,8 @@ that is supplied by the consumer via module options. Start with the
 |---|---|
 | [`runner`](doc/user_guide/quickstart.md) | `services.nixtache.runner`: the Forgejo Actions runner (`gitea-actions-runner`, multi-instance) inside a NixOS container, with a configurable/relocatable nix store, an `nix-serve-ng` binary cache + nginx vhost, and credential wiring for private flake inputs and deploy keys. |
 | [`deploy-target`](doc/user_guide/deploy.md) | `services.nixtache.deploy-target`: the receiving side of direct deploy — root `nixtache-apply.service` (low-disk guard → activate → probe `criticalUnits` → rollback), polkit start-only rules, gated deploy user, Tier-0 health check. Import on every deploy target. |
-| [`ab-image`](doc/user_guide/deploy.md) | `services.nixtache.ab-image`: build-time A/B appliance image config (repart slots, UKI, sysupdate transfers, boot counting, GPG verify). |
-| `overlay-nix` | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` so image-based targets can install packages at runtime. |
+| [`ab-image`](doc/user_guide/ota.md) | `services.nixtache.ab-image`: build-time A/B appliance image config (repart slots, UKI, sysupdate transfers, boot counting, GPG verify) — the OTA route. |
+| [`overlay-nix`](doc/user_guide/overlay-nix.md) | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` so image-based targets can install packages at runtime — persistence modes and an upper-layer lifecycle across OTA updates. |
 | [`auto-update`](doc/user_guide/auto-update.md) | `services.nixtache.auto-update`: unified auto-update channel replacing `system.autoUpgrade` — flake and A/B paths, one timer, reboot policy. |
 | [`secrets`](doc/user_guide/secrets.md) | `services.nixtache.secrets`: secrets-provider abstraction (`vars` + extensible `providers`). |
 
@@ -32,6 +32,7 @@ that is supplied by the consumer via module options. Start with the
 | `docs.yml` | build + upload the caller's generated documentation |
 | `update-flake.yml` | scheduled flake-input bump with an SSH-signed bot commit |
 | `ci.yml` | nixtache's **own** CI (not reusable) |
+| `vmtests.yml` | KVM VM suite matrix on a `kvm`-labelled runner (dispatch + weekly/nightly schedule) |
 
 Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 `rebuild-configurations`, `rebuild-devshells`, `generate-docs`,
@@ -47,10 +48,11 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
   generated from all nixtache modules via `nixosOptionsDoc`. Built into the
   `nixtache-options` CI artifact.
 - `checks.<system>` — pure-eval test suites (`runner`, `deploy-target`,
-  `ab-image`, `mkDocs`, `ab-existing`, `ab-contract`, `auto-update`); built
-  by every `nix flake check`.
-- `vmTests.x86_64-linux` — KVM-only VM suites (18 of them); **not** run by
-  `nix flake check` — run explicitly on a KVM host.
+  `ab-image`, `mkDocs`, `ab-existing`, `ab-contract`, `auto-update`,
+  `ab-deploy-drift`); built by every `nix flake check`.
+- `vmTests.x86_64-linux` — KVM-only VM suites (27 of them); **not** run by
+  `nix flake check` — they run in CI via
+  [`vmtests.yml`](.forgejo/workflows/vmtests.yml) on a KVM-capable runner.
   Testing strategy: [`doc/technical_details/testing.md`](doc/technical_details/testing.md).
 - `nixosConfigurations.abtest-remote` — dogfood fixture for
   `tests/ab-deploy.nix`; **not** for real deployment.
@@ -59,7 +61,7 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 
 | Layer | Audience | Content |
 |---|---|---|
-| [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, auto-update, secrets, docs generation, migration — each linking the relevant openspec specs |
+| [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, OTA (A/B updates), overlay-nix, auto-update, secrets, docs generation — each linking the relevant openspec specs |
 | [`doc/technical_details/`](doc/technical_details/) | contributors | architecture, module→CI wiring, sandboxing, workflow mechanics, testing |
 | [`doc/GLOSSARY.md`](doc/GLOSSARY.md) | everyone | the canonical domain vocabulary (terms, not facts) |
 | [`openspec/specs/`](openspec/specs/) | everyone (requirements) | the canonical, maintained spec corpus (capabilities: `direct-deploy`, `deploy-user`, `docs`) |

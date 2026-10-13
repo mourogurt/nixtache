@@ -32,6 +32,7 @@ scope here and belongs to NixOS VM tests if ever needed.
 | `tests/ab-existing.nix` | conformance of the implemented ab-image / deploy-target wiring (image layout, transfers, verify) | `checks.<system>.ab-existing` |
 | `tests/ab-contract.nix` | wiring + assertion contracts for ab-provision / overlay-nix / runner store modes | `checks.<system>.ab-contract` |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
+| `tests/ab-deploy-drift.nix` | the deploy action's protocol-drift skip contract (extracted action.yml text vs a fake old SSH gate) | `checks.<system>.ab-deploy-drift` |
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` 2×2 matrix (flag × all-documented) + prefix-filtering | `checks.<system>.mkDocs` |
 
 (`tests/ab-fixture.nix` and `tests/ab-anywhere-install.nix` are shared
@@ -41,13 +42,35 @@ fixtures/helpers, not suites.)
 
 `nix flake check` skips `vmTests` entirely: the nspawn CI runner cannot chew
 through QEMU suites, so they carry `requiredSystemFeatures = [ "kvm" ]` and
-are run explicitly on a KVM host. Full inventory:
+run in CI via [`.forgejo/workflows/vmtests.yml`](../../.forgejo/workflows/vmtests.yml)
+on a KVM-capable runner (label `kvm`): `workflow_dispatch` (full matrix or a
+smoke subset) + a weekly-full / nightly-smoke schedule. Full inventory:
 
 `ab-deploy`, `ab-ota-e2e`, `ab-ota-e2e-erofs`, `ab-ota-e2e-none`,
 `ab-ota-e2e-percent`, `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
 `overlay-nix-vm`, `overlay-nix-install-vm`, `overlay-nix-ab-swap-vm`,
-`runner-store-mode-vm`, `ab-runner-compat-vm`, `ab-compression-vm`,
-`ab-staging-vm`, `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
+`overlay-nix-ota-invalid-vm` (+ `-wipe`/`-reconcile`/`-reconcile-degraded`/
+`-tmpfs` variants), `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
+`ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `runner-store-mode-vm`,
+`ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
+`ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
+
+Every overlay test names its lower-DB world (see
+[`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): the
+`ota-invalid` suite CONSTRUCTS the delta-upper world (validity seeded via
+`nix-store --load-db`), while `overlay-nix-install-vm` runs against a
+host-store lower with a real database — results do not transfer between
+worlds.
+
+**Known red (pre-existing, verified on clean `fa1284a`)**: `ab-ota-anywhere-vm`
+and the C4 leg of `ab-ota-verify-vm` time out on the current nixpkgs: the
+remote trigger unit (`systemd-sysupdate update --reboot`) settles into a
+green no-op after the booted-version assessment ("Newest installed version
+matches booted version") instead of discovering the staged update, and a
+manual plain update reports `Signature verification failed` against the
+action-signed manifest. Both predate the ota-stabilization change (whose
++tries filename work leaves their failure mode unchanged); fixing them is
+tracked separately.
 
 Every test file is a function `{ nixpkgs, self, system }:` returning a
 `pkgs.runCommand` derivation. Its builder prints a human-readable report (one
@@ -169,7 +192,7 @@ nix flake check --show-trace --all-systems
 nix build .#checks.x86_64-linux.runner && cat ./result
 nix build .#checks.x86_64-linux.mkDocs && cat ./result
 
-# A KVM VM suite (KVM host only; never run by `nix flake check`):
+# A KVM VM suite (KVM host only; CI runs them via vmtests.yml):
 nix build .#vmTests.x86_64-linux.ab-deploy
 nix build .#vmTests.x86_64-linux.overlay-nix-vm
 
@@ -177,10 +200,33 @@ nix build .#vmTests.x86_64-linux.overlay-nix-vm
 nix build .#checks.x86_64-linux.coverage && cat ./result
 ```
 
+### Provisioning a KVM runner for `vmtests.yml`
+
+The workflow's `kvm`-labelled runner needs two things the default nspawn CI
+runner lacks (the runner module propagates the host's
+`nix.settings.system-features` into job environments, so both are host-side):
+
+```nix
+# on the KVM runner host (e.g. a QEMU VM on the zen3 cluster):
+nix.settings.system-features = [ "kvm" "nixos-test" "big-parallel" ];
+# expose /dev/kvm to the runner's nspawn container:
+containers.<runner-name>.bindMounts."/dev/kvm" = {
+  hostPath = "/dev/kvm";
+  isReadOnly = true;
+};
+```
+
+`kvm` + `nixos-test` are the `requiredSystemFeatures` the suites declare
+(`runNixOSTest` adds both itself; the pexpect-based suites declare `kvm`).
+Register the runner instance with the `kvm` label in Forgejo so the workflow
+resolves it. If the runner is itself a VM, enable nested virtualization
+(`kvm-amd nested=1`, default on modern kernels) — or prefer
+containers-on-bare-metal to skip nesting entirely.
+
 In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then an
 explicit `nix build` loop prints each `checks.x86_64-linux.<suite>` report
 (runner, deploy-target, ab-image, mkDocs, ab-existing, ab-contract,
-auto-update) to the job log, and the `nixtache-options` docs artifact is
+auto-update, ab-deploy-drift) to the job log, and the `nixtache-options` docs artifact is
 generated.
 
 ---

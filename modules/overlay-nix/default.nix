@@ -47,6 +47,10 @@ let
   # NOT a path like `/nix/store` (resolves its store dir to `/nix/store/nix/store`).
   # `upper-layer` is where writes land; `ignore-gc-delete-failure=true` lets GC
   # reap upper paths while treating lower delete failures as warnings.
+  # `remount-hook` is a STORE-level setting (URL parameter, not nix.conf):
+  # GC's dedup path deletes upper copies of lower-valid paths directly
+  # through the upperdir, and the hook rebuilds the overlay mount afterwards
+  # so the kernel's merged view stays coherent (stale-dentry protection).
   # `check-mount=false`: the overlay is an OVERMOUNT on /nix/store (lowerdir ==
   # mountpoint, the squashFS). The default check-mount=true reads /proc/mounts
   # and expects lowerdir to be a DIFFERENT path than the mountpoint — an
@@ -55,7 +59,142 @@ let
     + "?lower-store=local"
     + "&upper-layer=${cfg.upperDir}"
     + "&ignore-gc-delete-failure=true"
+    + "&remount-hook=${remountHook}"
     + "&check-mount=false";
+
+  stateDir = "/var/lib/nixtache";
+  captureDir = "${stateDir}/overlay-capture";
+  reconcileMarker = "${stateDir}/overlay-reconcile-pending";
+
+  # After GC deletes upper-layer files directly through the upperdir (the
+  # local-overlay-store dedup path — deleting via the merged view would leave
+  # an OverlayFS whiteout masking the lower copy), Nix calls the remount hook
+  # because the kernel may keep stale dentries for the bypassed deletions. A
+  # plain `mount -o remount` does not reliably invalidate them, so the hook
+  # rebuilds the overlay mount from its option set (EBUSY retries cover
+  # transient holders; exec'd binaries never block umount).
+  remountHook = pkgs.writeShellScript "nixtache-overlay-remount" ''
+    export PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.coreutils ]}
+    mountpoint="''${1:-/nix/store}"
+    i=0
+    while ! umount "$mountpoint"; do
+      i=$((i + 1))
+      if [ "$i" -ge 10 ]; then
+        echo "nixtache-overlay-remount: $mountpoint still busy after 10 tries — leaving the old mount in place (retry on the next GC)" >&2
+        exit 0
+      fi
+      sleep 1
+    done
+    mount -t overlay overlay \
+      -o lowerdir="$mountpoint" \
+      -o upperdir=${cfg.upperDir} \
+      -o workdir=${cfg.workDir} \
+      "$mountpoint"
+  '';
+
+  # Wipe runs at the update boundary: everything the overlay store created —
+  # the upper layer contents, the OverlayFS work dir and the nix state under
+  # /nix/var/nix (database, gcroots, profiles) — is deleted so the next boot
+  # mounts a pristine overlay over the NEW lower image. On an appliance these
+  # paths hold overlay-created state only (the system itself boots from the
+  # squashFS lower and carries no system profiles here). The daemon is stopped
+  # for the wipe and restarted right away: sysupdate may find nothing new
+  # (no-op update) and the machine must keep working without a reboot; a
+  # realize racing the wipe loses its progress coherently (files and database
+  # entries vanish together).
+  wipeScript = ''
+    set -euo pipefail
+    echo "nixtache-overlay-preupdate: wiping the overlay upper layer and store DB state"
+    systemctl stop nix-daemon.service
+    find ${cfg.upperDir} -mindepth 1 -delete
+    find ${cfg.workDir} -mindepth 1 -delete
+    rm -rf /nix/var/nix/db* /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots
+    systemctl start nix-daemon.service
+    echo "nixtache-overlay-preupdate: wipe complete"
+  '';
+
+  # Capture records the store paths that must exist again after the swap:
+  # every gc-root symlink target plus every USER profile link target (the
+  # top-level `system` profile is deliberately excluded — on an appliance it
+  # tracks the booted generation whose closure comes from the slot images,
+  # and repairing it would re-download the entire old closure delta). A
+  # profile's own store path covers its whole closure — realizing it restores
+  # all its entries in one shot, no manifest parsing needed. The reconcile
+  # marker arms the post-boot pass.
+  captureScript = ''
+    set -euo pipefail
+    echo "nixtache-overlay-preupdate: capturing overlay roots for post-update reconcile"
+    mkdir -p ${captureDir}
+    # Indirect roots point at the ROOT FILE (any path), not the store path
+    # — resolve each chain with readlink -f and keep what lands in the
+    # store. The SYSTEM profile chain is excluded on both paths (profiles/
+    # top level and its gcroots/system alias): on an appliance it tracks the
+    # booted generation whose closure comes from the slot images, and
+    # repairing it would re-download the entire old closure delta.
+    # `|| true`: with no roots on the machine grep exits 1 on empty input —
+    # an empty roots.txt is a valid capture (reconcile skips).
+    # System-created roots (the profile symlink and the activation-time
+    # auto-root) point at the CURRENT system toplevel — excluded on both
+    # paths: after the swap the new lower provides the new closure, and
+    # repairing the old toplevel would re-download its entire delta.
+    sysp=$(readlink -f /run/current-system 2>/dev/null || true)
+    [ -n "$sysp" ] || sysp=$(readlink -f /nix/var/nix/profiles/system 2>/dev/null || true)
+    {
+      find /nix/var/nix/gcroots -mindepth 1 -maxdepth 1 -type l ! -name system 2>/dev/null | while read -r l; do
+        readlink -f "$l" || true
+      done
+      find /nix/var/nix/gcroots/auto -type l 2>/dev/null | while read -r l; do
+        readlink -f "$l" || true
+      done
+      find /nix/var/nix/profiles/per-user -maxdepth 2 -type l 2>/dev/null | while read -r l; do
+        readlink -f "$l" || true
+      done
+    } | grep '^/nix/store/' | sort -u | grep -v -F "$sysp" > ${captureDir}/roots.txt || true
+    touch ${reconcileMarker}
+    echo "nixtache-overlay-preupdate: $(wc -l < ${captureDir}/roots.txt) roots captured"
+  '';
+
+  # Reconcile heals the upper layer after a swap replaced the lower image.
+  # Pass 1 (`nix-store --verify`) auto-invalidates database entries whose
+  # files are gone from the merged store and have no valid referrers — its
+  # exit code is ADVISORY: referrer-protected danglers (a dependency of a
+  # still-present upper path) are left valid on purpose and can even trip a
+  # harmless FOREIGN KEY message during the invalidation attempt; pass 2 is
+  # what heals them. Pass 2 walks the closure of every recorded root and
+  # re-fetches (`nix-store --repair-path`) exactly the paths whose files are
+  # missing from the merged view — a delta repair: present paths are not
+  # touched. The marker is consumed only on full success — a failed pass
+  # keeps the unit red and the next boot (or a manual restart) retries. The
+  # unit hard-requires the overlay mount: verifying against the bare
+  # squashFS (overlay not yet mounted) would invalidate every upper entry.
+  reconcileScript = ''
+    set -uo pipefail
+    fail=0
+    echo "nixtache-overlay-reconcile: pass 1 — invalidate DB entries whose files vanished from the merged store"
+    nix-store --verify || true
+    echo "nixtache-overlay-reconcile: pass 2 — re-fetch missing closure paths of the recorded roots"
+    if [ -f ${captureDir}/roots.txt ]; then
+      while read -r root; do
+        [ -n "$root" ] || continue
+        for p in $(nix-store -q --requisites "$root" 2>/dev/null || echo "$root"); do
+          if [ ! -e "$p" ]; then
+            echo "nixtache-overlay-reconcile: repairing $p (files absent from the merged store)"
+            if ! nix-store --repair-path "$p"; then
+              echo "nixtache-overlay-reconcile: cannot repair $p (substituter unreachable or missing path)" >&2
+              fail=1
+            fi
+          fi
+        done
+      done < ${captureDir}/roots.txt
+    fi
+    if [ "$fail" = 0 ]; then
+      rm -f ${reconcileMarker}
+      echo "nixtache-overlay-reconcile: consistent — marker consumed"
+    else
+      echo "nixtache-overlay-reconcile: incomplete — marker kept for retry" >&2
+      exit 1
+    fi
+  '';
 in
 {
   options.services.nixtache.overlay-nix = {
@@ -95,9 +234,41 @@ in
         filesystem as `upperDir`.
       '';
     };
+
+    upperOnUpdate = mkOption {
+      type = types.enum [ "none" "wipe" "reconcile" ];
+      default = "none";
+      description = ''
+        Lifecycle policy for the writable upper layer across A/B (OTA) updates.
+        A slot swap replaces the read-only lower store, which can leave upper
+        paths (and their database entries) referencing files that only existed
+        in the old lower image.
+
+        - `"none"` (default): no lifecycle action — upper content and database
+          entries are carried across the swap unchanged.
+        - `"wipe"`: before `systemd-sysupdate` writes the inactive slot, the
+          upper layer, its work dir and the overlay store state under
+          `/nix/var/nix` are cleared. Disposable-upper policy: deterministic
+          and substituter-independent, but ad-hoc installs do not survive an
+          update. The nix daemon is stopped for the wipe and restarted right
+          away (a no-op update must leave a working machine).
+        - `"reconcile"`: before the update, gc-roots and profile targets are
+          captured to `/var/lib/nixtache/overlay-capture`; after the reboot a
+          reconcile pass runs `nix-store --verify` (drops database entries
+          whose files are gone and that nothing valid refers to) and then
+          re-fetches, for every recorded root, exactly the closure paths
+          whose files are absent from the merged store
+          (`nix-store --repair-path` — a delta repair; present paths are not
+          touched). Repair needs a substituter that still serves the old
+          references (e.g. the runner's binary cache); without it the
+          reconcile unit fails red, the boot is unaffected and the pass
+          retries on the next boot or a manual restart.
+      '';
+    };
   };
 
-  config = mkIf cfg.enable {
+  config = mkIf cfg.enable (mkMerge [
+    {
     assertions = [
       {
         assertion =
@@ -178,5 +349,50 @@ in
       after = [ "nix-daemon-overlay-mount.service" ];
       requires = [ "nix-daemon-overlay-mount.service" ];
     };
-  };
+    }
+
+    (mkIf (cfg.upperOnUpdate != "none") {
+    # Lifecycle hook: one drop-in attachment point covers every update
+    # trigger (the deploy action's SSH trigger, the idle-gated
+    # nixtache-ab-apply, the auto-update poll and sysupdate's own timer) —
+    # starting systemd-sysupdate always pulls the pre-update unit first.
+    systemd.services.nixtache-overlay-preupdate = {
+      description = "nixtache overlay-nix: ${cfg.upperOnUpdate} the upper layer before an A/B update";
+      before = [ "systemd-sysupdate.service" ];
+      path = with pkgs; [ systemd coreutils findutils gnugrep ];
+      serviceConfig = {
+        Type = "oneshot";
+      };
+      script = if cfg.upperOnUpdate == "wipe" then wipeScript else captureScript;
+    };
+
+    # Plain oneshot (no RemainAfterExit): every sysupdate start re-runs the
+    # hook, so a failed first update attempt re-wipes/re-captures on retry.
+    systemd.services.systemd-sysupdate = {
+      wants = [ "nixtache-overlay-preupdate.service" ];
+      after = [ "nixtache-overlay-preupdate.service" ];
+    };
+    })
+
+    (mkIf (cfg.upperOnUpdate == "reconcile") {
+    systemd.services.nixtache-overlay-reconcile = {
+      description = "nixtache overlay-nix: reconcile the upper layer with the new lower image";
+      wantedBy = [ "multi-user.target" ];
+      # HARD dependency on the overlay mount: verifying against the bare
+      # squashFS (overlay not yet mounted) would invalidate every upper
+      # entry — the exact damage the pass is meant to repair.
+      after = [ "nix-daemon-overlay-mount.service" ];
+      requires = [ "nix-daemon-overlay-mount.service" ];
+      unitConfig = {
+        ConditionPathExists = reconcileMarker;
+      };
+      path = [ pkgs.coreutils config.nix.package ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = reconcileScript;
+    };
+    })
+  ]);
 }

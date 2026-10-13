@@ -72,3 +72,61 @@ threshold it exits before mutating the system profile, so no rollback is
 needed.
 _Avoid_: activation guard, ENOSPC guard (bare "disk gate" is ambiguous —
 say which side)
+
+### A/B (OTA) updates
+
+**Slot**:
+One of the two interchangeable partitions holding a nix-store image; the
+active slot boots, the inactive slot receives the next update.
+_Avoid_: partition pair, image slot set
+
+**Appliance**:
+A machine that boots from A/B slot images instead of being rebuilt in place
+(`nix.enable = false` in the image profile; overlay-nix re-enables ad-hoc
+nix on top).
+_Avoid_: image node, immutable host
+
+**Sysupdate package**:
+The update artifact the runner stages and signs: the split nix-store image
++ the UKI + a SHA256SUMS manifest consumed by `systemd-sysupdate`.
+_Avoid_: update bundle, ota tarball
+
+**Staging**:
+Serving the sysupdate package from a location the target can pull from
+(local directory or HTTPS); retention of old staged versions is what makes
+overlay repair possible.
+_Avoid_: upload, publish step
+
+**UKI**:
+Unified Kernel Image — the signed kernel+initrd+cmdline EFI executable the
+boot loader starts; its filename carries the image version and boot-counting
+tries.
+_Avoid_: boot image (ambiguous with the store image), efi bundle
+
+**Boot counting**:
+Automatic boot assessment: a UKI gets limited tries to reach
+`boot-complete.target`; exhausting them rolls the machine back to the
+previous blessed entry.
+_Avoid_: boot retry, watchdog boot
+
+**Gating**:
+The idle-gate on a runner host: a self-update waits until all runners
+report idle before applying and rebooting, so a CI job is never interrupted.
+_Avoid_: idle lock, maintenance mode
+
+### Overlay store
+
+**Lower layer**:
+The read-only store image (squashFS/erofs) mounted at `/nix/store` — the
+immutable base of the overlay.
+_Avoid_: base store, ro store
+
+**Upper layer**:
+The writable directory overlay-nix layers over the lower; runtime installs
+land here and its location decides persistence across reboots and updates.
+_Avoid_: writable store, delta dir
+
+**Merged store**:
+The OverlayFS view at `/nix/store` that combines lower and upper — what
+every nix command on the appliance sees.
+_Avoid_: combined store, overlay view

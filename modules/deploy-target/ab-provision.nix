@@ -149,10 +149,10 @@ let
   # sysupdate's $BOOT autodiscovery (mirrors ab-image); any other value is an
   # absolute directory (plain hosts / test VMs without an ESP).
   bootTransfer = optionalAttrs (!abImageActive) {
-    "20-boot-image" = mkSource "${imageId'}_@v.efi" // {
+    "20-boot-image" = mkSource "${imageId'}_@v+@l.efi" // {
       Target = {
         InstancesMax = 2;
-        MatchPattern = [ "${imageId'}_@v.efi" ];
+        MatchPattern = [ "${imageId'}_@v+@l.efi" ];
         Mode = "0444";
         Type = "regular-file";
       } // (if partitions.bootTarget == "auto" then {
@@ -567,6 +567,19 @@ in
   };
 
   config = mkIf (cfg.enable && ab.enable && partitions.enable) {
+    # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
+    # IMAGE_VERSION from os-release to assess the booted version; a host
+    # without it makes that trigger exit 1 silently. nixpkgs defaults the
+    # version to "0" — warn so the omission is visible at eval time.
+    warnings = lib.optionals (config.system.image.version == "0") [
+      ''
+        services.nixtache.deploy-target.ab.partitions: system.image.version
+        is unset — the remote reboot trigger (`systemd-sysupdate update
+        --reboot`) reads IMAGE_VERSION from os-release and fails without it.
+        Set system.image.version (and system.image.id) on this host.
+      ''
+    ];
+
     assertions = [
       # Both slots must share one type: a sysupdate transfer requires a
       # uniform Target.Type across all its instances.
@@ -682,6 +695,12 @@ in
     # SSH) has an empty PATH otherwise and every Verify=yes pull fails with
     # "Signature verification failed".
     systemd.services.systemd-sysupdate = mkIf verifyEffective {
+      path = [ pkgs.gnupgMinimal ];
+    };
+    # The remote-update-with-reboot variant runs the same transfer set —
+    # without gnupg in ITS PATH every Verify=yes pull dies with a broken
+    # verifier pipe there too.
+    systemd.services.systemd-sysupdate-reboot = mkIf verifyEffective {
       path = [ pkgs.gnupgMinimal ];
     };
   };

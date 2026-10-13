@@ -183,8 +183,7 @@ in
       description = ''
         Enable the unified auto-update channel on this target (the nixtache
         replacement for `system.autoUpgrade`). Incompatible with
-        `system.autoUpgrade.enable = true` (asserted). Migration walkthrough:
-        doc/user_guide/migration.md.
+        `system.autoUpgrade.enable = true` (asserted).
       '';
     };
 
@@ -361,8 +360,8 @@ in
           assertion = !config.system.autoUpgrade.enable;
           message = ''
             services.nixtache.auto-update replaces system.autoUpgrade — set
-            system.autoUpgrade.enable = false (migration walkthrough:
-            doc/user_guide/migration.md).
+            system.autoUpgrade.enable = false (the drop-in equivalent is in
+            doc/user_guide/auto-update.md).
           '';
         }
         {

@@ -140,7 +140,7 @@ let
       {
         pathIsDir = t.Path or null == "/var/lib/nixtache/ab-slots/";
         noPathRelativeTo = !(t ? PathRelativeTo);
-        efiMatchPattern = t.MatchPattern or null == [ "nixtache_@v.efi" ];
+        efiMatchPattern = t.MatchPattern or null == [ "nixtache_@v+@l.efi" ];
       });
 
   scenarioPartDiffDisks = contract
@@ -292,6 +292,74 @@ let
         builtins.any (r: lib.hasInfix "/var/lib/nix-overlay" r) cfg.systemd.tmpfiles.rules;
     });
 
+  # The local-overlay store's GC invokes the `remount-hook` (a store-level
+  # URL parameter, not a global nix.conf setting) after deleting upper copies
+  # of lower-valid paths directly through the upperdir; without the hook every
+  # such GC leaves a "needs remounting" warning (stale dentries).
+  scenarioOverlayRemountHook = contract
+    "overlay-nix: enable=true → store URL carries remount-hook (GC dedup coherence)"
+    [ overlayMod overlayCfg ]
+    (cfg: {
+      remountHookInStoreUrl =
+        lib.hasInfix "remount-hook=" (cfg.nix.settings.store or "");
+      remountHookIsScript =
+        lib.hasInfix "nixtache-overlay-remount" (cfg.nix.settings.store or "");
+    });
+
+  # Lifecycle default "none": no pre-update unit, sysupdate not wired to it,
+  # no reconcile unit — the module must preserve the shipped behaviour.
+  scenarioOverlayLifecycleNone = contract
+    "overlay-nix: upperOnUpdate=\"none\" (default) → no lifecycle units (non-breaking default)"
+    [ overlayMod overlayCfg ]
+    (cfg: {
+      noPreupdate = !(cfg.systemd.services ? "nixtache-overlay-preupdate");
+      noSysupdateWiring =
+        !(cfg.systemd.services ? "systemd-sysupdate")
+        || !(builtins.any (w: w == "nixtache-overlay-preupdate.service")
+          (cfg.systemd.services."systemd-sysupdate".wants or [ ]));
+      noReconcile = !(cfg.systemd.services ? "nixtache-overlay-reconcile");
+    });
+
+  overlayLifecycleCfg = mode: lib.recursiveUpdate overlayCfg {
+    services.nixtache.overlay-nix.upperOnUpdate = mode;
+  };
+
+  scenarioOverlayLifecycleWipe = contract
+    "overlay-nix: upperOnUpdate=\"wipe\" → pre-update unit ordered before sysupdate"
+    [ overlayMod (overlayLifecycleCfg "wipe") ]
+    (cfg: {
+      hasPreupdate = cfg.systemd.services ? "nixtache-overlay-preupdate";
+      beforeSysupdate = lib.elem "systemd-sysupdate.service"
+        (cfg.systemd.services."nixtache-overlay-preupdate".before or [ ]);
+      sysupdatePullsPreupdate = builtins.any (w: w == "nixtache-overlay-preupdate.service")
+        (cfg.systemd.services."systemd-sysupdate".wants or [ ]);
+      noReconcile = !(cfg.systemd.services ? "nixtache-overlay-reconcile");
+    });
+
+  scenarioOverlayLifecycleReconcile = contract
+    "overlay-nix: upperOnUpdate=\"reconcile\" → marker-conditioned reconcile unit after the overlay mount"
+    [ overlayMod (overlayLifecycleCfg "reconcile") ]
+    (cfg: {
+      hasPreupdate = cfg.systemd.services ? "nixtache-overlay-preupdate";
+      hasReconcile = cfg.systemd.services ? "nixtache-overlay-reconcile";
+      conditionedOnMarker =
+        cfg.systemd.services."nixtache-overlay-reconcile".unitConfig.ConditionPathExists
+        == "/var/lib/nixtache/overlay-reconcile-pending";
+      afterOverlayMount = lib.elem "nix-daemon-overlay-mount.service"
+        (cfg.systemd.services."nixtache-overlay-reconcile".after or [ ]);
+      requiresOverlayMount = lib.elem "nix-daemon-overlay-mount.service"
+        (cfg.systemd.services."nixtache-overlay-reconcile".requires or [ ]);
+      wantedByMultiUser =
+        cfg.systemd.services."nixtache-overlay-reconcile".wantedBy == [ "multi-user.target" ];
+    });
+
+  scenarioOverlayLifecycleAssertBadMode = assertContract
+    "overlay-nix assert: upperOnUpdate outside the enum → eval refuses"
+    overlayPresent
+    [ overlayMod (lib.recursiveUpdate overlayCfg {
+        services.nixtache.overlay-nix.upperOnUpdate = "bogus";
+      }) ];
+
   # ========================================================================
   # runner.store.mode contract (option in modules/runner/store.nix)
   # ========================================================================
@@ -374,6 +442,11 @@ let
     scenarioPartLabelDefaults
     scenarioPartMismatchMasks
     scenarioOverlayWiring
+    scenarioOverlayRemountHook
+    scenarioOverlayLifecycleNone
+    scenarioOverlayLifecycleWipe
+    scenarioOverlayLifecycleReconcile
+    scenarioOverlayLifecycleAssertBadMode
     scenarioStoreModeOverlay
     scenarioStoreModeClone
   ];

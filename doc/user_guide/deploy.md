@@ -7,8 +7,8 @@ sudo/doas/run0 on the targets. Requirements (canonical):
 (+ the deploy user contract in
 [`openspec/specs/deploy-user/spec.md`](../../openspec/specs/deploy-user/spec.md));
 historical stage-by-stage design record:
-[`doc/archive/specs/`](../archive/specs/); consumer migration guide:
-[`migration.md`](migration.md).
+[`doc/archive/specs/`](../archive/specs/); the OTA (A/B image) route has its
+own guide: [`ota.md`](ota.md).
 
 ## Runner side: the target map
 
@@ -118,8 +118,8 @@ targets; the job fails at the end if any target errored. A **rejected**
 query means protocol drift (the target's gate predates the action) and is a
 *transition* condition, not a failure: the target is skipped with a
 per-target `::warning::` naming the `sshGate = "restrict"` escape hatch,
-and drift alone never fails the job — see [`migration.md`](migration.md)
-§5. The target-side activation guard (`deploy-target.minFreeBytes`) is the
+and drift alone never fails the job. The target-side activation guard
+(`deploy-target.minFreeBytes`) is the
 second line of defence — see [Disk-space guard](#disk-space-guard) above;
 keep the runner-side preset ≥ the target-side guard (the runner cannot read
 the target's module config).
@@ -158,3 +158,22 @@ pipeline — see [`auto-update.md`](auto-update.md) and
 [`openspec/specs/direct-deploy/spec.md`](../../openspec/specs/direct-deploy/spec.md)
 (historical stage spec:
 [`doc/archive/specs/direct-deploy/09-auto-update.md`](../archive/specs/direct-deploy/09-auto-update.md)).
+
+
+## Protocol-drift rollout order
+
+When a nixtache release extends the gated SSH protocol (new whitelisted
+command — e.g. the disk-space query), a **new action against an old gate**
+is a transition condition, not a failure: the affected target is skipped
+with a per-target `::warning::` and the job stays green. Roll out
+**module first, action second**:
+
+1. Bump nixtache and deploy every target once with the *current* action —
+   the new generation carries the extended gate.
+2. From the next run, the new action finds the command whitelisted
+   everywhere.
+
+If a target lags (still on a pre-change generation), temporarily set
+`services.nixtache.deploy-target.deployUser.sshGate = "restrict"` on it and
+revert to `"gate"` once it catches up — the same protocol-drift escape
+hatch as above.

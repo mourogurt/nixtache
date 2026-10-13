@@ -13,10 +13,10 @@
 #      lands in the upper layer; vim runs.
 #   3. The deployer stages the v2 sysupdate-package over HTTP (nginx);
 #      `systemctl start systemd-sysupdate.service` on the appliance writes
-#      slot B (relabelled nix-store_2) + drops abtest_2.efi on the ESP.
+#      slot B (relabelled nix-store_2) + drops abtest_2+*.efi on the ESP.
 #   4. `machine.reboot()` (ctrl-alt-delete via QMP; allow_reboot=True keeps
 #      QEMU's `-no-reboot` off). loader.conf has no `default` pin, so
-#      systemd-boot picks the highest-version entry → abtest_2.efi → v2.
+#      systemd-boot picks the highest-version entry → abtest_2+*.efi → v2.
 #      v1's UKI must be BLESSED first (boot-complete.target reached), else its
 #      remaining boot-counting tries would outrank the freshly installed v2.
 #   5. Assertions after the swap: /etc/image-version == 2 (v2 booted), the
@@ -172,7 +172,7 @@ pkgs.testers.runNixOSTest {
     # Type=simple upstream: `systemctl start` returns when the update process
     # LAUNCHES, not when slot B is written — poll for the GPT label + the UKI.
     appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_2", timeout=900)
-    appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2.efi", timeout=300)
+    appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: sysupdate wrote v2 to slot B + ESP")
 
     # ── Reboot → systemd-boot picks the highest-version UKI (abtest_2) ───────

@@ -338,16 +338,16 @@ pkgs.testers.runNixOSTest {
     a.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
     ts_before = boot_ts(a)
     a.succeed("systemctl start nixtache-auto-update.service", timeout=300)
-    a.wait_until_succeeds("test -f ${slotsDir}/abtest_2.efi", timeout=300)
+    a.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
     a.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
     a.succeed("journalctl -u systemd-sysupdate --no-pager | grep -i 'Successfully installed'")
     a.succeed("journalctl -u nixtache-auto-update --no-pager | grep 'nixtache-auto-update:'")
     assert boot_ts(a) == ts_before, "rebootPolicy default never — VM must not reboot"
-    print("AU-A1 OK: auto-update triggered sysupdate — nix-store_2 + abtest_2.efi, no reboot")
+    print("AU-A1 OK: auto-update triggered sysupdate — nix-store_2 + abtest_2+*.efi, no reboot")
 
     # ── AU-A5: rerun with unchanged staging → idempotent, single slot B ─────
     a.succeed("systemctl start nixtache-auto-update.service", timeout=300)
-    a.wait_until_succeeds("test -f ${slotsDir}/abtest_2.efi", timeout=300)
+    a.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
     a.succeed("test \"$(sgdisk -p /dev/vdb | grep -c nix-store_2)\" -eq 1")
     a.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # rollback slot intact
     print("AU-A5 OK: repeat pull idempotent — exactly one nix-store_2, v1 slot kept")
@@ -362,7 +362,7 @@ pkgs.testers.runNixOSTest {
     ts_before = boot_ts(abidle)
     abidle.succeed("systemctl start nixtache-auto-update.service", timeout=300)
     abidle.fail("sgdisk -p /dev/vdb | grep nix-store_2")
-    abidle.fail("test -f ${slotsDir}/abtest_2.efi")
+    abidle.fail("test -f ${slotsDir}/abtest_2+*.efi")
     assert boot_ts(abidle) == ts_before, "no new image → no reboot even with rebootPolicy=if-needed"
     print("AU-A2 OK: nothing newer → clean no-op, if-needed did not reboot")
     abidle.shutdown()
@@ -376,7 +376,7 @@ pkgs.testers.runNixOSTest {
     abgating.succeed("systemctl start nixtache-auto-update.service", timeout=300)
     abgating.succeed("journalctl -u nixtache-auto-update --no-pager | grep ci-driven")
     abgating.fail("sgdisk -p /dev/vdb | grep nix-store_2")
-    abgating.fail("test -f ${slotsDir}/abtest_2.efi")
+    abgating.fail("test -f ${slotsDir}/abtest_2+*.efi")
     abgating.succeed("test ! -f /var/lib/nixtache/ab-pending")  # CI's signal — not ours
     print("AU-A3 OK: gating host — ci-driven marker, sysupdate not triggered")
     abgating.shutdown()
@@ -391,7 +391,7 @@ pkgs.testers.runNixOSTest {
       "cd ${stageDir} && gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS"
     )
     absigned.succeed("systemctl start nixtache-auto-update.service", timeout=300)
-    absigned.wait_until_succeeds("test -f ${slotsDir}/abtest_2.efi", timeout=300)
+    absigned.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
     absigned.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
     absigned.succeed("journalctl -u systemd-sysupdate --no-pager | grep -i 'Successfully installed'")
     print("AU-A4 OK: signed image accepted through the auto-update trigger")

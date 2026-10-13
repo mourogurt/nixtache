@@ -95,7 +95,7 @@ pkgs.testers.runNixOSTest {
     withkey.succeed("systemctl start nixtache-ab-gc.service")
     # v1 gone (both .raw and .efi), v2/v3 kept
     withkey.fail("test -e ${stage}/abtest_1.nix-store.raw")
-    withkey.fail("test -e ${stage}/abtest_1.efi")
+    withkey.fail("test -e ${stage}/abtest_1+*.efi")
     withkey.succeed("test -f ${stage}/abtest_2.nix-store.raw")
     withkey.succeed("test -f ${stage}/abtest_3.nix-store.raw")
     # SHA256SUMS regenerated to match exactly the survivors

@@ -21,7 +21,7 @@ modules/auto-update/   unified auto-update channel
 modules/secrets.nix    secrets provider abstraction (vars + providers)
 lib/mkDocs.nix         consumer docs helper (nixtache.lib.mkDocs)
 tests/                 test suites + fixtures (see below)
-.forgejo/workflows/    reusable workflows + this repo's own ci.yml
+.forgejo/workflows/    reusable workflows + this repo's own ci.yml + vmtests.yml
 .forgejo/actions/      reusable composite actions
 doc/user_guide/        consumer-facing functional docs
 doc/technical_details/ contributor-facing internals
@@ -59,6 +59,10 @@ Working rules (enforced by convention + `openspec/config.yaml`):
    English (frozen `doc/archive/` content and the not-yet-translated
    `direct-deploy` / `deploy-user` specs are the only exceptions).
 3. **Self-documenting comments** (see below).
+4. Think carefully what comes in each document of `doc/` directory - 
+   don't duplicate the information. Only reflect necessary info for
+   each document.
+5. Before expanding the doc: try not to bloat it and restructure if necessary. 
 
 Docs structure invariant: every fact lives in exactly ONE file; everything
 else links to it. README = overview/map; user_guide = functional;
@@ -116,7 +120,8 @@ the checks-vs-vmTests split: `doc/technical_details/testing.md`.
 New test files MUST be wired into `flake.nix`: pure-eval suites into
 `checks.<system>` (must stay build-cheap — `nix flake check` builds them
 every CI run), KVM/runNixOSTest suites into `vmTests.x86_64-linux` (NOT a
-checked output; run explicitly on a KVM host).
+checked output; CI runs them via `vmtests.yml` on a KVM-capable runner,
+manually via `nix build .#vmTests.…`).
 
 ## Commands
 

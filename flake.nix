@@ -71,6 +71,10 @@
         # Auto-update module pure-eval; its end-to-end VM suite
         # (flake path + ab path) is in `vmTests`.
         auto-update = import ./tests/auto-update.nix { inherit nixpkgs self system; };
+        # ab-deploy-drift: protocol-drift skip contract of the deploy action
+        # (extracted action.yml run text vs a fake pre-change SSH gate) —
+        # fast, no KVM.
+        ab-deploy-drift = import ./tests/ab-deploy-drift.nix { inherit nixpkgs self system; };
       });
 
       # ── KVM-only VM suites (runNixOSTest / QEMU). NOT part of `checks`:
@@ -118,6 +122,21 @@
         # boot v1 appliance → install vim into upper → sysupdate to v2 → reboot
         # into v2 → vim still works + v2 lower visible. 2-boot, heavy.
         overlay-nix-ab-swap-vm = import ./tests/overlay-nix-ab-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # overlay-nix-ota-invalid-vm: the replication research suite —
+        # constructs the delta-upper world (validity seeded via
+        # nix-store --load-db), realizes a tool whose interpreter lives only
+        # in v1's lower, swaps to v2 and pins the dangling-reference hazard
+        # plus the GC probe. Baseline variant: no lifecycle mode (world as
+        # shipped). The wipe / reconcile / degraded-reconcile variants cover
+        # the upperOnUpdate matrix (degraded cuts the substituter before the
+        # swap: red unit, intact boot, marker retry heals).
+        overlay-nix-ota-invalid-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        overlay-nix-ota-invalid-wipe-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; overlayOptions.upperOnUpdate = "wipe"; };
+        overlay-nix-ota-invalid-reconcile-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; overlayOptions.upperOnUpdate = "reconcile"; };
+        overlay-nix-ota-invalid-reconcile-degraded-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; overlayOptions.upperOnUpdate = "reconcile"; reconcileDegraded = true; };
+        # tmpfs upper: nothing persists — the lifecycle degenerates to "wipe
+        # for free"; asserts overlay health across the swap only.
+        overlay-nix-ota-invalid-tmpfs-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; overlayOptions.upperOnUpdate = "wipe"; upperTmpfs = true; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style
         # container (no system nix-daemon) + the non-appliance mode.
@@ -139,6 +158,19 @@
         # auto-update-vm: the auto-update module end-to-end — flake path and
         # ab path.
         auto-update-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-ota-rollback-vm: boot-counting rollback — a broken v2 exhausts
+        # its tries, the blessed v1 boots, and a fixed v3 still installs.
+        ab-ota-rollback-vm = import ./tests/ab-ota-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-ota-noop-vm: same-version staging installs nothing (no slot
+        # write, no boot-entry change, green trigger).
+        ab-ota-noop-vm = import ./tests/ab-ota-noop-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-ota-interrupted-vm: sysupdate killed mid-download — the active
+        # slot never boots partial content; the next run recovers fully.
+        ab-ota-interrupted-vm = import ./tests/ab-ota-interrupted-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-ota-migrate-vm: live→OTA migration — slots provisioned on free
+        # space (idempotent), signed first image into the inactive slot, the
+        # live generation retained as fallback.
+        ab-ota-migrate-vm = import ./tests/ab-ota-migrate-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
       };
 
       # --- This flake's own option docs -----------------------------------

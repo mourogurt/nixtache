@@ -28,7 +28,7 @@ let
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
 
   # v2 — the update staged into the local staging dir. Only its
-  # sysupdate-package output is used (abtest_2.nix-store.raw, abtest_2.efi,
+  # sysupdate-package output is used (abtest_2.nix-store.raw, abtest_2+*.efi,
   # SHA256SUMS — the manifest ships in the package, unsigned: these nodes set
   # no publicKeyFile, so the provision module derives Transfer.Verify=no).
   v2Config = fixture.mkAppliance {
@@ -168,14 +168,14 @@ pkgs.testers.runNixOSTest {
     def stage_v2(node):
         node.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
         node.succeed("test -f ${stageDir}/abtest_2.nix-store.raw")
-        node.succeed("test -f ${stageDir}/abtest_2.efi")
+        node.succeed("test -f ${stageDir}/abtest_2+*.efi")
         node.succeed("grep abtest_2 ${stageDir}/SHA256SUMS")
 
     # systemd-sysupdate.service is Type=simple upstream, so `systemctl start`
     # returns as soon as the process forks — the slot write finishes in the
     # background. Always wait for the .efi (the LAST transfer) before asserting.
     def check_slot_b_written(node):
-        node.wait_until_succeeds("test -f ${slotsDir}/abtest_2.efi", timeout=300)
+        node.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
         node.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
 
     # ── B1: local staging + direct sysupdate trigger ────────────────────────
@@ -187,7 +187,7 @@ pkgs.testers.runNixOSTest {
     b1.succeed("journalctl -u systemd-sysupdate --no-pager | grep -i 'Successfully installed'")
     b1.succeed("unsquashfs -l /dev/vdb2 | grep hello")  # v2 content in slot B
     b1.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # rollback slot intact
-    print("B1 OK: self-deploy wrote nix-store_2 + abtest_2.efi from local staging")
+    print("B1 OK: self-deploy wrote nix-store_2 + abtest_2+*.efi from local staging")
     b1.shutdown()
 
     # ── B2: gating, runners idle → apply ────────────────────────────────────
@@ -240,7 +240,7 @@ pkgs.testers.runNixOSTest {
     b3.succeed("touch /var/lib/nixtache/ab-pending && systemctl start nixtache-ab-apply.service", timeout=300)
     b3.succeed("test -f /var/lib/nixtache/ab-pending")  # NOT cleared
     b3.fail("sgdisk -p /dev/vdb | grep nix-store_2")   # slot B NOT written
-    b3.fail("test -f ${slotsDir}/abtest_2.efi")
+    b3.fail("test -f ${slotsDir}/abtest_2+*.efi")
     b3.succeed("journalctl -u nixtache-ab-apply --no-pager | grep 'still busy.*forceAfterTimeout=false'")
     print("B3 OK: busy + no force — apply deferred, pending kept, slot B untouched")
     b3.shutdown()

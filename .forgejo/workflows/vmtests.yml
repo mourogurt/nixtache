@@ -1,0 +1,100 @@
+# VM test suites (vmTests.*) — KVM-only, never built by `nix flake check`
+# (the nspawn CI runner cannot run QEMU). This workflow runs them on a
+# KVM-capable runner (label `kvm`): manually via workflow_dispatch and on a
+# weekly schedule for the full matrix; a nightly smoke subset keeps the KVM
+# path warm without the heavy full-matrix rebuilds.
+#
+# Runner prerequisites (see doc/technical_details/testing.md):
+#   - /dev/kvm exposed to the runner environment
+#   - nix system-features containing `kvm` and `nixos-test` (the runner
+#     module propagates the host's nix.settings.system-features into jobs)
+name: vmtests
+
+on:
+  workflow_dispatch:
+    inputs:
+      subset:
+        description: "smoke | full"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full
+          - smoke
+  schedule:
+    # nightly smoke (03:15 UTC); the full matrix runs weekly (03:30 Sunday)
+    - cron: "15 3 * * *"
+    - cron: "30 3 * * 0"
+
+jobs:
+  suites:
+    runs-on: kvm
+    timeout-minutes: 240
+    concurrency:
+      group: vmtests
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # smoke keeps the KVM path warm nightly: one OTA e2e variant + the
+        # replication baseline. Full = the whole vmTests inventory; the
+        # heaviest suites (ab-ota-anywhere-vm, rollback, the ota-invalid
+        # variants) get generous per-suite timeouts.
+        suite:
+          - ab-ota-e2e
+          - ab-ota-e2e-erofs
+          - ab-ota-e2e-none
+          - ab-ota-e2e-percent
+          - ab-ota-anywhere-vm
+          - ab-deploy
+          - ab-vm
+          - ab-provision-vm
+          - ab-runner-compat-vm
+          - ab-compression-vm
+          - ab-staging-vm
+          - ab-deploy-self-vm
+          - ab-ota-verify-vm
+          - ab-ota-rollback-vm
+          - ab-ota-noop-vm
+          - ab-ota-interrupted-vm
+          - ab-ota-migrate-vm
+          - auto-update-vm
+          - overlay-nix-vm
+          - overlay-nix-install-vm
+          - overlay-nix-ab-swap-vm
+          - overlay-nix-ota-invalid-vm
+          - overlay-nix-ota-invalid-wipe-vm
+          - overlay-nix-ota-invalid-reconcile-vm
+          - overlay-nix-ota-invalid-reconcile-degraded-vm
+          - overlay-nix-ota-invalid-tmpfs-vm
+          - runner-store-mode-vm
+        include:
+          - suite: ab-ota-e2e
+            smoke: true
+          - suite: overlay-nix-ota-invalid-vm
+            smoke: true
+    steps:
+      - name: Checkout nixtache
+        uses: actions/checkout@v4
+
+      - name: Run VM suite ${{ matrix.suite }}
+        # dispatch(full) and the Sunday schedule run every matrix entry;
+        # dispatch(smoke) and the nightly schedule run only smoke-tagged
+        # suites. Filtering is per-step (matrix exclude is static).
+        if: >-
+          (github.event_name == 'workflow_dispatch' && inputs.subset != 'smoke') ||
+          (github.event_name == 'workflow_dispatch' && inputs.subset == 'smoke' && matrix.smoke) ||
+          (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 0') ||
+          (github.event_name == 'schedule' && github.event.schedule == '15 3 * * *' && matrix.smoke)
+        run: |
+          set -euo pipefail
+          echo "----- vmTests.x86_64-linux.${{ matrix.suite }} -----"
+          out=$(nix build -L --no-link --print-out-paths ".#vmTests.x86_64-linux.${{ matrix.suite }}")
+          echo "$out"
+
+      - name: Upload suite logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: vmtests-${{ matrix.suite }}
+          path: artifacts/

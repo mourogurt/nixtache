@@ -120,5 +120,4 @@ nix eval --raw .#nixosConfigurations.server.config.services.nixtache.runner.forg
 ```
 
 Reference consumer: `codemaster/nixos-configuration`
-(`server/services/forgejo-runner.nix` is the instance). Migration from older
-nixtache versions (including BREAKING changes): [`migration.md`](migration.md).
+(`server/services/forgejo-runner.nix` is the instance).
