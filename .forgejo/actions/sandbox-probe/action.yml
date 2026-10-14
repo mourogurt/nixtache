@@ -22,9 +22,12 @@ runs:
         # without sandboxing (harmless, succeeds). If the sandbox is on but
         # broken (nspawn /proc-lock without the PrivateMounts+remount fix), the
         # build fails → SANDBOX_OK=0 → build steps use --no-sandbox.
+        # The build command MUST create $out — a bare "true" fails with
+        # "builder failed to produce output path" on every runner, sandboxed
+        # or not, making the probe report a false negative.
         probe_log=$(mktemp)
         if nix build --no-link --impure --expr \
-          'let self = builtins.getFlake (toString ./.); in self.inputs.nixpkgs.legacyPackages.${builtins.currentSystem}.runCommand "nixtache-sandbox-probe" {} "true"' \
+          'let self = builtins.getFlake (toString ./.); in self.inputs.nixpkgs.legacyPackages.${builtins.currentSystem}.runCommand "nixtache-sandbox-probe" {} "mkdir -p $out"' \
           > "$probe_log" 2>&1; then
           echo "sandbox-probe: sandboxed build OK → sandbox ON for this job."
           echo "SANDBOX_OK=1" >> "$GITHUB_ENV"
