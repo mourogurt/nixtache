@@ -230,9 +230,25 @@ in
               requires = [ seedUnit ];
 
               serviceConfig = {
-                ExecStart = if useOverlay
-                  then "${config.nix.package}/bin/nix-daemon --store '${overlayStoreUrl}'"
-                  else "${config.nix.package}/bin/nix-daemon --daemon";
+                # enableSandbox: the daemon's exec chain first replaces the
+                # nspawn-masked /proc (its locked ro submounts make nix's
+                # sandbox preflight fail with EPERM on the child-userns proc
+                # overmount). unshare -m + mount + exec in ONE chain, because
+                # systemd clones the mount namespace per Exec* command — an
+                # ExecStartPre mount would never reach the daemon. Full
+                # mechanism: doc/technical_details/sandboxing.md.
+                ExecStart =
+                  let
+                    daemonCmd = if useOverlay
+                      then "${config.nix.package}/bin/nix-daemon --store '${overlayStoreUrl}'"
+                      else "${config.nix.package}/bin/nix-daemon --daemon";
+                  in
+                  if cfg.enableSandbox
+                  then "${lib.getExe' pkgs.util-linux "unshare"} -m ${pkgs.writeShellScript "nix-daemon-custom-fresh-proc" ''
+                    ${lib.getExe' pkgs.util-linux "mount"} proc -t proc /proc
+                    exec -a nix-daemon ${daemonCmd}
+                  ''}"
+                  else daemonCmd;
                 KillMode = "process";
                 BindPaths = [ bindPath ];
                 CPUSchedulingPolicy = nixDaemonCfg.serviceConfig.CPUSchedulingPolicy or null;

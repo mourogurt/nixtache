@@ -253,12 +253,21 @@ self.nixosModules.runner
       hasExtraCap = lib.elem "CAP_NET_ADMIN" hostSandboxOn.config.containers."runner".additionalCapabilities;
       daemonSandboxOn = (containerCfg hostSandboxOn).nix.settings.sandbox == true;
       sandboxEnvOn = (instancesOf hostSandboxOn)."default".settings.runner.envs.HAS_SANDBOX_CAP == "1";
-      # /proc locked-mount fix (nixpkgs#405256): PrivateMounts on the system daemon…
-      nixDaemonPrivateMounts = (servicesOf hostSandboxOn)."nix-daemon".serviceConfig.PrivateMounts or false == true;
-      # …and on the relocated-store daemon (store.path="/srv" → nix-daemon-custom
-      # exists; CI builds go through it, so it needs the same fix):
+      # /proc locked-mount fix (nixpkgs#405256): the system daemon's ExecStart
+      # is wrapped — the daemon's own exec chain unshares a mount namespace and
+      # remounts /proc (an ExecStartPre mount would not reach it: systemd clones
+      # the mount namespace per Exec* command). The override is a list whose
+      # first empty entry clears the package-supplied ExecStart.
+      nixDaemonWrapped =
+        let es = (servicesOf hostSandboxOn)."nix-daemon".serviceConfig.ExecStart or [ ];
+        in lib.isList es && lib.any (lib.hasInfix "nix-daemon-fresh-proc") es;
+      # …and the relocated-store daemon (store.path="/srv" → nix-daemon-custom
+      # exists; CI builds go through it, so it needs the same fix). Its ExecStart
+      # is owned by store.nix and stays a single string there.
       hasCustomDaemon = has (servicesOf hostSandboxOn) "nix-daemon-custom";
-      customDaemonPrivateMounts = (servicesOf hostSandboxOn)."nix-daemon-custom".serviceConfig.PrivateMounts or false == true;
+      customDaemonWrapped =
+        lib.hasInfix "nix-daemon-custom-fresh-proc"
+          ((servicesOf hostSandboxOn)."nix-daemon-custom".serviceConfig.ExecStart or "");
     };
   };
 
@@ -279,6 +288,13 @@ self.nixosModules.runner
       hasExtraCap = lib.elem "CAP_NET_ADMIN" hostNoSandbox.config.containers."runner".additionalCapabilities;
       daemonSandboxOff = (containerCfg hostNoSandbox).nix.settings.sandbox == false;
       sandboxEnvOff = (instancesOf hostNoSandbox)."default".settings.runner.envs.HAS_SANDBOX_CAP == "0";
+      # no /proc wrapper on either daemon (their ExecStart stay untouched)
+      nixDaemonNotWrapped =
+        !lib.hasInfix "fresh-proc"
+          (toString ((servicesOf hostNoSandbox)."nix-daemon".serviceConfig.ExecStart or ""));
+      customDaemonNotWrapped =
+        !lib.hasInfix "fresh-proc"
+          ((servicesOf hostNoSandbox)."nix-daemon-custom".serviceConfig.ExecStart or "");
     };
   };
 

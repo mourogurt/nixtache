@@ -3,44 +3,53 @@
 Why the runner's Nix sandbox is off by default, what `enableSandbox = true`
 actually does, and how CI self-heals either way. Source of truth:
 `modules/runner/sandbox.nix` and
-[`.forgejo/actions/sandbox-probe`](../../.forgejo/actions/sandbox-probe/action.yml).
+[`.forgejo/actions/sandbox-probe`](../../.forgejo/actions/sandbox-probe/action.yml);
+requirements: [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
 
 ## The problem
 
 The runner is a NixOS `systemd-nspawn` container. NixOS sets
 `nix.settings.sandbox = true` by default, **but nspawn drops `CAP_SYS_ADMIN`
 from the container's bounding set**, so `nix-daemon` inside cannot create the
-user/mount namespaces + bind-mounts the sandbox needs. Worse: even when
-`CAP_SYS_ADMIN` is granted back, nspawn's seccomp / private-users restrict
-the `clone(CLONE_NEWUSER|CLONE_NEWNS)` the Nix sandbox needs — so the cap
-alone is **not** sufficient on most nspawn setups, and `enableSandbox = true`
-produces broken CI ("this system does not support the kernel namespaces
-required for sandboxing").
+user/mount namespaces + bind-mounts the sandbox needs.
 
-There is a second, subtler blocker: nspawn over-mounts `/proc` subdirs
-(`/proc/sys`, `/proc/bus`, `/proc/fs`, …) read-only, which the kernel "locks"
-(mounts inherited from a more privileged mount namespace are locked
-together). When the sandbox later overmounts `/proc` with a fresh procfs
-inside its child user namespace, the locked-mount logic blocks it with EPERM.
-`CAP_SYS_ADMIN` does not help — the lock is a mount-namespace property, not a
-capability gate.
+Even with `CAP_SYS_ADMIN` granted back, one subtler blocker remains: nspawn
+over-mounts `/proc` subdirs (`/proc/sys`, `/proc/bus`, `/proc/fs`, …)
+read-only, which the kernel "locks" (mounts propagated from a more privileged
+mount namespace are locked together). Nix's sandbox preflight
+(`mountAndPidNamespacesSupported()`) spawns a child with
+`CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUSER` and mounts a fresh procfs **over**
+`/proc` — on a masked `/proc` the locked-mount logic blocks it with EPERM
+("Mount too revealing" on newer kernels), so every sandboxed build fails with
+"this system does not support the kernel namespaces that are required for
+sandboxing". `CAP_SYS_ADMIN` does not help — the lock is a mount-namespace
+property, not a capability gate.
 
 ## The options
 
 | option | default | effect |
 |---|---|---|
 | `enableSandbox` | `false` | unprivileged container, `nix.settings.sandbox = false`. Working CI out of the box; the container itself is the isolation boundary. |
-| `enableSandbox` | `true` (opt-in) | grants `CAP_SYS_ADMIN`, forces `nix.settings.sandbox = true`, applies the daemon `/proc` remount fix (see below). Use ONLY if you've verified the Nix sandbox works in your nspawn (host sysctl `kernel.unprivileged_userns_clone=1`, no `--private-users` conflict, seccomp allows the clone flags). |
+| `enableSandbox` | `true` (opt-in) | grants `CAP_SYS_ADMIN`, forces `nix.settings.sandbox = true`, applies the daemon `/proc` remount fix (see below). Applies only after a host rebuild AND a container restart (see "Deploy chicken-and-egg"). |
 | `additionalCapabilities` | `[]` | extra caps merged on top (e.g. `CAP_NET_ADMIN` for tunnel setup). `sandbox.nix` is the sole owner of the container's capability list — it doesn't auto-merge across modules. |
 
 ## The `/proc` remount fix (`enableSandbox = true`)
 
-Each nix daemon in the container gets its own mount namespace
-(`PrivateMounts = true`) and remounts `/proc` fresh there before starting.
-The fresh proc mount is made by root in the container's user namespace → not
-locked → the sandbox's child-user-ns `/proc` overmount succeeds. Applied to
-**both** daemons: the system `nix-daemon` and the relocated-store
-`nix-daemon-custom` (when `store.path != "/"`). Ref:
+Each nix daemon's `ExecStart` is wrapped: the daemon's own exec chain runs
+`unshare -m`, mounts a fresh procfs over `/proc`, then `exec`s the real
+`nix-daemon`. Overmounting `/proc` from the container's own context (no
+child user namespace) is allowed, and the fresh proc carries no locked
+submounts, so the sandbox preflight's overmount succeeds. Applied to
+**both** daemons: the system `nix-daemon` (wrapped in `sandbox.nix`) and the
+relocated-store `nix-daemon-custom` (wrapped in `store.nix`, where its
+`ExecStart` is owned, when `store.path != "/"`).
+
+The remount MUST live in the daemon's exec chain: systemd clones the mount
+namespace **separately for every `Exec*` command** of a unit, so an
+`ExecStartPre` mount vanishes with its own process and never reaches the
+daemon — the earlier `PrivateMounts`+`ExecStartPre` form of this fix was a
+no-op for exactly that reason (the `ExecStartPre` reported success while the
+daemon kept seeing the masked `/proc`). Ref:
 [NixOS/nixpkgs#405256](https://github.com/NixOS/nixpkgs/issues/405256).
 
 ## CI side: runtime probe, not config
@@ -49,7 +58,10 @@ Whether builds actually run sandboxed is detected per job by the
 `sandbox-probe` action: it builds a tiny unique-name derivation (nothing
 caches it, so it always builds locally, using the caller's own pinned
 nixpkgs) and exports `SANDBOX_OK=1` (sandbox usable) or `SANDBOX_OK=0` (fall
-back) to the job env. Every build action (`flake-validation`,
+back) to the job env. The probe derivation's build command must create
+`$out` (`mkdir -p $out`) — a bare `true` fails with "builder failed to
+produce output path" on every runner, making the probe report a false
+negative. Every build action (`flake-validation`,
 `rebuild-configurations`, `rebuild-devshells`, `generate-docs`,
 `deploy-target`) and nixtache's own `ci.yml` append `--no-sandbox` when
 `SANDBOX_OK` ≠ 1 — a runner whose sandbox is broken (or not yet rebuilt with
@@ -61,11 +73,10 @@ code to it. `SANDBOX_OK` from `sandbox-probe` is the operative flag.
 
 ## Deploy chicken-and-egg
 
-Sandbox-in-nspawn is a known hard problem: the default `false` trades
-build-level isolation for reliability, and making `true` actually work
-requires host-side setup (sysctl, nspawn flags) that nixtache does not yet
-automate (tracked as a follow-up — important for cross-compile purity via
-binfmt). Also note: any change to `enableSandbox` / caps applies only after
-the server is rebuilt with the updated module, so a first-time rollout needs
-one manual `nixos-rebuild switch` (or an `ab-image` deploy) on the server.
+The default `false` trades build-level isolation for reliability. Flipping
+`enableSandbox` / caps applies only after the host is rebuilt with the
+updated module **and the container is restarted** (a plain
+`nixos-rebuild switch` on the host does not restart `container@<name>` —
+restart it explicitly while no CI job is running), so a first-time rollout
+needs one manual rebuild + restart on the server (or an `ab-image` deploy).
 The runtime probe means CI stays green on both sides of that switch.

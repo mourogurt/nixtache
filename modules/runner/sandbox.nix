@@ -1,16 +1,13 @@
 # Build sandboxing inside the runner container.
 #
 # NixOS enables `nix.settings.sandbox` by default, but systemd-nspawn drops
-# CAP_SYS_ADMIN from the container's bounding set AND restricts the
-# clone(CLONE_NEWUSER|CLONE_NEWNS) syscalls the sandbox needs (seccomp /
-# private-users). The result: every `nix build` / `nix flake check` fails with
-# "this system does not support the kernel namespaces that are required for
-# sandboxing". Crucially, granting CAP_SYS_ADMIN alone does NOT fix this on most
-# nspawn setups — so the default is `enableSandbox = false` (working CI, builds
-# run unsandboxed inside the container which is itself the isolation boundary).
-# `enableSandbox = true` is opt-in for setups where the sandbox has been
-# verified to work (host sysctl, no private-users conflict, seccomp allows the
-# clone flags). HAS_SANDBOX_CAP env (instances.nix) tells the reusable actions
+# CAP_SYS_ADMIN from the container's bounding set, and its read-only /proc
+# submount masks break nix's sandbox preflight even when the cap is granted
+# back (mechanism: doc/technical_details/sandboxing.md). So the default is
+# `enableSandbox = false` (working CI, builds run unsandboxed inside the
+# container which is itself the isolation boundary). `enableSandbox = true`
+# grants the cap and wraps both nix daemons with the fresh-/proc remount.
+# HAS_SANDBOX_CAP env (instances.nix) tells the reusable actions
 # whether to keep sandboxing on (1) or append --no-sandbox (0).
 #
 # This module is the SOLE owner of `containers.<name>.additionalCapabilities`
@@ -40,19 +37,15 @@ in
         - `false` (default): keeps the container unprivileged (no
           `CAP_SYS_ADMIN`), forces `nix.settings.sandbox = false`, and exports
           `HAS_SANDBOX_CAP=0` so the reusable CI actions append `--no-sandbox`.
-          This is the default because systemd-nspawn restricts the
-          `clone(CLONE_NEWUSER|CLONE_NEWNS)` the Nix sandbox needs — granting
-          `CAP_SYS_ADMIN` alone (the `true` case) is NOT enough on most nspawn
-          setups, and `true` produces broken CI ("this system does not support
-          the kernel namespaces required for sandboxing"). The runner container
-          itself is the isolation boundary, so unsandboxed builds inside it are
-          acceptable.
+          The runner container itself is the isolation boundary, so unsandboxed
+          builds inside it are acceptable.
         - `true`: grants `CAP_SYS_ADMIN` to the container, forces
-          `nix.settings.sandbox = true`, exports `HAS_SANDBOX_CAP=1` (actions
-          keep sandboxing on). Opt-in ONLY if you have verified the Nix sandbox
-          actually works in your nspawn setup (e.g. host sysctl
-          `kernel.unprivileged_userns_clone=1`, no `--private-users` conflict,
-          seccomp allows the clone flags). Otherwise leave `false`.
+          `nix.settings.sandbox = true`, exports `HAS_SANDBOX_CAP=1`, and wraps
+          both nix daemons' `ExecStart` so each replaces the nspawn-masked
+          `/proc` with a fresh procfs before starting (the masked `/proc`
+          otherwise makes nix's sandbox preflight fail — mechanism:
+          `doc/technical_details/sandboxing.md`). Applying this requires a
+          host rebuild AND a `container@<name>` restart.
       '';
     };
 
@@ -85,15 +78,7 @@ in
       additionalCapabilities =
         cfg.additionalCapabilities ++ optional cfg.enableSandbox "CAP_SYS_ADMIN";
 
-      config = { lib, pkgs, ... }:
-        let
-          # The /proc remount fix, applied to every nix daemon in the container
-          # that runs builds. See the long comment below for why.
-          procFix = {
-            serviceConfig.PrivateMounts = true;
-            serviceConfig.ExecStartPre = "${lib.getExe' pkgs.util-linux "mount"} proc -t proc /proc";
-          };
-        in
+      config = { config, lib, pkgs, ... }:
         {
           # Owned by enableSandbox. Forced so it tracks the cap granted to the
           # container 1:1 (sandbox without the cap fails; cap without sandbox is
@@ -102,28 +87,35 @@ in
 
           # Make the Nix sandbox ACTUALLY work under systemd-nspawn. nspawn
           # over-mounts /proc subdirs (/proc/sys, /proc/bus, /proc/fs, …) read-only,
-          # which the kernel "locks" (mounts inherited from a more privileged mount
-          # namespace are locked together). When the Nix sandbox later tries to
-          # overmount /proc with a fresh procfs inside its child USER namespace,
-          # the locked-mount logic blocks it with EPERM → "this system does not
-          # support the kernel namespaces that are required for sandboxing".
-          # CAP_SYS_ADMIN alone does NOT fix this (the lock is a mount-namespace
-          # property, not a capability gate).
+          # which the kernel "locks" (mounts propagated from a more privileged
+          # mount namespace are locked together). Nix's sandbox preflight
+          # (mountAndPidNamespacesSupported: clone(NEWNS|NEWPID|NEWUSER), then a
+          # fresh-proc overmount of /proc) fails with EPERM on such a /proc →
+          # "this system does not support the kernel namespaces that are required
+          # for sandboxing". CAP_SYS_ADMIN alone does NOT fix this (the lock is a
+          # mount-namespace property, not a capability gate).
           #
-          # Fix: give each nix daemon its own mount namespace (PrivateMounts) and
-          # remount /proc fresh there before the daemon starts. The fresh proc
-          # mount is made by root in the container's user namespace → NOT locked
-          # → the sandbox's child-user-ns /proc overmount succeeds. PrivateMounts
-          # keeps this isolated (the container's own /proc is untouched).
-          # Ref: https://github.com/NixOS/nixpkgs/issues/405256
+          # Fix: the daemon's own exec chain replaces /proc with a fresh procfs
+          # before starting — unshare -m, mount, exec. Overmounting /proc from the
+          # container's own context (no child user namespace) is allowed, and the
+          # fresh proc carries no locked submounts, so the preflight's overmount
+          # succeeds. The remount MUST live in the daemon's exec chain: systemd
+          # clones the mount namespace separately for every Exec* command of a
+          # unit, so an ExecStartPre mount vanishes with its own process and never
+          # reaches the daemon. Ref:
+          # https://github.com/NixOS/nixpkgs/issues/405256
           #
-          # Applied to BOTH daemons: the system `nix-daemon` AND the relocated-store
-          # `nix-daemon-custom` (store.nix creates the latter when store.path != "/";
-          # CI builds go through it when the store is relocated, so it needs the
-          # same fix).
-          systemd.services.nix-daemon = lib.mkIf cfg.enableSandbox procFix;
-          systemd.services.nix-daemon-custom =
-            lib.mkIf (cfg.enableSandbox && cfg.store.path != "/") procFix;
+          # The relocated-store `nix-daemon-custom` (store.nix, present when
+          # store.path != "/") gets the same wrapper where its ExecStart is owned.
+          systemd.services.nix-daemon = lib.mkIf cfg.enableSandbox {
+            serviceConfig.ExecStart = [
+              ""
+              "${lib.getExe' pkgs.util-linux "unshare"} -m ${pkgs.writeShellScript "nix-daemon-fresh-proc" ''
+                ${lib.getExe' pkgs.util-linux "mount"} proc -t proc /proc
+                exec -a nix-daemon ${config.nix.package}/bin/nix-daemon --daemon
+              ''}"
+            ];
+          };
         };
     };
   };
