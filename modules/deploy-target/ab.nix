@@ -215,16 +215,22 @@ in
         fi
 
         echo "nixtache-ab-apply: runners idle — triggering systemd-sysupdate (writes inactive slot, then reboots)"
-        # The -reboot variant: after writing the inactive slot it reboots the
-        # host so the new slot becomes active (plain systemd-sysupdate.service
-        # never reboots). The idle-gate above already made the reboot safe.
-        if ! systemctl start systemd-sysupdate-reboot.service; then
-          echo "nixtache-ab-apply: systemd-sysupdate start failed — keeping ${pendingFile} for retry" >&2
+        # Stock units split the duties: systemd-sysupdate.service runs
+        # `update` (fetch + install, never reboots; Type=simple, so --wait
+        # blocks until the update really finished), while
+        # systemd-sysupdate-reboot.service runs `reboot` (a purely offline
+        # check that reboots only when a NEWER version is already
+        # installed). The pending flag guards the update itself: it is
+        # consumed only after the slot write succeeded — a failed reboot
+        # start (or the reboot cutting this unit short mid-shutdown) must
+        # not re-trigger an already-applied update.
+        if ! systemctl start --wait systemd-sysupdate.service; then
+          echo "nixtache-ab-apply: systemd-sysupdate update failed — keeping ${pendingFile} for retry" >&2
           exit 1
         fi
-        # Consume the signal only after a successful start: a failed start
-        # leaves ab-pending in place so the next path-trigger retries.
         rm -f "${pendingFile}"
+        systemctl start systemd-sysupdate-reboot.service \
+          || echo "nixtache-ab-apply: reboot trigger failed — new slot staged, reboot deferred" >&2
       '';
     };
   };

@@ -35,6 +35,14 @@ deploy-map entry.
 - **`deploy-target.ab`** (runtime): polkit start-only authorization for the
   sysupdate triggers; on the runner host itself, the idle-gated
   `nixtache-ab-apply` (wait for runners to go idle before self-updating).
+- **The apply trigger** (remote action targets and the runner-host
+  self-apply alike): the stock units split the duties —
+  `systemd-sysupdate.service` runs `update` (fetch + install, never
+  reboots), `systemd-sysupdate-reboot.service` runs `reboot` (a purely
+  offline check that reboots only when a NEWER version is already
+  installed) — so the trigger chains both, update first and with `--wait`
+  (the update unit is Type=simple; a plain start returns at fork, long
+  before the slot write finished).
 - **Runtime versioning**: the version is assigned at deploy time (explicit
   `NIXTACHE_AB_VERSION` or a UTC calendar value), written to the repo's
   `image-version` file before `nix build` (wire it via
@@ -122,6 +130,7 @@ write; the runner host cutover is idle-gated.
 | same version staged | no-op: nothing written, trigger green |
 | interrupted update | the active slot is never the write target; the half-written slot never boots; re-install is refused until `systemd-sysupdate vacuum` removes the partial instance, then the next update rewrites the slot |
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
+| tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |
 | timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls + reboots per `rebootPolicy` — see [`auto-update.md`](auto-update.md) |
 
 ## Overlay synergy (runtime installs)

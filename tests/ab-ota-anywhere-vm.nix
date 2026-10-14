@@ -44,8 +44,9 @@
 #     are out-of-band update partitions (nixos-anywhere installs a closure —
 #     it cannot dd raw image slots; the sysupdate slot flow itself is fully
 #     real). Documented in tests/ab-anywhere-install.nix.
-#   - The test does not reboot INTO slot B (that would need a second OVMF
-#     boot + bless cycle; tests/ab-vm.nix covers UKI boot counting).
+#   - The action's trigger REALLY reboots the installed machine after v2
+#     lands (QEMU resets in place; boot counting may then boot the v2 UKI —
+#     exercised end-to-end; slot-state assertions hold from either slot).
 { nixpkgs, self, system ? "x86_64-linux" }:
 
 let
@@ -428,6 +429,10 @@ pkgs.testers.runNixOSTest {
             "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
             "-m", "2048",
             "-smp", "2",
+            # Match the driver's declared nodes: a guest reboot EXITS QEMU
+            # instead of resetting in place — the reboot leg below relies on
+            # that (wait_for_shutdown + start re-boots the same disk).
+            "-no-reboot",
             "-drive", f"file={oldmachine.state_dir}/empty0.qcow2,id=drive1,if=none,werror=report",
             "-device", "virtio-blk-pci,drive=drive1,bootindex=1",
             "-netdev", "vde,id=vlan1,sock=$QEMU_VDE_SOCKET_1",
@@ -477,7 +482,10 @@ pkgs.testers.runNixOSTest {
     print("OK: slot A populated with v1 store (no hello)")
 
     # ── UPDATE: real action.yml run — stage v2 (GPG-signed manifest) → SSH
-    #    trigger of systemd-sysupdate on the installed machine ───────────────
+    #    trigger of systemd-sysupdate on the installed machine. The trigger
+    #    chains update → reboot-assessment; with v2 (2) newer than the booted
+    #    baseline (1) the installed machine REALLY reboots — handled after
+    #    the .efi wait below. ────────────────────────────────────────────────
     deployer.succeed(
       "mkdir -p /run/credentials && "
       "cp /etc/deploy-key /run/credentials/deploy_ssh_abanywhere && "
@@ -504,10 +512,23 @@ pkgs.testers.runNixOSTest {
     # ── Verify: sysupdate pulled v2 over HTTP, verified the signature, wrote
     #    slot B. The .efi transfer runs after the nix-store one, so its
     #    arrival means the whole service finished. ───────────────────────────
-    installed.wait_until_succeeds(
-      "test -f /boot/EFI/Linux/abtest_2+*.efi",
-      timeout=300
-    )
+    try:
+        installed.wait_until_succeeds(
+          "test -f /boot/EFI/Linux/abtest_2+*.efi",
+          timeout=300
+        )
+    except BrokenPipeError:
+        # The reboot leg follows the .efi within seconds; a poll iteration
+        # can straddle QEMU's exit — the exit itself is expected here.
+        pass
+    # The reboot leg restarts the machine (2 > booted 1); with -no-reboot
+    # the reboot manifests as QEMU exiting — wait it out and boot the same
+    # disk again (boot counting may bring up the v2 UKI; the slot-state
+    # assertions below hold from either slot).
+    installed.wait_for_shutdown()
+    installed.start()
+    installed.wait_for_unit("multi-user.target")
+    installed.succeed("test -f /boot/EFI/Linux/abtest_2+*.efi")
     # The _empty partition was relabelled nix-store_2 — the runtime version
     # travelled env → image-version → build → stage → GPT label.
     installed.succeed("sgdisk -p /dev/vda | grep nix-store_2")

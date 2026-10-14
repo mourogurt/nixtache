@@ -96,25 +96,18 @@ let
     };
   };
 
-  # Test-only: the gating unit triggers `systemd-sysupdate-reboot.service`
-  # (write the slot, then REBOOT). Inside QEMU a mid-test reboot would drop
-  # the driver's connections, and re-running the real update from the reboot
-  # unit misbehaves (concurrent/boot-run conflicts) — so the TEST replaces the
-  # unit with a clean no-op. Slot-write mechanics stay asserted by B1 (direct
-  # stock sysupdate); B2–B4 assert GATING semantics only (idle/force/pending).
+  # Test-doubles for the two stock sysupdate units — this suite's subject is
+  # the GATING logic, not sysupdate itself (slot mechanics are covered by B1
+  # and the ab-ota-* suites): the plain update unit gets a wrapper that runs
+  # the REAL update but can be forced to FAIL on demand (/run/sysupdate-fail)
+  # to exercise the retry-safe pending-flag path, and the reboot unit becomes
+  # a no-op so an apply never reboots the VM mid-gating-scenario. The gating
+  # unit itself — its script, the --wait update → pending consumption →
+  # reboot-assessment ordering — stays REAL.
   # (A systemd.units text override CONCATENATES with the package unit via
   # types.lines, and an ExecStart list with a "" reset renders a broken empty
   # line — a full service declaration is the working mechanism.)
-  # Test-only: the gating unit triggers `systemd-sysupdate-reboot.service`
-  # (write the slot, then REBOOT). Inside QEMU a mid-test reboot would drop
-  # the driver's connections — drop-in the unit with a wrapper that runs the
-  # PLAIN update (no reboot) and can be made to FAIL on demand (touch
-  # /run/sysupdate-fail) to exercise the retry-safe pending-flag path.
-  # Upstream units come via systemd.additionalUpstreamSystemUnits
-  # (store-linked) and ours merges as a DROP-IN: for Type=oneshot, ExecStart
-  # lines APPEND — so the leading "" element renders an empty `ExecStart=`
-  # that RESETS the list, and the whole command must be ONE list element.
-  sysupdateWrapper = pkgs.writeShellScript "sysupdate-reboot-test" ''
+  sysupdateWrapper = pkgs.writeShellScript "sysupdate-update-test" ''
     if [ -e /run/sysupdate-fail ]; then
       echo "test wrapper: forced failure (/run/sysupdate-fail present)" >&2
       exit 1
@@ -122,11 +115,18 @@ let
     exec ${pkgs.systemd}/lib/systemd/systemd-sysupdate update
   '';
   noReboot = {
-    systemd.services."systemd-sysupdate-reboot" = {
-      description = "systemd-sysupdate reboot variant (TEST override: update without reboot, fail-on-flag)";
+    systemd.services.systemd-sysupdate = {
+      description = "systemd-sysupdate update (TEST wrapper: fail-on-flag)";
       serviceConfig = {
         Type = "oneshot";
         ExecStart = [ "" "${sysupdateWrapper}" ];
+      };
+    };
+    systemd.services."systemd-sysupdate-reboot" = {
+      description = "systemd-sysupdate reboot (TEST no-op: gating scenarios must not reboot)";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = [ "" "${pkgs.coreutils}/bin/true" ];
       };
     };
   };
@@ -213,7 +213,7 @@ pkgs.testers.runNixOSTest {
     # Clear the intentional failures + rate-limit windows (BOTH the gating unit
     # and the sysupdate unit it failed to start) so the REAL apply below is not
     # blocked by start-limit-hit.
-    b2.succeed("systemctl reset-failed nixtache-ab-apply.service systemd-sysupdate-reboot.service")
+    b2.succeed("systemctl reset-failed nixtache-ab-apply.service systemd-sysupdate.service")
     print("B2 OK (pre): failed sysupdate start keeps ab-pending for retry")
 
     stage_v2(b2)
@@ -221,9 +221,9 @@ pkgs.testers.runNixOSTest {
     check_slot_b_written(b2)
     b2.succeed("test ! -f /var/lib/nixtache/ab-pending")
     b2.succeed("journalctl -u nixtache-ab-apply --no-pager | grep 'runners idle'")
-    # the gating unit drives the -reboot variant (write slot + reboot); the
-    # reboot itself is upstream behavior (test override runs the plain update).
-    # `systemctl cat` shows only the script wrapper path — grep its text.
+    # the gating script drives the stock two-leg trigger (--wait update,
+    # then the reboot assessment; the reboot is no-op'd above). `systemctl
+    # cat` shows only the script wrapper path — grep its text.
     b2.succeed(
       "f=$(systemctl show -p ExecStart --value nixtache-ab-apply.service); "
       + "grep systemd-sysupdate-reboot.service \"$(echo \"$f\" | sed -E 's/^\\{ path=([^ ;]+).*/\\1/')\""

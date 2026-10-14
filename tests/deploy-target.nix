@@ -379,13 +379,18 @@ let
       abServiceOneshot = svcAbGating.services."nixtache-ab-apply".serviceConfig.Type == "oneshot";
       # forgejoPort (3000, parsed from the runner module's forgejoUrl) reaches the script
       scriptHasForgejoPort = lib.hasInfix ":3000/api/v1/actions/runners" abApplyScript;
-      # idle-poll loop + sysupdate-reboot trigger present (the -reboot variant:
-      # writes the inactive slot AND reboots — plain sysupdate never reboots)
+      # idle-poll loop + the chained sysupdate trigger present: --wait update
+      # (fetch + slot write, Type=simple needs --wait to mean completion),
+      # then the offline reboot assessment unit
       scriptPollsBusy = lib.hasInfix "busy" abApplyScript;
-      scriptTriggersSysupdateReboot = lib.hasInfix "systemctl start systemd-sysupdate-reboot.service" abApplyScript;
-      # the pending flag is consumed ONLY after a successful start (retry-safe)
-      rmAfterSuccessfulStart =
-        (posOf "systemctl start systemd-sysupdate-reboot" abApplyScript)
+      scriptTriggersUpdateThenReboot =
+        lib.hasInfix "systemctl start --wait systemd-sysupdate.service" abApplyScript
+        && lib.hasInfix "systemctl start systemd-sysupdate-reboot.service" abApplyScript;
+      # the pending flag is consumed ONLY after the update succeeded (the
+      # slot write is what the flag guards — a deferred reboot must not
+      # re-trigger an already-applied update)
+      rmAfterSuccessfulUpdate =
+        (posOf "systemctl start --wait systemd-sysupdate.service" abApplyScript)
           < (posOf "rm -f /var/lib/nixtache/ab-pending" abApplyScript);
       scriptKeepsPendingOnFail = lib.hasInfix "for retry" abApplyScript;
       # idleWaitTimeout propagates into the script (600s set above)

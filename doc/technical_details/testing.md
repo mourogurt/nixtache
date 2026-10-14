@@ -62,16 +62,6 @@ Every overlay test names its lower-DB world (see
 host-store lower with a real database — results do not transfer between
 worlds.
 
-**Known red (pre-existing, verified on clean `fa1284a`)**: `ab-ota-anywhere-vm`
-and the C4 leg of `ab-ota-verify-vm` time out on the current nixpkgs: the
-remote trigger unit (`systemd-sysupdate update --reboot`) settles into a
-green no-op after the booted-version assessment ("Newest installed version
-matches booted version") instead of discovering the staged update, and a
-manual plain update reports `Signature verification failed` against the
-action-signed manifest. Both predate the ota-stabilization change (whose
-+tries filename work leaves their failure mode unchanged); fixing them is
-tracked separately.
-
 Every test file is a function `{ nixpkgs, self, system }:` returning a
 `pkgs.runCommand` derivation. Its builder prints a human-readable report (one
 `ok`/`FAIL` line per check) into `$out` and exits non-zero on any failure — so

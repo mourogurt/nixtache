@@ -86,10 +86,13 @@ let
       allow
     fi
 
-    # remote ab-image triggers (update / update+reboot)
-    case "$cmd" in
-      "systemctl start systemd-sysupdate.service"|"systemctl start systemd-sysupdate-reboot.service") allow ;;
-    esac
+    # remote ab-image trigger: the stock units split the update (fetch +
+    # install, no reboot; Type=simple, so --wait is what makes the ssh command
+    # mean "update completed") from the offline reboot assessment — the action
+    # chains both. Exact match, like every entry here.
+    if [ "$cmd" = "systemctl start --wait systemd-sysupdate.service && systemctl start systemd-sysupdate-reboot.service" ]; then
+      allow
+    fi
 
     echo "nixtache-ssh-gate: command not allowed by the nixtache deploy gate: $cmd" >&2
     exit 1

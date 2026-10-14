@@ -106,10 +106,10 @@ pkgs.runCommand "ab-deploy-drift-test"
 }
 ''
   set -uo pipefail
-  mkdir -p $out
+  report="$(mktemp)"
   FAIL=0
-  pass() { echo "  ok    $1"; echo "ok    $1" >> $out/report; }
-  fail() { echo "  FAIL  $1"; echo "FAIL  $1" >> $out/report; FAIL=1; }
+  pass() { echo "  ok    $1"; echo "ok    $1" >> "$report"; }
+  fail() { echo "  FAIL  $1"; echo "FAIL  $1" >> "$report"; FAIL=1; }
 
   echo "=== ab-deploy-drift (action.yml text vs an old SSH gate) ==="
   WORK=$(mktemp -d)
@@ -140,6 +140,7 @@ pkgs.runCommand "ab-deploy-drift-test"
     pass "no nix copy against the drifted target"
   fi
 
-  cat $out/report
+  cat "$report"
+  cp "$report" "$out"
   [ "$FAIL" = "0" ] || exit 1
 ''

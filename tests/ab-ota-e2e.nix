@@ -248,20 +248,12 @@ pkgs.testers.runNixOSTest {
     imports = [ self.nixosModules.deploy-target ];
     services.openssh.enable = true;
     boot.loader.systemd-boot.bootCounting.enable = true;
-
-    # Test-only: the action's remote ab trigger starts the -reboot variant
-    # (write slot + REBOOT). A mid-test reboot would drop the driver's
-    # connections — drop-in the unit to run the PLAIN update instead (the ""
-    # element resets the upstream oneshot ExecStart list; the whole command
-    # must be ONE element). Slot-write assertions stay; the reboot itself is
-    # upstream behavior (same approach as ab-deploy-self-vm).
-    systemd.services."systemd-sysupdate-reboot" = {
-      description = "systemd-sysupdate reboot variant (TEST override: update without reboot)";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = [ "" "${pkgs.systemd}/lib/systemd/systemd-sysupdate update" ];
-      };
-    };
+    # `systemd-sysupdate reboot` (the action's second trigger leg) reads
+    # IMAGE_VERSION from os-release to assess the booted version — a plain
+    # VM has none. Mirror the appliance baseline (slot A = version 1), so
+    # after RUN 2 installs v2 the reboot assessment really reboots.
+    system.image.id = "abtest";
+    system.image.version = "1";
 
     # Extra disk for A/B partition slots — appears as /dev/vdb.
     virtualisation.emptyDiskImages = [ 2048 ]; # 2 GB
@@ -402,10 +394,23 @@ pkgs.testers.runNixOSTest {
     # label.  The action's SSH `systemctl start` is synchronous, but the
     # label is visible early — use wait_until_succeeds on the .efi (the last
     # transfer) to know sysupdate is truly done.
-    target.wait_until_succeeds(
-      "test -f /var/lib/nixtache/ab-slots/abtest_2+*.efi",
-      timeout=180
-    )
+    try:
+        target.wait_until_succeeds(
+          "test -f /var/lib/nixtache/ab-slots/abtest_2+*.efi",
+          timeout=180
+        )
+    except BrokenPipeError:
+        # The reboot leg follows the .efi within seconds; a poll iteration
+        # can straddle QEMU's exit — the exit itself is expected here.
+        pass
+    # The reboot leg restarts the node; declared test nodes run QEMU with
+    # -no-reboot, so the reboot manifests as QEMU exiting — wait for the
+    # exit and boot the node again (same disks; RUN 3 continues from the
+    # rebooted machine).
+    target.wait_for_shutdown()
+    target.start()
+    target.wait_for_unit("multi-user.target")
+    target.succeed("test -f /var/lib/nixtache/ab-slots/abtest_2+*.efi")
     # The _empty partition was relabelled to nix-store_2 — the runtime
     # version travelled env → image-version → build → stage → GPT label.
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")

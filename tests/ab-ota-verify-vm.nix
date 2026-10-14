@@ -23,19 +23,23 @@
 #                                  rejected.
 #
 # Reset between cases: each negative case re-stages from scratch on the deployer
-# (rm + cp + sha256sum + gpg). The target needs no reset — a REJECTED update
-# leaves no v3 state (asserted), and the vacuum of the empty nix-store_1 slot is
-# harmless. The key negative assertion is "slot B has no committed v3": no
-# abtest_3+*.efi in the boot-target dir and no nix-store_3 GPT label, while the
-# good nix-store_2 stays intact. Whether `systemctl start systemd-sysupdate`
-# exits non-zero on rejection is recorded per case (spec allows either a failed
-# unit or a "successful" one that did not write slot B).
+# (rm + cp + sha256sum + gpg). The target needs no reset. The key negative
+# assertion is "no committed v3": no abtest_3+*.efi in the boot-target dir
+# (nothing bootable was created), while the good nix-store_2 stays intact.
 #
-# OBSERVED on this tree: all three negative cases exit 0 ("success-but-rejected"
-# — sysupdate treats an update whose manifest/payload verification fails as "no
-# applicable update", not a unit failure). The rejection IS logged
-# ("Signature verification failed" / SHA256 mismatch), no abtest_3+*.efi lands in
-# the boot-target dir and no nix-store_3 label ever appears in the GPT.
+# Rejection model on the pinned systemd (261.1) — two distinct stages:
+#  - MANIFEST-stage rejection (C1 wrong key, C3 unsigned): verification of
+#    SHA256SUMS(.gpg) fails before any target is touched → no v3 state at
+#    all, the unit exits 0 ("No update needed.").
+#  - MID-INSTALL rejection (C2 tampered payload): the payload streams
+#    directly into the inactive slot and its checksum is validated at stream
+#    END — the mismatch aborts with the unit FAILED (exit 1) but a PARTIAL
+#    v3 partition instance (label nix-store_3, never booted, never selected)
+#    remains; the documented recovery is `systemd-sysupdate vacuum`, which
+#    the suite exercises whenever a partial shows up.
+# The nginx 404s for <file>.sha256.asc / <file>.sha256.gpg in the deployer
+# log are systemd-pull probing per-file signature sidecars before falling
+# back to SHA256SUMS.gpg — expected noise, not failures.
 { nixpkgs, self, system ? "x86_64-linux" }:
 
 let
@@ -165,6 +169,12 @@ pkgs.testers.runNixOSTest {
     services.openssh.enable = true;
     boot.loader.systemd-boot.bootCounting.enable = true;
     virtualisation.emptyDiskImages = [ 2048 ];
+    # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
+    # IMAGE_VERSION from os-release to assess the booted version — a
+    # plain VM has none and sysupdate exits 1 silently. Mirror the
+    # appliance baseline (slot A = version 1).
+    system.image.id = "abtest";
+    system.image.version = "1";
 
     services.nixtache.deploy-target = {
       enable = true;
@@ -174,18 +184,6 @@ pkgs.testers.runNixOSTest {
         enable = true;
         slotSize = "512M";
         autoInit = true;
-        # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
-        # IMAGE_VERSION from os-release to assess the booted version — a
-        # plain VM has none and sysupdate exits 1 silently. Mirror the
-        # appliance baseline (slot A = version 1).
-        system.image.id = "abtest";
-        system.image.version = "1";
-        # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
-        # IMAGE_VERSION from os-release to assess the booted version — a
-        # plain VM has none and sysupdate exits 1 silently. Mirror the
-        # appliance baseline (slot A = version 1).
-        system.image.id = "abtest";
-        system.image.version = "1";
         imageId = "abtest";
         source = "http://deployer/ab-stage/abtest-remote";
         bootTarget = "/var/lib/nixtache/ab-slots/";
@@ -231,6 +229,9 @@ pkgs.testers.runNixOSTest {
     )
 
     # ── C4 (positive control, FIRST): full action run, correctly signed ─────
+    # The action's trigger chains update → reboot-assessment; with v2 (2)
+    # newer than the booted baseline (1) the target REALLY reboots — see
+    # the reboot handling after the .efi wait below.
     deployer.succeed(
       "cd /tmp && . /etc/deploy-env.sh && "
       "GITHUB_REF=refs/heads/main NIXTACHE_AB_VERSION=2 bash /etc/deploy-action.sh",
@@ -238,7 +239,20 @@ pkgs.testers.runNixOSTest {
     )
     deployer.succeed(f"test -f {stage}/abtest_2.nix-store.raw")
     deployer.succeed(f"test -f {stage}/SHA256SUMS.gpg")
-    target.wait_until_succeeds(f"test -f {slots}/abtest_2+*.efi", timeout=300)
+    try:
+        target.wait_until_succeeds(f"test -f {slots}/abtest_2+*.efi", timeout=300)
+    except BrokenPipeError:
+        # The reboot leg follows the .efi within seconds; a poll iteration
+        # can straddle QEMU's exit — the exit itself is expected here.
+        pass
+    # The reboot leg restarts the node; declared test nodes run QEMU with
+    # -no-reboot, so the reboot manifests as QEMU exiting — wait for the
+    # exit and boot the node again (same disks: the fresh boot still runs
+    # the v1 baseline system; the slots live on /dev/vdb, untouched).
+    target.wait_for_shutdown()
+    target.start()
+    target.wait_for_unit("multi-user.target")
+    target.succeed(f"test -f {slots}/abtest_2+*.efi")
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
     target.succeed("unsquashfs -l /dev/vdb2 | grep hello")
     print("C4 OK: correctly-signed v2 accepted — nix-store_2 written, abtest_2+*.efi installed")
@@ -259,15 +273,29 @@ pkgs.testers.runNixOSTest {
         )
 
     def attempt_v3(case):
-        """Trigger sysupdate on the target against the (mutated) v3 staging and
-        assert the update is REJECTED: no committed v3 anywhere, the good v2
-        slot intact. Records the unit's exit status (spec allows either)."""
-        status, out = target.execute("systemctl start systemd-sysupdate.service", timeout=300)
+        """Trigger sysupdate on the target against the (mutated) v3 staging
+        and assert the update is REJECTED: nothing bootable appears, and the
+        good v2 slot survives — including through the vacuum that heals a
+        mid-install partial. Records the unit's exit status (manifest-stage
+        rejections exit 0, mid-install ones fail the unit)."""
+        # --wait: the upstream unit is Type=simple, so a plain start returns
+        # at fork — without --wait the journal grep below would race the
+        # still-running update.
+        status, out = target.execute("systemctl start --wait systemd-sysupdate.service", timeout=300)
         print(f"{case}: systemd-sysupdate exit status = {status} ({'failed unit' if status != 0 else 'success-but-rejected'})")
-        # Key assertion: no v3 committed — no UKI, no GPT label.
+        # Key assertion: no bootable v3 — the .efi transfer never completes
+        # for a rejected update set.
         target.fail(f"test -f {slots}/abtest_3+*.efi")
-        target.fail("sgdisk -p /dev/vdb | grep nix-store_3")
-        # The good version survives the rejected update.
+        # A mid-install rejection (C2) leaves a PARTIAL nix-store_3 instance
+        # — never booted; vacuum it and prove it goes away (the documented
+        # recovery). Manifest-stage rejections (C1/C3) leave no v3 at all.
+        has_partial = target.succeed(
+          "sgdisk -p /dev/vdb | grep -c nix-store_3 || true"
+        ).strip() != "0"
+        if has_partial:
+            target.succeed("systemd-sysupdate vacuum", timeout=120)
+            target.fail("sgdisk -p /dev/vdb | grep nix-store_3")
+        # The good version survives the rejected update (and the vacuum).
         target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
         target.succeed(f"test -f {slots}/abtest_2+*.efi")
         # Journal of THIS run shows the rejection (tail = latest attempt).
