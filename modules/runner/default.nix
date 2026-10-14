@@ -122,16 +122,49 @@ in
     };
 
     # --- Container resources -----------------------------------------------
+    # Defaults budget the container for a host SHARED with other services,
+    # not a dedicated CI host: 16G RAM, throttling (reclaim pressure, which
+    # pushes cold pages to swap) starts 2G below the hard limit. On a
+    # dedicated host, raise both explicitly. On a host without swap, lower
+    # `nixSettings.cores` for chromium-class builds — see
+    # doc/technical_details/resources.md.
     memoryMax = mkOption {
       type = types.str;
-      default = "60G";
-      description = "`MemoryMax` for the `container@<name>` unit.";
+      default = "16G";
+      description = "`MemoryMax` (hard memory limit) for the `container@<name>` unit. Default budgets the container for a host shared with other services; on a dedicated host, set it explicitly.";
     };
 
     memoryHigh = mkOption {
       type = types.str;
-      default = "58G";
-      description = "`MemoryHigh` for the `container@<name>` unit.";
+      default = "14G";
+      description = "`MemoryHigh` (throttling threshold) for the `container@<name>` unit. Reclaim pressure kicks in here, before `memoryMax` triggers a kill; keep it ~2G below `memoryMax`.";
+    };
+
+    # Unset by default: no module-imposed ceiling, so host swap (e.g. zram)
+    # fully absorbs build memory peaks — that is what lets chromium-class
+    # link jobs survive a tight RAM budget. Set it to protect co-hosted
+    # services' swap, at the cost of build survival.
+    memorySwapMax = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "8G";
+      description = "`MemorySwapMax` (swap ceiling) for the `container@<name>` unit. `null` (default) sets no module-level ceiling — host swap stays fully available to builds.";
+    };
+
+    # Weights, not quotas: they only bite under contention, so a build uses
+    # all idle cores/IO but co-hosted services keep their share when active.
+    cpuWeight = mkOption {
+      type = types.nullOr (types.ints.between 1 10000);
+      default = null;
+      example = 200;
+      description = "`CPUWeight` (1-10000) for the `container@<name>` unit — CPU share under contention. `null` (default) keeps the systemd default (100).";
+    };
+
+    ioWeight = mkOption {
+      type = types.nullOr (types.ints.between 1 10000);
+      default = null;
+      example = 50;
+      description = "`IOWeight` (1-10000) for the `container@<name>` unit — IO share under contention. `null` (default) keeps the systemd default (100). Advisory: depends on the host IO controller being enabled.";
     };
 
     timeoutStartSec = mkOption {
@@ -221,11 +254,16 @@ in
         };
     };
 
-    # Container resource limits (host side).
+    # Container resource limits (host side). Swap/CPU/IO knobs are omitted
+    # (not set to systemd defaults) when null, so host-wide systemd policy
+    # (DefaultCPUWeight, admin drop-ins) is not shadowed by the module.
     systemd.services."container@${cfg.containerName}".serviceConfig = {
       TimeoutStartSec = lib.mkForce cfg.timeoutStartSec;
       MemoryMax = cfg.memoryMax;
       MemoryHigh = cfg.memoryHigh;
-    };
+    }
+    // lib.optionalAttrs (cfg.memorySwapMax != null) { MemorySwapMax = cfg.memorySwapMax; }
+    // lib.optionalAttrs (cfg.cpuWeight != null) { CPUWeight = cfg.cpuWeight; }
+    // lib.optionalAttrs (cfg.ioWeight != null) { IOWeight = cfg.ioWeight; };
   };
 }

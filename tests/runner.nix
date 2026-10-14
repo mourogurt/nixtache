@@ -614,6 +614,37 @@ self.nixosModules.runner
     };
   };
 
+  # --- scenario: container resource limits (host-side serviceConfig) -------
+  # Default budget targets a host shared with other services (16G/14G); the
+  # swap/CPU/IO knobs stay ABSENT from the unit when null (host systemd policy
+  # applies) and pass through verbatim when set. Asserts on the host-side
+  # `container@runner` unit, not the container's inner config.
+  resOf = host: host.config.systemd.services."container@runner".serviceConfig;
+  hostResCustom = mkHost "/" {
+    services.nixtache.runner = {
+      memoryMax = "32G";
+      memoryHigh = "30G";
+      memorySwapMax = "8G";
+      cpuWeight = 200;
+      ioWeight = 50;
+    };
+  };
+  scenarioResources = {
+    name = "container resources: shared-host defaults; swap/cpu/io knobs omitted when null, pass through when set";
+    checks = {
+      defaultMax = (resOf hostRoot).MemoryMax == "16G";
+      defaultHigh = (resOf hostRoot).MemoryHigh == "14G";
+      noSwapDefault = !(has (resOf hostRoot) "MemorySwapMax");
+      noCpuWeightDefault = !(has (resOf hostRoot) "CPUWeight");
+      noIoWeightDefault = !(has (resOf hostRoot) "IOWeight");
+      customMax = (resOf hostResCustom).MemoryMax == "32G";
+      customHigh = (resOf hostResCustom).MemoryHigh == "30G";
+      customSwap = (resOf hostResCustom).MemorySwapMax == "8G";
+      customCpuWeight = (resOf hostResCustom).CPUWeight == 200;
+      customIoWeight = (resOf hostResCustom).IOWeight == 50;
+    };
+  };
+
   scenarios = [
     scenarioSrv
     scenarioRoot
@@ -638,6 +669,7 @@ self.nixosModules.runner
     scenarioAbBasenameAssert
     scenarioApplianceClone
     scenarioGitSshHost
+    scenarioResources
   ];
 
   failed = builtins.concatMap

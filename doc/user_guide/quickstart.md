@@ -65,16 +65,39 @@ etc. — the module is backend-agnostic by design.
 
 - The registration token is **per-instance** (`instances.<name>.tokenFile`),
   not global; each instance needs its own token file.
-- Resource limits (`memoryMax`, `memoryHigh`, `timeoutStartSec`), runner
-  package, host packages, timeouts, log level, sandboxing, known hosts — all
-  options with sensible defaults. The full always-up-to-date reference is
-  generated from the module source: `nix build .#optionsMarkdown` inside this
-  repo, or the `nixtache-options` CI artifact.
+- Resource limits (`memoryMax`, `memoryHigh`, `memorySwapMax`, `cpuWeight`,
+  `ioWeight`, `timeoutStartSec`), runner package, host packages, timeouts,
+  log level, sandboxing, known hosts — all options with sensible defaults.
+  The full always-up-to-date reference is generated from the module source:
+  `nix build .#optionsMarkdown` inside this repo, or the `nixtache-options`
+  CI artifact.
 - Multi-instance: one `gitea-runner-<name>` service per `instances.<name>`
   attribute (`instances.test = { labels = [ "nixos:test" ]; tokenFile = …; }`).
 - How these values reach CI jobs (`runner.envs`, `LoadCredential`) is
   documented in
   [`doc/technical_details/module-ci-wiring.md`](../technical_details/module-ci-wiring.md).
+
+### Sizing the container
+
+The defaults (`memoryMax = "16G"`, `memoryHigh = "14G"`) budget the container
+for a host **shared** with other services. On a dedicated CI host, raise both
+explicitly (keep `memoryHigh` ~2G below `memoryMax` — throttling starts
+there, before the hard limit kills).
+
+Large builds survive a tight RAM budget through **host swap**: with zram
+enabled, chromium-class link peaks compress into swap instead of dying (the
+module sets no swap ceiling by default — `memorySwapMax` exists to protect
+co-hosted services' swap, not to enable survival). On a host **without**
+swap, lower `nixSettings.cores` or raise `memoryMax` for chromium-class
+builds. `cpuWeight`/`ioWeight` shape contention with co-hosted services
+without capping the build on an idle host.
+
+> **Upgrade note.** The defaults changed from `"60G"`/`"58G"` to
+> `"16G"`/`"14G"`. If you relied on the old implicit budget, pin the previous
+> values explicitly.
+
+Internals (cgroup paths, kill diagnostics): see
+[`doc/technical_details/resources.md`](../technical_details/resources.md).
 
 > **Role model (vendor-agnostic).** nixtache does not fix machine roles. The
 > **infra machine** runs the Forgejo Actions runner
