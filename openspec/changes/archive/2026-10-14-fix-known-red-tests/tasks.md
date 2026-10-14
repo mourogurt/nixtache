@@ -58,7 +58,7 @@
 
 ## 4. CI + docs
 
-- [ ] 4.1 Push-driven verification: `ci.yml` run on this branch's merge to
+- [x] 4.1 Push-driven verification: `ci.yml` run on this branch's merge to
   `main` is green end-to-end — in particular the "Run module tests" step
   prints the drift suite's report (not `Is a directory`) and every
   checks-suite report ends without a failing exit.
