@@ -36,6 +36,10 @@ jobs:
         id: guard
         shell: bash
         run: |
+          # The "Deploy artifacts" upload below is `if: always()` — the
+          # directory must exist even when every work step is skipped or the
+          # first step fails, so create it here unconditionally.
+          mkdir -p artifacts
           if [ -z "${NIXTACHE_UPDATE_GIT_USER:-}" ]; then
             echo "::warning::update-flake disabled: services.nixtache.runner.updateSshCreds is null (no push credential). Set updateSshCreds to enable."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -80,10 +84,18 @@ jobs:
           git config --local user.signingkey "${{ steps.ssh.outputs.key-path }}"
           git config --local gpg.format ssh
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: ./.nixtache/.forgejo/actions/sandbox-probe
+
       - name: Update Flakes Inputs
         if: steps.guard.outputs.enabled == 'true'
         run: |
-          nix flake update --commit-lock-file
+          # pipefail: a failed nix flake update must still fail the step even
+          # though tee swallows the pipeline's stdout; artifacts/ is created
+          # by the guard step above.
+          set -o pipefail
+          nix flake update --commit-lock-file 2>&1 | tee artifacts/flake-update.log
 
       - name: Validate Nix Configuration
         if: steps.guard.outputs.enabled == 'true'
