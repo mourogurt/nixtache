@@ -49,7 +49,7 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
   `nixtache-options` CI artifact.
 - `checks.<system>` — pure-eval test suites (`runner`, `deploy-target`,
   `ab-image`, `mkDocs`, `ab-existing`, `ab-contract`, `auto-update`,
-  `ab-deploy-drift`); built by every `nix flake check`.
+  `ab-deploy-drift`, `ci-workflow-drift`); built by every `nix flake check`.
 - `vmTests.x86_64-linux` — KVM-only VM suites (27 of them); **not** run by
   `nix flake check` — they run in CI via
   [`vmtests.yml`](.forgejo/workflows/vmtests.yml) on a KVM-capable runner.

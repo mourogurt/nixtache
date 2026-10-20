@@ -4,7 +4,10 @@ Why the runner's Nix sandbox is off by default, what `enableSandbox = true`
 actually does, and how CI self-heals either way. Source of truth:
 `modules/runner/sandbox.nix` and
 [`.forgejo/actions/sandbox-probe`](../../.forgejo/actions/sandbox-probe/action.yml);
-requirements: [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
+requirements: [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md)
+(module side) and
+[`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md)
+(CI-side probe contract).
 
 ## The problem
 
@@ -63,9 +66,16 @@ back) to the job env. The probe derivation's build command must create
 produce output path" on every runner, making the probe report a false
 negative. Every build action (`flake-validation`,
 `rebuild-configurations`, `rebuild-devshells`, `generate-docs`,
-`deploy-target`) and nixtache's own `ci.yml` append `--no-sandbox` when
-`SANDBOX_OK` ≠ 1 — a runner whose sandbox is broken (or not yet rebuilt with
-the fix) self-heals to `--no-sandbox` instead of failing.
+`deploy-target`) reads `SANDBOX_OK` and appends `--no-sandbox` when it is
+≠ 1, and so do the inline build steps of nixtache's own CI (`ci.yml`'s
+module-test loop, `vmtests.yml`'s suite build) — a runner whose sandbox is
+broken (or not yet rebuilt with the fix) self-heals to `--no-sandbox`
+instead of failing. Accordingly, every workflow nixtache ships — the
+reusable `nix-check.yml`, `update-flake.yml`, `deploy.yml`, `docs.yml` and
+the self-CI `ci.yml`, `vmtests.yml` — runs `sandbox-probe` before its first
+build step. The ordering (and the vmtests flag wiring) is pinned by the
+`checks.*.ci-workflow-drift` suite, which parses the real workflow YAMLs at
+build time.
 
 The module still exports a static `HAS_SANDBOX_CAP` env (mirrors
 `enableSandbox` 1:1), but nothing consumes it — it is legacy; do not wire new

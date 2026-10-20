@@ -30,14 +30,14 @@ jobs:
       - name: Checkout nixtache
         uses: actions/checkout@v4
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        uses: ./.forgejo/actions/sandbox-probe
+
       - name: Verify flake metadata
         run: nix flake metadata
 
       - name: Validate flake (evaluates modules + builds checks)
         uses: ./.forgejo/actions/flake-validation
-
-      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
-        uses: ./.forgejo/actions/sandbox-probe
 
       - name: Run module tests
         run: |
@@ -49,7 +49,7 @@ jobs:
             echo "SANDBOX_OK!=1 → --no-sandbox"
             SANDBOX_FLAG="--no-sandbox"
           fi
-          for suite in runner deploy-target ab-image mkDocs ab-existing ab-contract auto-update ab-deploy-drift; do
+          for suite in runner deploy-target ab-image mkDocs ab-existing ab-contract auto-update ab-deploy-drift ci-workflow-drift; do
             echo "----- checks.x86_64-linux.${suite}: test report -----"
             out=$(nix build --no-link --print-out-paths --print-build-logs $SANDBOX_FLAG ".#checks.x86_64-linux.${suite}")
             cat "$out"

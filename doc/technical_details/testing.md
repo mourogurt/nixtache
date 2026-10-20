@@ -33,6 +33,7 @@ scope here and belongs to NixOS VM tests if ever needed.
 | `tests/ab-contract.nix` | wiring + assertion contracts for ab-provision / overlay-nix / runner store modes | `checks.<system>.ab-contract` |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
 | `tests/ab-deploy-drift.nix` | the deploy action's protocol-drift skip contract (extracted action.yml text vs a fake old SSH gate) | `checks.<system>.ab-deploy-drift` |
+| `tests/ci-workflow-drift.nix` | the workflows' sandbox-probe ordering contract (parses the real `.forgejo/workflows/*.yml`: probe before every build step; vmtests applies the `SANDBOX_OK` flag) | `checks.<system>.ci-workflow-drift` |
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` 2×2 matrix (flag × all-documented) + prefix-filtering | `checks.<system>.mkDocs` |
 
 (`tests/ab-fixture.nix` and `tests/ab-anywhere-install.nix` are shared
@@ -216,8 +217,8 @@ containers-on-bare-metal to skip nesting entirely.
 In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then an
 explicit `nix build` loop prints each `checks.x86_64-linux.<suite>` report
 (runner, deploy-target, ab-image, mkDocs, ab-existing, ab-contract,
-auto-update, ab-deploy-drift) to the job log, and the `nixtache-options` docs artifact is
-generated.
+auto-update, ab-deploy-drift, ci-workflow-drift) to the job log, and the
+`nixtache-options` docs artifact is generated.
 
 ---
 

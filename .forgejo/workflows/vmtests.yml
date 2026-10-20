@@ -77,6 +77,12 @@ jobs:
       - name: Checkout nixtache
         uses: actions/checkout@v4
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        # Once per matrix job, not once per workflow: sandbox health is a
+        # property of the specific KVM runner the job landed on (the `kvm`
+        # label may map to several machines).
+        uses: ./.forgejo/actions/sandbox-probe
+
       - name: Run VM suite ${{ matrix.suite }}
         # dispatch(full) and the Sunday schedule run every matrix entry;
         # dispatch(smoke) and the nightly schedule run only smoke-tagged
@@ -88,8 +94,18 @@ jobs:
           (github.event_name == 'schedule' && github.event.schedule == '15 3 * * *' && matrix.smoke)
         run: |
           set -euo pipefail
+          # SANDBOX_OK is set by sandbox-probe (1 = sandbox works, 0/unset =
+          # broken). Without the flag, a KVM runner whose nix sandbox is
+          # broken fails the suite build on missing namespaces instead of
+          # self-healing to --no-sandbox.
+          if [ "${SANDBOX_OK:-0}" = "1" ]; then
+            SANDBOX_FLAG=""
+          else
+            echo "SANDBOX_OK!=1 → --no-sandbox"
+            SANDBOX_FLAG="--no-sandbox"
+          fi
           echo "----- vmTests.x86_64-linux.${{ matrix.suite }} -----"
-          out=$(nix build -L --no-link --print-out-paths ".#vmTests.x86_64-linux.${{ matrix.suite }}")
+          out=$(nix build -L --no-link --print-out-paths $SANDBOX_FLAG ".#vmTests.x86_64-linux.${{ matrix.suite }}")
           echo "$out"
 
       - name: Upload suite logs

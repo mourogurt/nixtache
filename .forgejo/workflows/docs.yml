@@ -52,6 +52,11 @@ jobs:
           path: .nixtache
           ref: main
 
+      - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
+        # generate-docs reads SANDBOX_OK; without the probe it always falls
+        # back to --no-sandbox, losing build isolation on healthy runners.
+        uses: ./.nixtache/.forgejo/actions/sandbox-probe
+
       - name: Generate documentation
         uses: ./.nixtache/.forgejo/actions/generate-docs
         with:

@@ -75,6 +75,11 @@
         # (extracted action.yml run text vs a fake pre-change SSH gate) —
         # fast, no KVM.
         ab-deploy-drift = import ./tests/ab-deploy-drift.nix { inherit nixpkgs self system; };
+        # ci-workflow-drift: sandbox-probe ordering contract over the real
+        # workflow YAMLs (every building job probes the sandbox before its
+        # first build step; vmtests.yml applies the SANDBOX_OK flag) — fast,
+        # no KVM.
+        ci-workflow-drift = import ./tests/ci-workflow-drift.nix { inherit nixpkgs system; };
       });
 
       # ── KVM-only VM suites (runNixOSTest / QEMU). NOT part of `checks`:
