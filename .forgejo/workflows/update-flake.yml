@@ -28,24 +28,44 @@ jobs:
           path: .nixtache
           ref: main
 
-      - name: Derive git host
-        # SSH push target = NIXTACHE_GIT_SSH_HOST (the runner module's
+      - name: Derive git hosts
+        # Push host = NIXTACHE_GIT_SSH_HOST (the runner module's
         # gitHost.hostNames[0] — the canonical SSH endpoint). Fallback for
         # runners not yet rebuilt with that env: the bare GITHUB_SERVER_URL
         # hostname. GITHUB_SERVER_URL itself is the HTTP endpoint — its port
         # is the HTTP port (e.g. localhost:7111 behind nginx), NOT an SSH
         # port, so it must be stripped; ssh (default 22, or a Port from the
-        # ssh-setup config) handles transport. Runs unconditionally: both
-        # ssh-setup and the guard probe need the host.
+        # ssh-setup config) handles transport. The full host list adds every
+        # ssh:///git+ssh:// host in flake.lock: nix contacts input URLs by
+        # whatever hostname the consumer locked them under (possibly an
+        # alias of the push host), and keys are offered only for hosts with
+        # a Host block — one missing alias means Permission denied at
+        # `nix flake update`. Runs unconditionally: ssh-setup, the guard
+        # probe and the push all need these outputs.
         id: githost
         shell: bash
         run: |
-          host="${NIXTACHE_GIT_SSH_HOST:-}"
-          if [ -z "$host" ]; then
-            host="${GITHUB_SERVER_URL#https://}"; host="${host#http://}"
-            host="${host%%:*}"
+          push_host="${NIXTACHE_GIT_SSH_HOST:-}"
+          if [ -z "$push_host" ]; then
+            push_host="${GITHUB_SERVER_URL#https://}"; push_host="${push_host#http://}"
+            push_host="${push_host%%:*}"
           fi
-          echo "host=$host" >> "$GITHUB_OUTPUT"
+          hosts="$push_host"
+          while IFS= read -r url; do
+            case "$url" in
+              git+ssh://*) url="${url#git+ssh://}" ;;
+              ssh://*)     url="${url#ssh://}" ;;
+              *)           continue ;;
+            esac
+            host="${url%%/*}"
+            host="${host#*@}"
+            case " $hosts " in
+              *" $host "*) ;;
+              *) hosts="$hosts $host" ;;
+            esac
+          done < <(jq -r '.nodes[].locked.url // empty' flake.lock)
+          echo "push-host=$push_host" >> "$GITHUB_OUTPUT"
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
 
       - name: Setup SSH
         # Unconditional: the action warns and skips bundles the runner does
@@ -55,7 +75,7 @@ jobs:
         id: ssh
         uses: ./.nixtache/.forgejo/actions/ssh-setup
         with:
-          git-host: ${{ steps.githost.outputs.host }}
+          git-host: ${{ steps.githost.outputs.hosts }}
           creds: flake update
 
       - name: Guard — update-flake enabled?
@@ -79,7 +99,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${{ steps.githost.outputs.host }}/${GITHUB_REPOSITORY}"
+          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${{ steps.githost.outputs.push-host }}/${GITHUB_REPOSITORY}"
           if ! timeout 30 git ls-remote "$url" HEAD > /dev/null 2>&1; then
             echo "::error::update-flake: updateSshCreds is set but the update key cannot read $url (auth or repo access failed). Fix the deploy key on the git server, or set updateSshCreds = null to disable update-flake."
             exit 1
@@ -136,12 +156,12 @@ jobs:
       - name: Push Changes
         # SSH push URL from server state — no hardcoded user/host.
         # NIXTACHE_UPDATE_GIT_USER = server RUN_USER (from updateSshCreds.user);
-        # host = NIXTACHE_GIT_SSH_HOST (see the githost step); repo/ref from
-        # GitHub-compat env.
+        # push host = the FIRST derived host, i.e. NIXTACHE_GIT_SSH_HOST (see
+        # the githost step); repo/ref from GitHub-compat env.
         if: steps.guard.outputs.enabled == 'true'
         run: |
           set -euo pipefail
-          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${{ steps.githost.outputs.host }}/${GITHUB_REPOSITORY}"
+          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${{ steps.githost.outputs.push-host }}/${GITHUB_REPOSITORY}"
           echo "Setting origin to $url"
           git remote set-url origin "$url"
           echo "Pushing to ${GITHUB_REF_NAME}"

@@ -31,10 +31,45 @@ jobs:
           path: .nixtache
           ref: main
 
+      - name: Derive git hosts
+        # Push host = NIXTACHE_GIT_SSH_HOST (the runner module's
+        # gitHost.hostNames[0] — the canonical SSH endpoint). Fallback for
+        # runners not yet rebuilt with that env: the bare GITHUB_SERVER_URL
+        # hostname (HTTP endpoint — its port is the HTTP port, not SSH, so
+        # it must be stripped). The full host list adds every
+        # ssh:///git+ssh:// host in flake.lock: nix fetches input URLs by
+        # whatever hostname the consumer locked them under (possibly an
+        # alias of the push host), and keys are offered only for hosts with
+        # a Host block — one missing alias means Permission denied at input
+        # fetch.
+        id: githost
+        shell: bash
+        run: |
+          push_host="${NIXTACHE_GIT_SSH_HOST:-}"
+          if [ -z "$push_host" ]; then
+            push_host="${GITHUB_SERVER_URL#https://}"; push_host="${push_host#http://}"
+            push_host="${push_host%%:*}"
+          fi
+          hosts="$push_host"
+          while IFS= read -r url; do
+            case "$url" in
+              git+ssh://*) url="${url#git+ssh://}" ;;
+              ssh://*)     url="${url#ssh://}" ;;
+              *)           continue ;;
+            esac
+            host="${url%%/*}"
+            host="${host#*@}"
+            case " $hosts " in
+              *" $host "*) ;;
+              *) hosts="$hosts $host" ;;
+            esac
+          done < <(jq -r '.nodes[].locked.url // empty' flake.lock)
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
+
       - name: Setup SSH
         uses: ./.nixtache/.forgejo/actions/ssh-setup
         with:
-          git-host: code.zinzaguras.ru
+          git-host: ${{ steps.githost.outputs.hosts }}
           creds: flake
 
       - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)

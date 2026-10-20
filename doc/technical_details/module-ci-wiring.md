@@ -12,7 +12,8 @@ not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
 | `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`, `nix flake update`) |
 | `updateSshCreds.user` | `NIXTACHE_UPDATE_GIT_USER` + `update_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: update) + `update-flake.yml` guard probe, push URL + commit signing |
 | `bot.name` / `bot.email` | `NIXTACHE_BOT_NAME` / `NIXTACHE_BOT_EMAIL` | `update-flake.yml` commit author |
-| `gitHost.hostNames[0]` | `NIXTACHE_GIT_SSH_HOST` | `update-flake.yml` SSH push host (canonical SSH endpoint; `GITHUB_SERVER_URL` is HTTP-only — its port is the HTTP port, not SSH) |
+| `gitHost.hostNames[0]` | `NIXTACHE_GIT_SSH_HOST` | push host for `update-flake.yml` guard/push and first entry of the derived `ssh-setup` host list (mechanics: [workflow-mechanics.md](workflow-mechanics.md)); `GITHUB_SERVER_URL` is HTTP-only — its port is the HTTP port, not SSH |
+| `gitHost.hostNames` (whole list) | container known_hosts | must cover **every** hostname nix contacts over SSH: workflows derive the `ssh-setup` host list from `NIXTACHE_GIT_SSH_HOST` plus the `ssh://`/`git+ssh://` hosts in the caller's `flake.lock`, and a derived host missing from `hostNames` fails host-key verification |
 | `deploy.targets` | `NIXTACHE_DEPLOY_TARGETS` (JSON, secret paths stripped to `hasKey` bools) + `deploy_ssh_<name>[.pub]` LoadCredential | `deploy-target` action → pairs configs and targets by attribute name |
 | `enableSandbox` | `HAS_SANDBOX_CAP` (legacy, nothing consumes it — see [sandboxing.md](sandboxing.md)) | — (superseded by the `SANDBOX_OK` runtime probe) |
 

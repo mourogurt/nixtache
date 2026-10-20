@@ -3,9 +3,8 @@ description: "Configure the bot SSH key (from systemd LoadCredential) for git pu
 
 inputs:
   git-host:
-    description: "Git host to configure in the SSH config, optionally host:port (e.g. code.zinzaguras.ru or localhost:7111)"
-    required: false
-    default: "code.zinzaguras.ru"
+    description: "Space-separated git host list to configure in the SSH config — one Host block per host, each entry optionally host:port (e.g. 'git.example.org git.example.org:2222 localhost:7111')"
+    required: true
   git-user:
     description: "Fallback SSH user (server RUN_USER) if the runner module did not export one for this purpose."
     required: false
@@ -89,24 +88,36 @@ runs:
           *)            git_user="${{ inputs.git-user }}" ;;
         esac
 
-        # git-host may carry a port (host:port, e.g. a Forgejo test instance
-        # at localhost:7111); split it into HostName + Port so the `Host`
-        # pattern still matches the bare hostname git passes to ssh.
-        git_host="${{ inputs.git-host }}"
-        git_port=""
-        case "$git_host" in
-          *:*) git_port="${git_host##*:}"; git_host="${git_host%:*}" ;;
-        esac
+        # git-host is a space-separated host list: one git server is often
+        # reached under several hostnames (push host alias + flake.lock input
+        # hosts), and ssh offers the keys below only for hosts with a Host
+        # block, so every listed host gets its own block. Each entry may
+        # carry a port (host:port, e.g. a Forgejo test instance at
+        # localhost:7111); the port is split into that host's own Port line
+        # so the `Host` pattern still matches the bare hostname git passes
+        # to ssh. Every block repeats User and all IdentityFile lines.
+        : > "$cfg"
+        for host_token in ${{ inputs.git-host }}; do
+          git_host="$host_token"
+          git_port=""
+          case "$git_host" in
+            *:*) git_port="${git_host##*:}"; git_host="${git_host%:*}" ;;
+          esac
+          echo "Host $git_host" >> "$cfg"
+          echo "  HostName $git_host" >> "$cfg"
+          [ -n "$git_port" ] && echo "  Port $git_port" >> "$cfg"
+          echo "  User $git_user" >> "$cfg"
+          for creds in $available; do
+            dest="id_key"
+            if [ "$requested" != "$creds" ]; then dest="id_key_$creds"; fi
+            echo "  IdentityFile $ssh_dir/$dest" >> "$cfg"
+          done
+        done
 
-        echo "Host $git_host" > "$cfg"
-        echo "  HostName $git_host" >> "$cfg"
-        [ -n "$git_port" ] && echo "  Port $git_port" >> "$cfg"
-        echo "  User $git_user" >> "$cfg"
         key_path=""
         for creds in $available; do
           dest="id_key"
           if [ "$requested" != "$creds" ]; then dest="id_key_$creds"; fi
-          echo "  IdentityFile $ssh_dir/$dest" >> "$cfg"
           # key-path feeds `git config user.signingkey`: the update (signing)
           # bundle when present, else the first available bundle.
           case " $available " in
