@@ -70,7 +70,12 @@ in
           m = builtins.match "[a-zA-Z]+://[^/]*:([0-9]+).*" cfg.forgejoUrl;
           isHttps = builtins.match "https://.*" cfg.forgejoUrl != null;
         in
-        if m != null then lib.toInt (builtins.head m) else if isHttps then 443 else 80;
+        if m != null then
+          lib.toInt (builtins.head m)
+        else if isHttps then
+          443
+        else
+          80;
       defaultText = lib.literalMD "parsed from `forgejoUrl` (explicit port suffix; 443 for `https://`, else 80)";
     };
 
@@ -218,7 +223,14 @@ in
       # Sub-modules (store/cache/ssh/sandbox/known-hosts/instances) inject
       # their own keys into this same attrset via mkMerge.
       config =
-        { config, lib, pkgs, system_version, system_features, ... }:
+        {
+          config,
+          lib,
+          pkgs,
+          system_version,
+          system_features,
+          ...
+        }:
         {
           nix = {
             gc = {
@@ -236,6 +248,7 @@ in
                 experimental-features = [
                   "nix-command"
                   "flakes"
+                  "ca-derivations"
                 ];
                 trusted-users = [
                   "root"

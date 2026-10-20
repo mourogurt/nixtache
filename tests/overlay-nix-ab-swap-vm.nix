@@ -1,6 +1,7 @@
 # overlay-nix-ab-swap-vm — O9 (TEST-SPECS §5.10): overlay-nix across an A/B
-# slot swap. The HARDEST case in the overlay series: a faithful 2-boot run
-# against REAL appliance images.
+# slot swap, on the shipped world A (the image carries the lower store DB —
+# the lower-store-db change). A faithful 2-boot run against REAL appliance
+# images.
 #
 #   1. Boot the v1 A/B appliance (real repart image: ESP + nix-store_1 slot +
 #      _empty slot + shared ext4 root) in QEMU via a driver-created machine
@@ -8,29 +9,32 @@
 #      backdoor root shell over virtconsole from test-instrumentation.nix).
 #      overlay-nix is enabled: /nix/store is the ro squashFS of slot A with a
 #      writable OverlayFS upper at /var/lib/nix-overlay/upper on the SHARED
-#      root FS (survives the slot swap by design — only /nix/store swaps).
-#   2. `nix-store --realize` vim from the deployer's nix-serve-ng cache →
-#      lands in the upper layer; vim runs.
+#      root FS.
+#   2. Delta pin: `nix-store --realize` of a path already valid in the lower
+#      (gptfdisk, baked into the toplevel closure and registered by the
+#      shipped DB) copies NOTHING into the upper; `nix-store --realize` of
+#      vim (absent from the lower) fetches exactly the missing paths into
+#      the upper; vim runs.
 #   3. The deployer stages the v2 sysupdate-package over HTTP (nginx);
 #      `systemctl start systemd-sysupdate.service` on the appliance writes
 #      slot B (relabelled nix-store_2) + drops abtest_2+*.efi on the ESP.
+#      The module-default lifecycle policy ("wipe") clears the upper and the
+#      store DB state before the slot write.
 #   4. `machine.reboot()` (ctrl-alt-delete via QMP; allow_reboot=True keeps
 #      QEMU's `-no-reboot` off). loader.conf has no `default` pin, so
 #      systemd-boot picks the highest-version entry → abtest_2+*.efi → v2.
 #      v1's UKI must be BLESSED first (boot-complete.target reached), else its
 #      remaining boot-counting tries would outrank the freshly installed v2.
 #   5. Assertions after the swap: /etc/image-version == 2 (v2 booted), the
-#      overlay remounts over the NEW lower, vim from the upper layer still
-#      runs (upper + its nix DB live on the shared root FS), and v2's hello
-#      (marker package baked only into v2's squashFS) is visible through the
-#      merged /nix/store.
+#      overlay remounts over the NEW lower, the upper was wiped (vim gone,
+#      its DB entry invalidated), the boot loader re-seeded the DB from v2's
+#      dump (version marker "2", v2's hello VALID through standard tooling),
+#      and the merged store is functional (vim realizes into the upper
+#      again).
 #
 # Why `nix-store --realize` instead of `nix profile install`: realize takes a
 # precomputed store path, so the guest needs no nixpkgs evaluation (RAM) and
-# no registry source baked into the image. `test -d`/`--version` assertions
-# are filesystem-level: the appliance ships no lower-store nix DB, so
-# `nix path-info` on lower paths is not meaningful here (the upper DB lives
-# on the shared root FS and only tracks upper-layer paths).
+# no registry source baked into the image.
 #
 # Needs KVM. Hermetic: vim's closure + the v2 package come from the deployer
 # node on the test LAN; no internet.
@@ -44,7 +48,13 @@ let
   vim = pkgs.vim;
   vimPath = vim.outPath;
   vimBasename = baseNameOf vimPath;
-  helloBasename = baseNameOf pkgs.hello.outPath;
+  helloPath = pkgs.hello.outPath;
+  helloBasename = baseNameOf helloPath;
+  # gptfdisk is baked into every appliance below (mkSwapAppliance's
+  # extraPackages), so it is lower-VALID from first boot — the probe for
+  # "a lower path never lands in the upper".
+  gptfdiskPath = pkgs.gptfdisk.outPath;
+  gptfdiskBasename = baseNameOf gptfdiskPath;
 
   # Throwaway binary-cache keypair: deployer signs, appliance trusts (same
   # pattern as tests/overlay-nix-install-vm.nix; self-contained on purpose).
@@ -156,6 +166,15 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("nix --version", timeout=300)
     print("OK: v1 appliance booted, overlay-nix up")
 
+    # ── Shipped lower DB: a lower-valid path is never copied into the upper ──
+    # gptfdisk sits in v1's toplevel closure → the shipped dump registered it
+    # at boot. Realizing it is a no-op for the upper layer (delta semantics);
+    # standard tooling resolves its validity out of the box.
+    appliance.succeed("nix path-info ${gptfdiskPath}")
+    appliance.succeed("nix-store --realize ${gptfdiskPath}", timeout=300)
+    appliance.fail("test -d /var/lib/nix-overlay/upper/${gptfdiskBasename}")
+    print("OK: delta pin — lower-valid gptfdisk realized without an upper copy")
+
     # ── Install a tool into the overlay upper (from the deployer cache) ──────
     appliance.succeed("nix-store --realize ${vimPath}", timeout=600)
     out = appliance.succeed("${vimPath}/bin/vim --version")
@@ -189,16 +208,28 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: booted v2, overlay remounted over the new lower")
 
-    # ── O9: tool from the upper layer survives the slot swap ─────────────────
-    out = appliance.succeed("${vimPath}/bin/vim --version")
-    assert "VIM" in out, f"O9 FAIL: upper-layer tool lost across A/B swap ({out!r})"
-    appliance.succeed("test -d /var/lib/nix-overlay/upper/${vimBasename}")
-    print("O9 OK: vim from the persistent upper still works after the swap")
+    # ── Default policy ("wipe"): the upper did NOT survive the swap ──────────
+    # The pre-update hook cleared the upper + the store DB state before the
+    # slot write; the boot loader re-seeded the DB from v2's shipped dump.
+    appliance.fail("test -d /var/lib/nix-overlay/upper/${vimBasename}")
+    out = appliance.succeed("nix path-info ${vimPath} 2>&1 || true")
+    assert "is not valid" in out, f"wipe left a DB entry for vim ({out!r})"
+    marker = appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip()
+    assert marker == "2", f"lower DB marker {marker!r}, expected '2' (v2 dump loaded)"
+    print("OK: wipe policy — upper cleared, vim's DB entry gone, DB re-seeded from v2")
 
-    # ── O9: v2 lower paths visible through the merged store ──────────────────
+    # ── v2 lower paths visible AND valid through the merged store ────────────
     appliance.succeed("test -d /nix/store/${helloBasename}")
-    print("O9 OK: v2 marker (hello) visible in the merged /nix/store")
+    appliance.succeed("nix path-info ${helloPath}")
+    print("OK: v2 marker (hello) visible and valid in the merged /nix/store")
 
-    print("PASS: overlay upper survived A/B swap; v2 lower visible")
+    # ── The merged store is functional post-swap: vim realizes again ──────────
+    appliance.succeed("nix-store --realize ${vimPath}", timeout=600)
+    out = appliance.succeed("${vimPath}/bin/vim --version")
+    assert "VIM" in out, f"vim did not run on v2 ({out!r})"
+    appliance.succeed("test -d /var/lib/nix-overlay/upper/${vimBasename}")
+    print("OK: vim re-realized into the upper on v2 — store functional after the swap")
+
+    print("PASS: default-policy swap — upper wiped, DB re-seeded, store functional")
   '';
 }

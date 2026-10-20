@@ -59,7 +59,7 @@ concatenates all definitions into the inner `eval-config` modules list).
 | Module | Owns |
 |---|---|
 | `modules/deploy-target/` | Target side of direct deploy: root `nixtache-apply.service` (activate → probe `criticalUnits` → rollback), polkit start-only rule, `nixtache-deploy` group + pointer dir, deploy-user provisioning with the SSH gate, Tier-0 health check, `ab.*` runtime (gating, partition provisioning). |
-| `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify. |
+| `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)). |
 | `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`, so appliance targets can install packages at runtime. |
 | `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, shared timer, reboot policy. |
 | `modules/secrets.nix` | Secrets provider abstraction (`vars` + extensible `providers`). |

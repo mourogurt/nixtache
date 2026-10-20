@@ -217,16 +217,17 @@ in
           [ -d "$cfgdir" ] || continue
           # Collect distinct versions from the .nix-store.raw filenames
           # (`<id>_<v>.nix-store.raw`); keep the `retain` newest, delete the rest
-          # (both the .raw and its matching .efi).
+          # (the .raw, its matching .efi and its lower store DB dump).
           versions=$(ls -1 "$cfgdir"*.nix-store.raw 2>/dev/null \
             | sed -nE 's/.*_([0-9]+)\.nix-store\.raw$/\1/p' \
             | sort -rn | awk "NR>''${retain}")
           for v in $versions; do
-            rm -f "$cfgdir"*_"$v".nix-store.raw "$cfgdir"*_"$v".efi
+            rm -f "$cfgdir"*_"$v".nix-store.raw "$cfgdir"*_"$v".efi "$cfgdir"*_"$v".lower-db
           done
           # Regenerate SHA256SUMS from the survivors. Empty subdir → no manifest.
+          # nullglob: a hand-rolled consumer prep may stage no .lower-db.
           if ls "$cfgdir"*.nix-store.raw >/dev/null 2>&1; then
-            ( cd "$cfgdir" && sha256sum *.raw *.efi > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
+            ( cd "$cfgdir" && shopt -s nullglob && sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
             # Re-sign so targets with Transfer.Verify=yes don't reject a stale .gpg.
             # The signing key is a host-path (sops secret) — accessible from the host.
             ${optionalString (cfg.signingKeyFile != null) ''

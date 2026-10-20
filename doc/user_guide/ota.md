@@ -19,11 +19,11 @@ deploy-map entry.
              CI (runner host)                         target appliance
    ┌───────────────────────────────┐        ┌──────────────────────────────┐
    │ nix build sysupdate-package   │        │  ESP:  abtest_1.efi (blessed)│
-   │  = nix-store.raw + UKI + sums │ stage  │        abtest_2.efi (new)    │
-   │ gpg --detach-sign SHA256SUMS ─┼───────►│  slot A: nix-store_1 (v1)    │
-   │ (HTTPS or local dir)          │        │  slot B: nix-store_2 (v2) ←─┼── systemd-sysupdate
-   └───────────────────────────────┘        │  root:   persistent /etc,/var│
-                                            └──────────────────────────────┘
+   │  = nix-store.raw + UKI +      │ stage  │        abtest_2.efi (new)    │
+   │    lower-db dump + sums       │───────►│  slot A: nix-store_1 (v1)    │
+   │ gpg --detach-sign SHA256SUMS  │        │  slot B: nix-store_2 (v2) ←─┼── systemd-sysupdate
+   │ (HTTPS or local dir)          │        │  root:   persistent /etc,/var│
+   └───────────────────────────────┘        └──────────────────────────────┘
    reboot → systemd-boot picks the highest version → boot counting blesses
    the boot on boot-complete.target, or rolls back after `ukiTries` fails
 ```
@@ -50,6 +50,34 @@ deploy-map entry.
   filenames, the signed manifest and the target's slot label. Re-deploying
   the same version is a no-op on the target.
 
+## The shipped lower store database
+
+Every image carries its slot closure's *store DB dump* — the validity
+records (path, narHash, narSize, references per store path) that make the
+read-only lower store a first-class readable nix store. A boot-time loader
+(`nixtache-lower-store-db-load.service`) seeds `/nix/var/nix/db` from it:
+
+| moment | what happens |
+|---|---|
+| image build | the dump is the closure's registered validity records — content-true because the appliance evaluation is content-addressed ([`lower-store-db.md`](../technical_details/lower-store-db.md)) |
+| update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` (old slot's dump vacuumed with its UKI) |
+| first boot | the DB is missing → the dump loads, the image version is recorded in a marker |
+| slot swap | the new slot's records merge in **additively**; stale old-slot records are left for `nix-store --verify` to report and the overlay reconcile pass to heal |
+| after `upperOnUpdate = "wipe"` | the wiped DB re-seeds from the running slot's dump at the next boot |
+
+The image also ships the `nix` CLI — the loader runs on a nix-less
+appliance. This is what makes the runner container work on appliance hosts
+(both store modes) and runtime installs delta-shaped
+([`overlay-nix.md`](overlay-nix.md)); dump/loader internals live in
+[`doc/technical_details/lower-store-db.md`](../technical_details/lower-store-db.md).
+
+**Content-addressing requirement**: the appliance target's nixpkgs
+evaluation MUST set `nixpkgs.config.contentAddressedByDefault = true` (the
+module asserts it with an actionable error), and every machine that
+evaluates/builds the image needs the `ca-derivations` experimental feature
+in its SYSTEM nix.conf — see the daemon quirk in
+[`lower-store-db.md`](../technical_details/lower-store-db.md).
+
 ## First deploy — three routes
 
 ### 1. Fresh disk → nixos-anywhere (declarative layout)
@@ -73,9 +101,11 @@ A machine that already runs (live-deployed or hand-installed) gains A/B by
 enabling `deploy-target.ab.partitions` with `autoInit` — the provision
 service lays `nix-store_1` + `_empty` GPT slots on free space at boot
 (idempotent; refuses safely when free space < 2 × slotSize or when slots
-are missing and `autoInit = false`). See
-[`ab-ota-migrate-vm`](../technical_details/testing.md) for the covered
-migration contract.
+are missing and `autoInit = false`). Provisioning creates ONLY the two
+nix-store slots — the existing root and ESP stay as they are. The covered
+migration contract: [`ab-ota-migrate-vm`](../technical_details/testing.md)
+(live-side switch) and `ab-ota-migrate-boot-vm` (first OTA boot on the
+migrated disk).
 
 ```nix
 services.nixtache.deploy-target.ab.partitions = {
@@ -93,6 +123,58 @@ services.nixtache.deploy-target.ab.partitions = {
 `onSizeMismatch` governs existing slots of the wrong size: `"error"` stops
 updates (sysupdate masked) until you fix `slotSize` and unmask;
 `"wipe"` recreates both slots.
+
+#### The migrated-disk contract
+
+Three things on a live-era disk must line up before the first OTA boot, or
+the machine flap-rolls-back (boot counting saves it, but the update never
+sticks):
+
+1. **Partition identifiers.** The appliance mounts `/` and `/boot` by the
+   GPT partlabels `root` and `boot` (the layout route 1 ships). A live-era
+   disk usually differs (e.g. FS labels `nixos`/`ESP`). Either relabel:
+
+   ```bash
+   sgdisk --change-name=<N>:root --change-name=<M>:boot /dev/<disk>
+   ```
+
+   or point the image at the existing devices (the device strings are baked
+   into the UKI's initrd fstab, so a config override flows through):
+
+   ```nix
+   fileSystems."/".device = lib.mkForce "/dev/disk/by-label/nixos";
+   fileSystems."/boot".device = lib.mkForce "/dev/disk/by-label/ESP";
+   ```
+
+   If the identifiers don't match, the OTA boot times out waiting for the
+   root device, boot counting exhausts the new entry, and the machine boots
+   the live generation again — safe, but the update never lands.
+
+2. **Arming the boot selection.** NixOS's systemd-boot installer pins
+   `default nixos-*` in `loader/loader.conf` on the ESP (plus `preferred`
+   with boot counting). While that pin stands, a staged UKI is never
+   selected — staging alone never cuts a migrated machine over. Arm the
+   cutover by REMOVING the `default`/`preferred` lines; systemd-boot's
+   entry sort (tries-exhausted last, then sort-key — the image's IMAGE_ID
+   orders before `nixos`) then picks the newest staged UKI at the next
+   reboot. Do NOT replace the pin with a UKI-only glob such as
+   `default myhost_*.efi`: the default glob is not boot-assessment-aware
+   and would reselect a failed image forever. Once armed, no further ESP
+   edits are needed — updates flow by the version sort.
+
+3. **The old update channel.** Set `system.autoUpgrade.enable = false`:
+   un-gated autoUpgrade reboots defeat the idle gating (a runner host would
+   kill its own CI jobs), and the auto-update module refuses to evaluate
+   with both enabled.
+
+Do the flip in two phases: first deploy the config with
+`deploy-target.ab.partitions` but WITHOUT `ab-image` (the running system
+keeps nix/`switch` and provisions the slots), then import `ab-image` so CI
+builds the sysupdate-package. Importing `ab-image` in phase 1 would strip
+the live system of nix and `switch-to-configuration` before the first OTA
+boot. The deploy-map entry flips to `method = "ab-image"` with phase 2 —
+a live deploy against an already-booted appliance fails loudly (no nix, no
+switch), so keep the map entry on `"live"` until the cutover is armed.
 
 ### 3. The runner host itself → gated self-update
 
@@ -132,6 +214,19 @@ write; the runner host cutover is idle-gated.
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
 | tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |
 | timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls + reboots per `rebootPolicy` — see [`auto-update.md`](auto-update.md) |
+
+### Expected journal noise: `gpg: WARNING: Using untrusted key!`
+
+Every successful manifest verification logs this warning in the
+`systemd-sysupdate.service` journal. It does **not** indicate a missing
+trust configuration: sysupdate verifies against the pinned keyring you
+ship (`import-pubring.pgp`) and internally invokes `gpg` with a hardcoded
+`--trust-model=always` — gpg prints the warning *because* that flag
+bypasses its web-of-trust database, unconditionally, on every run. There
+is no client-side setting (ownertrust, trustdb, trusted keys) that
+silences it, and none is needed: the deployer pubring in the image *is*
+the trust anchor. Treat the warning as cosmetic; a real verification
+failure instead rejects the manifest (see the table above).
 
 ## Overlay synergy (runtime installs)
 

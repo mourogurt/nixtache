@@ -7,6 +7,8 @@
 # pre-seeded; a LOCAL nixpkgs path is registered so `nix run/shell/build
 # nixpkgs#<x>` resolve without internet):
 #   O2  `nix-store --realize` a package from the cache → lands in upper, runs.
+#   O-delta  `nix-store --realize` of a lower-valid path copies NOTHING into
+#       the upper (installs are delta against the valid lower).
 #   O3  `nix run nixpkgs#hello` and `nix shell nixpkgs#hello -c hello` (full-nix UX).
 #   O-build `nix build nixpkgs#hello` → output in upper.
 #   O8  `nix path-info` sees BOTH the lower (system) closure and the upper path.
@@ -146,6 +148,15 @@ pkgs.testers.runNixOSTest {
     assert "Hello, world" in out, f"O2 FAIL: hello did not run ({out!r})"
     appliance.succeed("test -d /var/lib/nix-overlay/upper/${helloBasename}")
     print("O2 OK: nix-store --realize → runs → in upper")
+
+    # ── O-delta: a lower-valid path is never copied into the upper ───────────
+    # The overlay's lower-store=local reads the node's nix DB, which registers
+    # the toplevel closure — so realizing a member of it (the shipped nix CLI)
+    # is a no-op for the upper layer; only genuinely missing paths (hello/vim)
+    # land there.
+    appliance.succeed("nix-store --realize ${pkgs.nix.outPath}", timeout=120)
+    appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf pkgs.nix.outPath}")
+    print("O-delta OK: lower-valid path realized without an upper copy")
 
     # ── O3: full-nix UX — `nix run` and `nix shell` over the overlay ─────────
     out = appliance.succeed("nix run nixpkgs#hello", timeout=240)

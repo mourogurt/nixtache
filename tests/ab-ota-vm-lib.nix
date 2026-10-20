@@ -52,12 +52,12 @@ in
   # hermetic substituter, static address, driver plumbing. `extraModules`
   # lands on top of the real nixtache modules (the seam for broken-unit
   # knobs, tries overrides and overlay-nix).
-  mkAppliance = { version, extraPackages ? [ ], extraModules ? [ ], storeSize ? "512M" }:
+  mkAppliance = { version, extraPackages ? [ ], extraModules ? [ ], storeSize ? "512M", signVerify ? false }:
     fixture.mkAppliance {
       inherit version;
       stagingPath = "http://deployer/ab-stage/abtest";
       # gptfdisk: every suite asserts slot labels via sgdisk.
-      inherit storeSize;
+      inherit storeSize signVerify;
       extraPackages = extraPackages ++ [ pkgs.gptfdisk ];
       extraModules = [
         (nixpkgs + "/nixos/modules/testing/test-instrumentation.nix")

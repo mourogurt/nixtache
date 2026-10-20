@@ -224,7 +224,11 @@ runs:
 
           echo "→ $cfg: staging image files into $stage (version $version)"
           cp "$img"/* "$stage"/ || { echo "::error::$cfg: stage copy failed"; return 1; }
-          ( cd "$stage" && sha256sum *.raw *.efi > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS ) \
+          # The manifest covers everything sysupdate may pull: the store image,
+          # the UKI and — when the consumer's ab-image ships it (nixtache's
+          # module always does) — the slot's lower store DB dump. nullglob
+          # keeps hand-rolled consumer preps (no .lower-db artifact) working.
+          ( cd "$stage" && shopt -s nullglob && sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS ) \
             || { echo "::error::$cfg: SHA256SUMS regeneration failed"; return 1; }
 
           # Sign the manifest if a signing key is provisioned. systemd-sysupdate

@@ -19,6 +19,19 @@ let
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
     nixpkgs.hostPlatform = system;
+    # The shipped-DB pins force `system.build.toplevel` evaluation, which runs
+    # the image-based-appliance profile's lockout assertion — these hosts never
+    # configure a password, so opt out the way the profile documents.
+    users.allowNoPasswordLogin = true;
+  };
+
+  # The shipped DB is the closure's registered records — content-true only
+  # under content-addressing. Included in every positive-leg host; the
+  # negative-leg host below omits it to pin the module's assertion. NOTE:
+  # nixpkgs.config merges FIRST-definition-wins, so a later override cannot
+  # turn CA off — the negative host must simply not include this module.
+  caModule = {
+    nixpkgs.config.contentAddressedByDefault = true;
   };
 
   mkHost = extra:
@@ -27,6 +40,7 @@ let
       modules = [
         self.nixosModules.ab-image
         baseModule
+        caModule
         extra
       ];
     };
@@ -130,11 +144,77 @@ let
     };
   };
 
+  # --- scenario 5: shipped lower store DB ------------------------------------
+  # The dump MUST be produced by the module's dump generator for THIS host's
+  # toplevel: rebuilding the derivation here pins both that the dump exists
+  # and that its records cover exactly the running toplevel's closure (the
+  # closure's REGISTERED records — content-true because the fixture evaluates
+  # content-addressed; a build-time guard rejects top-level symlink paths).
+  # The dump ships on the ESP at a versioned path and rides updates via the
+  # 15-lower-db transfer — it cannot live in /etc (derivation cycle: the dump
+  # covers the toplevel) nor inside /nix/store (overlay GC hard-fails on
+  # non-store-path entries in the merged store dir).
+  #
+  # Rebuilt with the FIXTURE's pkgs (hostFixed.pkgs): under CA every
+  # derivation outPath depends on the pkgs instance's config, so the identity
+  # pin must use the same instance the module evaluated with.
+  expectedDump = import ../modules/ab-image/lower-store-db.nix {
+    pkgs = hostFixed.pkgs;
+    toplevel = hostFixed.config.system.build.toplevel;
+  };
+  # Negative leg: a non-CA evaluation must fail the module's assertion
+  # (built without caModule — see the first-definition-wins note there).
+  hostNonCa = nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      self.nixosModules.ab-image
+      baseModule
+      {
+        services.nixtache.ab-image = {
+          enable = true;
+          imageId = "h";
+          imageVersion = "1";
+        };
+      }
+    ];
+  };
+  espContents = hostFixed.config.image.repart.partitions.esp.contents;
+  dumpContent = espContents."/EFI/nixtache/h_1.lower-db" or null;
+  lowerDbTransfer = (transfers hostFixed)."15-lower-db" or null;
+  lowerDbSvc = hostFixed.config.systemd.services.nixtache-lower-store-db-load or null;
+  versionedSvc = hostVersionFile.config.systemd.services.nixtache-lower-store-db-load or null;
+  scenarioLowerStoreDb = {
+    name = "lower store DB: registered-record dump ships on the ESP + rides sysupdate; boot loader seeds a missing/stale DB; CA asserted";
+    checks = {
+      caFixture = hostFixed.pkgs.config.contentAddressedByDefault or false;
+      nonCaRejected = builtins.any
+        (a: !a.assertion && lib.hasInfix "content-addressed" a.message)
+        hostNonCa.config.assertions;
+      dumpShipped = dumpContent != null;
+      dumpIsToplevelClosure = dumpContent != null && toString dumpContent.source == toString expectedDump;
+      dumpIsRegistration = dumpContent != null && lib.hasInfix "registration" (expectedDump.passthru.checkScript or "");
+      dumpGuardRejectsSymlinks = dumpContent != null && lib.hasInfix "[ -L" (expectedDump.passthru.checkScript or "");
+      dumpTransferExists = lowerDbTransfer != null;
+      dumpTransferPattern = lowerDbTransfer != null
+        && (lowerDbTransfer.Source.MatchPattern or [ ]) == [ "h_@v.lower-db" ]
+        && (lowerDbTransfer.Target.InstancesMax or null) == 2;
+      linksShipped = hostFixed.config.image.repart.partitions.nix-store.contents ? "/.links/.keep";
+      nixCliShipped = builtins.elem hostFixed.pkgs.nix hostFixed.config.environment.systemPackages;
+      loaderExists = lowerDbSvc != null;
+      loaderWanted = lowerDbSvc != null && builtins.elem "multi-user.target" lowerDbSvc.wantedBy;
+      loaderBeforeDaemon = lowerDbSvc != null && builtins.elem "nix-daemon.service" lowerDbSvc.before;
+      loaderReadsDump = lowerDbSvc != null && lib.hasInfix "/boot/EFI/nixtache/h_1.lower-db" lowerDbSvc.script;
+      loaderTracksMarker = lowerDbSvc != null && lib.hasInfix "/var/lib/nixtache/lower-db-version" lowerDbSvc.script;
+      loaderBakesVersion = versionedSvc != null && lib.hasInfix "/boot/EFI/nixtache/h_20260809120000.lower-db" versionedSvc.script;
+    };
+  };
+
   scenarios = [
     scenarioFixed
     scenarioMaxDisk
     scenarioSigned
     scenarioVersionFile
+    scenarioLowerStoreDb
   ];
 
   failed = builtins.concatMap

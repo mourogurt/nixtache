@@ -1,43 +1,39 @@
-# overlay-nix-ota-invalid-vm — the replication research suite for overlay-nix
-# across OTA slot swaps (world-A construct: see the design of the
-# ota-stabilization openspec change).
+# overlay-nix-ota-invalid-vm — overlay-nix across OTA slot swaps on the
+# SHIPPED world A (the appliance image carries the lower store database —
+# see the lower-store-db openspec change).
 #
-# WHY THIS SUITE EXISTS. On a nixtache appliance the overlay store shares ONE
-# database with the "lower" store handle, so `nix-store --realize` pulls FULL
-# closures into the upper layer and the upper survives slot swaps by accident
-# of closure completeness (world B). The upstream-intended overlay design
-# (world A: a lower store with its own database) keeps the upper as a DELTA —
-# and there, an OTA swap replaces the lower with paths the upper references,
-# leaving dangling references (binaries failing with a missing interpreter,
-# database entries claiming validity for files absent from the merged view).
-# This suite CONSTRUCTS world A on the real appliance (validity records
-# seeded into the database without any file access) and pins the hazard plus
-# the lifecycle-mitigation behaviour (upperOnUpdate = "wipe" | "reconcile",
-# wired in a later task of the same change).
+# WHAT THIS SUITE PINS. With the slot closure's validity records shipped in
+# the image and loaded at boot, the lower store is a first-class readable
+# store: runtime installs are a DELTA (only paths missing from the merged
+# store land in the upper), and an OTA swap replaces the lower with paths
+# the upper may reference — leaving dangling references (binaries failing
+# with a missing interpreter, database entries claiming validity for files
+# absent from the merged view) unless a lifecycle policy acts. The suite
+# boots a real appliance, verifies the shipped DB works out of the box
+# (no manual seed), then swaps and pins the lifecycle behaviour
+# (upperOnUpdate = "wipe" | "reconcile"; the default is "wipe").
 #
 # Mock packages (the pkgs_1 -> pkgs_2 -> pkgs_3 triangle):
 #   pkgs_1 (mock-runtime): a renamed busybox at $out/bin/busybox. Its refs
-#     are {glibc, busybox} — so the SEED registers pkgs_1's whole closure.
-#     Baked into v1's lower image ONLY (v2 does not carry it).
+#     are {glibc, busybox} — the shipped dump registers pkgs_1's whole
+#     closure. Baked into v1's lower image ONLY (v2 does not carry it).
 #   pkgs_2 (mock-tool): a script whose shebang points at pkgs_1's busybox —
 #     a genuine runtime closure reference. Realized into the UPPER on v1;
-#     its only ref is pkgs_1, so with the seed in place realize fetches
-#     exactly pkgs_2.
+#     its only ref is pkgs_1, so with the shipped DB in place realize
+#     fetches exactly pkgs_2.
 #   pkgs_3: `hello` baked only into v2's lower — proves the new lower is
 #     visible through the remounted merged store.
 #
-# Seeding mechanics (proven against Nix 2.34.8, the shipped version):
-#   the deployer emits 5-line-per-path validity records (path, bare-base16
-#   narHash, narSize, deriver-or-empty, ref-count + refs) from
-#   `nix path-info --json`; the appliance pipes them into
-#   `nix-store --load-db` — which registers validity with ZERO file access.
-#   (--register-validity must NOT be used: it canonicalises metadata,
-#   chmod-ing through the merged view, which makes OverlayFS copy lower
-#   files up and destroys the lower-only premise.)
+# Profile leg (the spec's "recorded installables are replayed" scenario):
+#   pkgs_2 is additionally `nix profile install`ed into root's per-user
+#   profile pre-swap; the capture records the profile link target, and the
+#   reconcile variant asserts the tool runs through the profile link again
+#   post-swap (wipe variant asserts the negative).
 #
 # Variant knobs (flake attr = suite instance):
 #   overlayOptions — merged into services.nixtache.overlay-nix (the
-#     lifecycle mode once the option exists: { upperOnUpdate = "wipe"; } …).
+#     lifecycle mode: { upperOnUpdate = "reconcile"; } …; unset = the
+#     module default, "wipe").
 #   upperTmpfs — move the upper layer to tmpfs (the "nothing to preserve"
 #     branch: lifecycle behaviour degenerates, only overlay health asserted
 #     after the swap).
@@ -137,43 +133,6 @@ let
   # pkgs_1: its lower store cannot satisfy pkgs_2's shebang after the swap.
   v2 = mkAppliance { version = "2"; extraPackages = [ pkgs.hello ]; };
   v2SysupdatePkg = v2.config.system.build.sysupdate-package;
-
-  # Deployer-side validity-record generator: closure of pkgs_1 -> one file of
-  # 5-line records consumable by `nix-store --load-db`. Runs INSIDE the
-  # deployer VM (it has the real nix database with pkgs_1's closure); the
-  # base64 narHash from `nix path-info --json` is re-encoded as bare base16,
-  # which is the format `nix-store --dump-db` emits.
-  makeValidityScript = pkgs.writeShellScript "make-validity" ''
-    set -euo pipefail
-    out="$1"
-    p='${p1Path}'
-    closure=$(nix-store -q --requisites "$p")
-    args=""
-    for q in $closure; do args="$args $q"; done
-    nix path-info --json $args > /tmp/pi.json
-    python3 - <<'PYEOF' "$out"
-    import base64, binascii, json, sys
-    pi = json.load(open("/tmp/pi.json"))
-    lines = []
-    for path, info in pi.items():
-        h = info["narHash"]
-        # SRI ("sha256-…") or prefixed ("sha256:…") — strip either.
-        for prefix in ("sha256:", "sha256-"):
-            if h.startswith(prefix):
-                h = h[len(prefix):]
-                break
-        raw = base64.b64decode(h + "==")
-        h16 = binascii.hexlify(raw).decode()
-        refs = info["references"]
-        lines.append(path)
-        lines.append(h16)
-        lines.append(str(info["narSize"]))
-        lines.append(info.get("deriver") or "")
-        lines.append(str(len(refs)))
-        lines.extend(refs)
-    open(sys.argv[1], "w").write("\n".join(lines) + "\n")
-    PYEOF
-  '';
 in
 pkgs.testers.runNixOSTest {
   name = "overlay-nix-ota-invalid";
@@ -195,14 +154,10 @@ pkgs.testers.runNixOSTest {
     systemd.tmpfiles.rules = [ "d /var/lib/nixtache/ab-stage 1777 root root -" ];
     # the staged v2 sysupdate-package must fit on the root disk
     virtualisation.diskSize = 8192;
-    environment.systemPackages = [ pkgs.python3 ];
-    # pkgs_2 must be servable (realize fetch); pkgs_1's closure must be in
-    # the DB (seed generation) AND servable (the reconcile repair re-fetch).
+    # pkgs_2 must be servable (realize fetch); pkgs_1's closure must be
+    # servable (the reconcile repair re-fetch).
     system.extraDependencies = [ pkgs_2 pkgs_1 v2SysupdatePkg ];
-    # the seed generator uses the new CLI (nix path-info --json)
-    nix.settings.experimental-features = [ "nix-command" "flakes" ];
     networking.firewall.enable = false;
-    environment.etc."make-validity".source = makeValidityScript;
   };
 
   testScript = ''
@@ -213,7 +168,7 @@ pkgs.testers.runNixOSTest {
     HELLO_P = "${helloPath}"
     HELLO_B = "${helloBasename}"
     UPPER = "${upperDir}"
-    MODE = ${if overlayOptions ? upperOnUpdate then builtins.toJSON overlayOptions.upperOnUpdate else "None"}
+    MODE = ${if overlayOptions ? upperOnUpdate then builtins.toJSON overlayOptions.upperOnUpdate else ''"wipe"''}
     TMPFS = ${if upperTmpfs then "True" else "False"}
     DEGRADED = ${if reconcileDegraded then "True" else "False"}
 
@@ -239,14 +194,6 @@ pkgs.testers.runNixOSTest {
     deployer.wait_for_unit("nix-serve.service")
     deployer.wait_for_unit("nginx.service")
 
-    # ── World-A construct: seed pkgs_1's closure into the appliance DB ────
-    # The records register validity with zero file access, so pkgs_1's files
-    # stay lower-only (no OverlayFS copy-up) and realize(pkgs_2) fetches
-    # exactly pkgs_2 — the upper becomes a true delta, as in the
-    # upstream-intended overlay design.
-    deployer.succeed("/etc/make-validity /var/lib/nixtache/ab-stage/seed.txt")
-    deployer.succeed("head -5 /var/lib/nixtache/ab-stage/seed.txt")
-
     appliance = create_ab_machine(name="appliance")
     appliance.start(allow_reboot=True)
     appliance.wait_for_unit("multi-user.target")
@@ -259,11 +206,16 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("nix --version", timeout=300)
     print("OK: v1 appliance booted, overlay-nix up")
 
-    appliance.succeed(
-      "curl -sf http://deployer/ab-stage/seed.txt | nix-store --load-db"
+    # ── Shipped lower DB: validity out of the box, no manual seed ─────────
+    # pkgs_1 sits in v1's toplevel closure, so the dump shipped on the ESP
+    # registered it at boot: the lower store is a first-class readable store
+    # from first contact.
+    appliance.succeed("test -f /boot/EFI/nixtache/abtest_1.lower-db")
+    appliance.wait_until_succeeds(
+      "systemctl is-active --quiet nixtache-lower-store-db-load.service", timeout=120
     )
     appliance.succeed("nix path-info " + P1)
-    print("OK: pkgs_1 closure seeded into the DB (validity without content)")
+    print("OK: shipped lower DB — pkgs_1 valid out of the box (no manual seed)")
 
     # ── Realize pkgs_2 into the upper: the delta-only install ─────────────
     appliance.succeed("nix-store --realize " + P2, timeout=600)
@@ -271,7 +223,7 @@ pkgs.testers.runNixOSTest {
     assert "tool-ok" in out, f"tool did not run on v1 ({out!r})"
     appliance.succeed(f"test -d {UPPER}/{P2B}")
     appliance.fail(f"test -d {UPPER}/{P1B}")
-    print("OK: pkgs_2 realized into the upper; pkgs_1 stayed lower-only (seed held)")
+    print("OK: pkgs_2 realized into the upper; pkgs_1 stayed lower-only (shipped DB held)")
 
     # ── GC probe: pin overlay-GC behaviour on the shipped Nix version ─────
     # Root pkgs_2 (it must survive GC), realize an UNROOTED throwaway, GC it,
@@ -281,6 +233,18 @@ pkgs.testers.runNixOSTest {
     # the root file must be reboot-persistent (a /tmp root dies with the
     # plain-reboot control and would de-root pkgs_2 before the capture).
     appliance.succeed(f"nix-store --add-root /var/lib/nixtache/tool-root -r {P2}")
+
+    # ── Profile-install leg (the spec's "recorded installables are replayed"
+    # scenario): install the tool into root's per-user profile. The pre-update
+    # capture records the profile link target; the reconcile pass re-realises
+    # it after the swap. A bare store path is a valid installable — no eval,
+    # no network, the path is already valid from the realize above.
+    PROF = "/nix/var/nix/profiles/per-user/root/profile"
+    appliance.succeed("nix profile install --profile " + PROF + " " + P2)
+    out = appliance.succeed(PROF + "/bin/tool")
+    assert "tool-ok" in out, f"profile-installed tool did not run on v1 ({out!r})"
+    print("OK: tool profile-installed (per-user profile target recorded)")
+
     appliance.succeed(f"nix-store --realize {HELLO_P}", timeout=600)
     appliance.succeed(f"test -d {UPPER}/{HELLO_B}")
     gc_journal = appliance.succeed(
@@ -340,8 +304,10 @@ pkgs.testers.runNixOSTest {
         appliance.fail(f"test -d {UPPER}/{P2B}")
         out = appliance.succeed(f"nix path-info {P2} 2>&1 || true")
         assert "is not valid" in out, f"wipe left DB entry ({out!r})"
+        # The recorded profile went with the wiped /nix/var/nix state.
+        appliance.fail("test -e " + PROF)
         appliance.succeed("nix --version")
-        print("WIPE OK: no stale upper content or DB entries; overlay functional")
+        print("WIPE OK: no stale upper content, DB entries or profiles; overlay functional")
     elif MODE == "reconcile":
         if DEGRADED:
             # repair finds no cache: red unit, intact boot, marker kept.
@@ -367,18 +333,19 @@ pkgs.testers.runNixOSTest {
             appliance.succeed(f"test -d {UPPER}/{P1B}")
             out = appliance.succeed(P2 + "/bin/tool")
             assert "tool-ok" in out, f"reconcile did not heal the tool ({out!r})"
+            # The coherence machinery observed the dangling old-lower entries:
+            # the reconcile pass's own `nix-store --verify` reported them
+            # (pass 1 invalidated the stale records before the repair).
+            jout = appliance.succeed(
+              "journalctl -u nixtache-overlay-reconcile.service 2>&1 || true"
+            )
+            assert "disappeared" in jout, f"verify pass saw no danglers ({jout[-400:]!r})"
+            # The recorded profile installable is replayed: the tool runs
+            # through the per-user profile link again.
+            out = appliance.succeed(PROF + "/bin/tool")
+            assert "tool-ok" in out, f"reconcile did not replay the profile ({out!r})"
             appliance.fail("test -e /var/lib/nixtache/overlay-reconcile-pending")
-            print("RECONCILE OK: dangling ref healed (pkgs_1 re-fetched), tool runs")
-    else:
-        # ── none (baseline): the hazard, exactly as designed ──────────────
-        appliance.fail(P2 + "/bin/tool")
-        print("NONE OK: tool fails after swap (missing interpreter) — the hazard")
-        # DB still claims pkgs_1 valid; its files are gone from the merged view.
-        out = appliance.succeed("nix path-info " + P1 + " 2>&1 || true")
-        assert "is not valid" not in out, f"pkgs_1 unexpectedly invalidated ({out!r})"
-        vout = appliance.succeed("nix-store --verify 2>&1 || true")
-        assert "disappeared" in vout, f"verify did not report danglers ({vout!r})"
-        print("NONE OK: verify reports the dangling database entries")
+            print("RECONCILE OK: dangling ref healed (pkgs_1 re-fetched), profile replayed")
 
     print("PASS: overlay-nix-ota-invalid matrix leg (mode=" + str(MODE) + ")")
   '';

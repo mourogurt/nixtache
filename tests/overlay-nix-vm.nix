@@ -6,6 +6,9 @@
 # + overlay-nix modules) in QEMU and asserts the overlay comes
 # up: an OverlayFS mount exists, the overlay daemon is active, and a write
 # through the merged store lands in the upper dir while the lower stays ro.
+# Also pins the shipped lower store DB (ab-image): the dump sits at a
+# versioned ESP path, the boot loader seeds /nix/var/nix/db from it, and a
+# lower path resolves `nix path-info` with no manual seeding.
 #
 # Offline constraint: the appliance VM has no internet, so `nix-env -i`/`nix shell`
 # (which fetch from a registry) are NOT exercised here — the read-only+overlay
@@ -45,6 +48,9 @@ let
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest-overlay";
             nixpkgs.hostPlatform = system;
+            # Same contract as ab-fixture: the appliance world must evaluate
+            # content-addressed (the ab-image module asserts it).
+            nixpkgs.config.contentAddressedByDefault = true;
 
             services.nixtache.ab-image = {
               enable = true;
@@ -129,6 +135,18 @@ let
     # Lower is read-only: /nix/store mount options contain 'ro' (the squashFS).
     print("RESULT_LOWER_RO=" + run("mount | grep ' /nix/store ' | grep -o 'ro' | head -1 || echo no"))
 
+    # --- Shipped lower store DB (ab-image): seeded at boot, no manual seed -----
+    # The dump lives on the ESP at a versioned path (the nix-store partition
+    # cannot carry it: overlay GC hard-fails on non-store-path entries in the
+    # merged store dir); the loader oneshot imports it into /nix/var/nix/db on
+    # first boot and records the image version in the marker. A lower path (the
+    # shipped nix CLI, part of the toplevel closure) must then resolve through
+    # standard nix tooling.
+    print("RESULT_LOWER_DUMP=" + run("test -f /boot/EFI/nixtache/abtest_1.lower-db && echo present || echo missing"))
+    print("RESULT_LOWER_DB_LOADER=" + run("systemctl is-active nixtache-lower-store-db-load.service 2>/dev/null || echo inactive"))
+    print("RESULT_LOWER_DB_VERSION=" + run("cat /var/lib/nixtache/lower-db-version 2>/dev/null || echo missing"))
+    print("RESULT_LOWER_PATH_VALID=" + run("nix path-info ${pkgs.nix} >/dev/null 2>&1 && echo valid || echo missing"))
+
     # --- INFO (human visibility) -----------------------------------------------
     print("INFO_MOUNTS=" + run("mount | grep -E 'overlay|/nix/store' | head -20"))
     print("INFO_LSBLK=" + run("lsblk -o NAME,PARTLABEL,FSTYPE,RO,MOUNTPOINT"))
@@ -163,6 +181,10 @@ pkgs.runCommand "overlay-nix-vm-test"
     [ "$(val UPPER_DIR)" = "RESULT_UPPER_DIR=yes" ] && pass "O1: upperDir created (tmpfiles)" || fail "O1: upperDir missing ($(val UPPER_DIR))"
     [ "$(val COW)" = "RESULT_COW=COW_OK" ] && pass "read-only+overlay: write through merged lands in upper (COW)" || fail "read-only+overlay COW failed ($(val COW))"
     echo "$(val LOWER_RO)" | grep -q ro && pass "lower /nix/store is read-only" || fail "lower /nix/store not ro ($(val LOWER_RO))"
+    [ "$(val LOWER_DUMP)" = "RESULT_LOWER_DUMP=present" ] && pass "lower store DB dump present in the store partition" || fail "dump missing ($(val LOWER_DUMP))"
+    [ "$(val LOWER_DB_LOADER)" = "RESULT_LOWER_DB_LOADER=active" ] && pass "lower DB loader oneshot ran at boot" || fail "loader not active ($(val LOWER_DB_LOADER))"
+    [ "$(val LOWER_DB_VERSION)" = "RESULT_LOWER_DB_VERSION=1" ] && pass "lower DB version marker = running image version" || fail "marker wrong ($(val LOWER_DB_VERSION))"
+    [ "$(val LOWER_PATH_VALID)" = "RESULT_LOWER_PATH_VALID=valid" ] && pass "lower path resolves nix path-info with no manual seed" || fail "lower path not valid ($(val LOWER_PATH_VALID))"
 
     cat $out/report
     [ "$FAIL" = "0" ] || exit 1

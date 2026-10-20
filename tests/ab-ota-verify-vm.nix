@@ -264,7 +264,7 @@ pkgs.testers.runNixOSTest {
         deployer.succeed(f"rm -rf {stage} && mkdir -p {stage}")
         deployer.succeed(f"cp ${v3SysupdatePkg}/* {stage}/")
         deployer.succeed(
-          f"cd {stage} && sha256sum *.raw *.efi > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS"
+          f"cd {stage} && sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS"
         )
         deployer.succeed(
           f"export GNUPGHOME=$(mktemp -d) && "

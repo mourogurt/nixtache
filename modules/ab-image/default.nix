@@ -51,6 +51,35 @@ let
 
   efiArch = pkgs.stdenv.hostPlatform.efiArch;
 
+  # Validity-record dump for the whole slot closure: the closure's
+  # REGISTERED records (`pkgs.closureInfo`'s `registration` output, the
+  # `nix-store --load-db` format) — content-true because the appliance
+  # evaluation is content-addressed (asserted below: `ca:fixed:r:` binds
+  # each path's hash to its content, so the daemon's records cannot lie
+  # about shipped bytes; under input-addressing they provably can —
+  # substitution churn, multi-realisation artifacts — and the runner's
+  # clone seed verifies every copied path against these records).
+  # A build-time guard rejects closures containing top-level symlink paths
+  # (repart resolves symlinks when imaging, which would contradict the
+  # records). One derivation per toplevel, so image rebuilds with an
+  # unchanged closure reuse it.
+  #
+  # Carrier constraints (both discovered at implementation time):
+  #   - NOT environment.etc / a toplevel-referenced store path: the dump
+  #     covers the toplevel closure, so a toplevel→dump reference is a
+  #     derivation cycle.
+  #   - NOT inside /nix/store: the local-overlay store's GC scans the merged
+  #     store dir and hard-fails on any non-store-path entry ("too short
+  #     to be a valid store path").
+  # The dump therefore ships on the ESP at a versioned path (per-slot by
+  # filename) and travels across updates via the 15-lower-db transfer.
+  lowerStoreDb = import ./lower-store-db.nix {
+    inherit pkgs;
+    toplevel = config.system.build.toplevel;
+  };
+  lowerStoreDbName = "${cfg.imageId}_${config.system.image.version}.lower-db";
+  lowerStoreDbEspPath = "/EFI/nixtache/${lowerStoreDbName}";
+
   # Default sysupdate transfers. `@v` carries the version; Path is STATIC
   # (sysupdate.d(5)). Local-self uses a plain-path regular-file source; a
   # remote target uses http(s):// + url-file (set stagingPath to the URL).
@@ -69,6 +98,27 @@ let
         Type = "partition";
         MatchPartitionType = "linux-generic";
         ReadOnly = "yes";
+      };
+      Transfer.Verify = if verify then "yes" else "no";
+    };
+    # The slot's lower store DB dump rides the ESP alongside the UKI —
+    # InstancesMax=2 vacuums the old slot's dump together with its UKI.
+    # Dropping this transfer (wholesale `transfers` override) disables
+    # per-slot dump delivery: the loader then no-ops on slots whose dump
+    # never arrived (ConditionPathExists), leaving lower paths unregistered.
+    "15-lower-db" = {
+      Source = {
+        Path = srcPath;
+        Type = srcType;
+        MatchPattern = [ "${cfg.imageId}_@v.lower-db" ];
+      };
+      Target = {
+        InstancesMax = 2;
+        MatchPattern = [ "${cfg.imageId}_@v.lower-db" ];
+        Mode = "0444";
+        Path = "/EFI/nixtache";
+        PathRelativeTo = "boot";
+        Type = "regular-file";
       };
       Transfer.Verify = if verify then "yes" else "no";
     };
@@ -327,6 +377,27 @@ in
   };
 
   config = mkIf cfg.enable {
+    # The shipped dump is the closure's REGISTERED records — content-true
+    # only when the evaluation is content-addressed. A module cannot
+    # silently flip a flake consumer's nixpkgs, so require it loudly.
+    # NOTE: the nix EVALUATING this config also needs the `ca-derivations`
+    # experimental feature in its SYSTEM nix.conf — the daemon ignores
+    # client-side feature overrides on connect (NixOS/nix#9090), so
+    # user-level config/flags are not enough for `nix build`/`flake check`.
+    assertions = [{
+      assertion = pkgs.config.contentAddressedByDefault or false;
+      message = ''
+        services.nixtache.ab-image requires a content-addressed evaluation:
+        set `nixpkgs.config.contentAddressedByDefault = true;` on the
+        nixpkgs import for this appliance target, and enable the
+        `ca-derivations` experimental feature in the system nix.conf of
+        every machine that evaluates/builds it. The shipped lower store DB
+        is the closure's registered validity records, which are only
+        content-true for content-addressed paths — see
+        doc/technical_details/lower-store-db.md.
+      '';
+    }];
+
     system.image.id = cfg.imageId;
     system.image.version = cfg.imageVersion;
 
@@ -378,6 +449,10 @@ in
               "${pkgs.systemd}/lib/systemd/boot/efi/systemd-boot${efiArch}.efi";
             "/EFI/Linux/${config.system.boot.loader.ukiFile}".source =
               "${config.system.build.uki}/${config.system.boot.loader.ukiFile}";
+            # The lower store DB dump for THIS slot's closure (versioned
+            # filename: the ESP holds one per installed instance; the loader
+            # below reads its own version's).
+            "${lowerStoreDbEspPath}".source = lowerStoreDb;
             "/loader/loader.conf".source = pkgs.writeText "loader.conf" ''
               timeout 3
             '';
@@ -389,6 +464,15 @@ in
         };
         nix-store = {
           storePaths = [ config.system.build.toplevel ];
+          # Ship an (empty) .links dir in the store image. Opening ANY local
+          # store unconditionally runs createDirs(/nix/store/.links) (Nix
+          # 2.34, even with read-only=true) — which fails on the RO squashFS
+          # unless the directory already exists. The lower-DB loader, the
+          # runner container's clone seed and local-overlay lowers all open
+          # local stores here. GC skips `.links` by name (it may delete the
+          # placeholder file itself — nlink==1 — which is harmless: the
+          # directory stays). Not a store path, so absent from the dump.
+          contents."/.links/.keep".source = pkgs.writeText "links-keep" "";
           nixStorePrefix = "/";
           repartConfig = mkMerge [
             {
@@ -457,7 +541,8 @@ in
     systemd.sysupdate.transfers = mkDefault cfg.transfers;
 
     # The update artifact the deploy action stages + signs: the split nix-store
-    # squashfs + the UKI + a SHA256SUMS manifest. The UKI KEEPS its ukify
+    # squashfs + the UKI + the slot's lower store DB dump + a SHA256SUMS
+    # manifest. The UKI KEEPS its ukify
     # `+tries` filename (`abtest_2+3.efi`): the boot-counting counter lives in
     # the FILENAME (systemd-boot decrements it by renaming; an exhausted
     # counter makes the loader skip the entry — the rollback mechanism), so
@@ -468,6 +553,7 @@ in
         mkdir $out
         cp ${config.system.build.uki}/${config.system.boot.loader.ukiFile} $out/
         cp ${config.system.build.image}/${cfg.imageId}_${cfg.imageVersion}.nix-store.raw $out/
+        cp ${lowerStoreDb} $out/${lowerStoreDbName}
         cd $out && sha256sum * > SHA256SUMS
       '';
 
@@ -481,5 +567,67 @@ in
     systemd.tmpfiles.rules = optionals verify [
       "L+ /usr/lib/systemd/import-pubring.pgp - - - - ${pubringSource}"
     ];
+
+    # The loader needs a nix binary on a nix-less appliance (the image
+    # profile sets nix.enable=false); the CLI also serves overlay-nix
+    # consumers, which re-enable nix anyway.
+    environment.systemPackages = [ pkgs.nix ];
+
+    # Load the dump into /nix/var/nix/db when the DB is missing (first boot,
+    # or after upperOnUpdate="wipe" cleared it) or the recorded image version
+    # differs from the running one (a swap: the new slot's records merge in
+    # additively — stale old-slot records are deliberately left for
+    # `nix-store --verify` to report and the overlay reconcile pass to heal).
+    systemd.services.nixtache-lower-store-db-load = {
+      description = "Load the slot's lower store DB dump when missing or stale";
+      wantedBy = [ "multi-user.target" ];
+      # The DB must be seeded before any nix consumer reads it (the daemon
+      # when overlay-nix re-enables nix). Ordering against an absent unit is
+      # a no-op.
+      before = [ "nix-daemon.service" ];
+      # The ESP holds one dump per installed instance; the running slot's is
+      # named by the baked image id + version. Absent (a wholesale `transfers`
+      # override dropped 15-lower-db, or a pre-DB image) → skip, leaving the
+      # lower unregistered rather than failing the boot.
+      unitConfig.ConditionPathExists = "/boot${lowerStoreDbEspPath}";
+      path = [ pkgs.nix pkgs.coreutils pkgs.util-linux ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      # The version is baked per-slot: after a swap the running unit comes
+      # from the NEW toplevel, so its version differs from the recorded
+      # marker and the new slot's records load.
+      script = ''
+        set -euo pipefail
+        marker=/var/lib/nixtache/lower-db-version
+        db=/nix/var/nix/db/db.sqlite
+        version=${escapeShellArg config.system.image.version}
+        dump=/boot${lowerStoreDbEspPath}
+        if [ -f "$db" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$version" ]; then
+          echo "lower store DB already current for image version $version"
+          exit 0
+        fi
+        mkdir -p /nix/var/nix/db /var/lib/nixtache
+        # `nix-store --load-db` initialises the store dir (creates .links),
+        # which fails on the appliance's read-only squashFS — and must not
+        # depend on overlay-nix's merged mount being up. The load itself is
+        # zero-file-access (records carry absolute paths), so run it in a
+        # private mount namespace with a tmpfs-upper OverlayFS over
+        # /nix/store: the store stays readable (binaries resolve), the init
+        # lands in the discarded upper, the DB write to /nix/var/nix
+        # persists. (A unit-level TemporaryFileSystem=/nix/store cannot be
+        # used: it would mask this script's own store path at exec time.)
+        export dump
+        ${lib.getExe' pkgs.util-linux "unshare"} -m --propagation private ${pkgs.writeShellScript "lower-store-db-load" ''
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/upper" "$tmp/work"
+          mount -t overlay overlay -o lowerdir=/nix/store,upperdir="$tmp/upper",workdir="$tmp/work" /nix/store
+          ${pkgs.nix}/bin/nix-store --load-db < "$dump"
+        ''}
+        echo "$version" > "$marker"
+        echo "loaded lower store DB for image version $version"
+      '';
+    };
   };
 }

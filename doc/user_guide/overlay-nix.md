@@ -15,7 +15,7 @@ services.nixtache.overlay-nix = {
   enable = true;
   # upperDir = "/var/lib/nix-overlay/upper";   # persistent (default)
   # upperDir = "/tmp/nix-overlay/upper";       # RAM-only, wiped on reboot
-  # upperOnUpdate = "none";                     # "none" | "wipe" | "reconcile"
+  # upperOnUpdate = "wipe";                     # "wipe" (default) | "reconcile"
 };
 ```
 
@@ -27,40 +27,51 @@ nix.settings.substituters = [ "https://<runner-host>:5000" ];
 nix.settings.trusted-public-keys = [ "<cache public key>" ];
 ```
 
-## The three lower-DB worlds
+## The shipped lower DB (world A)
 
-What happens across an OTA slot swap depends on which *world* the appliance's
-nix database lives in:
+Every nixtache appliance image ships its slot closure's store DB dump and
+seeds `/nix/var/nix/db` at boot (see [`ota.md`](ota.md)) — the read-only
+lower store is a first-class readable nix store, which is the
+upstream-intended overlay design ("world A"):
 
-| World | Lower store DB | Upper layer contains | After an OTA swap |
-|---|---|---|---|
-| **A** (upstream-intended) | present | only the delta (deps resolve from the lower) | upper paths whose deps lived only in the old lower **break** (missing interpreter/library); DB entries dangle |
-| **B** (nixtache appliance today) | shared with the overlay store | **full closures** (realize cannot see lower paths, so it downloads everything) | upper paths keep working — self-contained by accident |
-| **C** (test harness) | host store with DB | mixed | not representative for appliances |
+- runtime installs are a **delta**: realizing a path whose closure is
+  already valid in the lower downloads only the missing paths into the
+  upper layer;
+- an OTA swap replaces the lower, so upper paths whose dependencies lived
+  only in the OLD lower genuinely break (missing interpreter/library) and
+  their DB entries dangle — `upperOnUpdate` below exists exactly for this.
 
-World B is what a nixtache appliance runs today; world A is what any future
-image-shipped lower database (or manual DB registration) produces — and what
-`upperOnUpdate` below protects against either way. When reading test results,
-check which world the test constructs (the suites name it).
+(The historical "world B" — no lower DB, realize downloading full
+closures, the upper surviving swaps by accident of completeness — is what
+nixtache appliances ran before the shipped DB; the replication-era suites
+that constructed world A by hand now pin the shipped reality.)
 
 ## Upper-layer persistence
 
-| `upperDir` on | Plain reboot | OTA swap (`upperOnUpdate = "none"`) |
+| `upperDir` on | Plain reboot | OTA swap (default `"wipe"`) |
 |---|---|---|
-| persistent root FS | installs survive | installs survive (world B); world A danglers possible |
+| persistent root FS | installs survive | upper cleared by the policy; `"reconcile"` heals + replays instead |
+| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same policy behaviour (pinned by `ab-data-pool-vm`) |
 | tmpfs | installs wiped (by design) | nothing to preserve — overlay remounts clean |
+
+The upper layer may live on a ZFS dataset (e.g. a data pool with more space
+than the root partition): OverlayFS needs `d_type` + `renameat2`
+whiteout/exchange from the upper filesystem, which ZFS provides since
+OpenZFS 2.2 (older releases refuse or misbehave). `upperDir` and `workDir`
+must sit on the SAME dataset, and the overlay mounts after the pool import
+(`zfs-mount.service`) — both pinned on a real appliance swap by
+`ab-data-pool-vm`. On older ZFS, keep the upper on the ext4 root instead.
 
 ## Upper lifecycle across OTA updates: `upperOnUpdate`
 
 An update replaces the lower store; pick a policy for the upper layer:
 
-- `"none"` (default): nothing happens automatically. Today's behaviour —
-  fine for world B with a persistent upper, or any tmpfs-upper appliance.
-- `"wipe"`: before `systemd-sysupdate` writes the inactive slot, the upper
-  layer, work dir and the overlay store state (`/nix/var/nix`) are cleared.
-  Deterministic, needs no cache — but ad-hoc installs do not survive an
-  update (a no-op update leaves the machine fully working; the nix daemon is
-  stopped only for the wipe instant).
+- `"wipe"` (default): before `systemd-sysupdate` writes the inactive slot,
+  the upper layer, work dir and the overlay store state (`/nix/var/nix`)
+  are cleared. Deterministic, needs no cache — but ad-hoc installs do not
+  survive an update (a no-op update leaves the machine fully working; the
+  nix daemon is stopped only for the wipe instant). The shipped lower DB
+  re-seeds from the new slot's dump at the next boot.
 - `"reconcile"`: before the update, gc-roots and profile targets are
   captured; after the reboot a reconcile pass runs `nix-store --verify`
   (drops DB entries whose files are gone and that nothing valid refers to)
@@ -76,6 +87,13 @@ An update replaces the lower store; pick a policy for the upper layer:
   keeps the last two sysupdate packages; extend retention if you rely on
   repair).
 
+There is no carry-over value: with the shipped lower DB a carried upper
+deterministically dangles after a swap. `"none"` was removed — a
+configuration that sets it explicitly fails evaluation with the enum naming
+the two valid values; a configuration that never set the option moves to
+`"wipe"` (its upper is cleared at the next update). To keep ad-hoc installs
+across updates, choose `"reconcile"` with a substituter configured.
+
 ## Garbage collection
 
 `nix-collect-garbage` reaps upper-only paths; the lower image is never
@@ -84,19 +102,18 @@ a path that is also valid in the lower, the module's configured
 `remount-hook` rebuilds the overlay mount so the merged view stays coherent —
 no unhandled "needs remounting" warnings.
 
-## Known limitations (world B)
+## Operating notes (world A)
 
-- **Lower paths are invisible to nix operations**: realizing a path that
-  exists in the lower image downloads a duplicate copy into the upper (or
-  fails without a substituter) — the database does not know about lower
-  content.
-- **The upper and its DB grow across generations**: nothing reclaims space
-  relative to new lower images; run GC periodically or use `"wipe"`.
-- **Unregistered references**: a manually registered (or `--load-db`-seeded)
-  path whose files live only in the current lower becomes a dangling DB
-  entry after the next swap — `nix-store --verify` reports it; that is
-  exactly the world-A construct the replication suite
-  (`vmTests.overlay-nix-ota-invalid-vm`) pins.
+- **Delta installs**: a path already valid in the lower is never copied
+  into the upper — only missing paths land there (pinned by the
+  `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` suites).
+- **Stale records across swaps**: DB loading is additive, so old-slot
+  records accumulate until healed — `nix-store --verify` reports them, the
+  `reconcile` pass repairs what the substituter still serves.
+- **Content-addressed world**: the lower closure is built
+  content-addressed, and the module adds `ca-derivations` to the daemon's
+  experimental features so runtime evaluation (e.g. `nix-env`) works over
+  it — see [`ota.md`](ota.md) for the evaluation-side requirement.
 
 How the OTA route stages and installs updates:
 [`ota.md`](ota.md). Test inventory:

@@ -58,12 +58,15 @@ let
       script = ''
         set -euo pipefail
         mkdir -p ${stage}
-        # 3 versions (retain=2 will drop v1)
+        # 3 versions (retain=2 will drop v1); each version = .raw + .efi +
+        # .lower-db (the slot's lower store DB dump ships with the update
+        # artifact — the lower-store-db change).
         for v in 1 2 3; do
           head -c $((100*1024)) /dev/urandom > ${stage}/abtest_''${v}.nix-store.raw
           head -c $(( 50*1024)) /dev/urandom > ${stage}/abtest_''${v}.efi
+          head -c $(( 5*1024)) /dev/urandom > ${stage}/abtest_''${v}.lower-db
         done
-        ( cd ${stage} && sha256sum *.raw *.efi > SHA256SUMS )
+        ( cd ${stage} && sha256sum *.raw *.efi *.lower-db > SHA256SUMS )
         # sign with the test key (both nodes start signed; nokey will have GC drop it)
         GNUPGHOME=$(mktemp -d); export GNUPGHOME
         gpg --batch --import "${testSignKey}/priv.asc" 2>/dev/null
@@ -93,13 +96,16 @@ pkgs.testers.runNixOSTest {
     pre_gpg = withkey.succeed("sha256sum ${stage}/SHA256SUMS.gpg")
 
     withkey.succeed("systemctl start nixtache-ab-gc.service")
-    # v1 gone (both .raw and .efi), v2/v3 kept
+    # v1 gone (.raw, .efi and its .lower-db), v2/v3 kept
     withkey.fail("test -e ${stage}/abtest_1.nix-store.raw")
     withkey.fail("test -e ${stage}/abtest_1+*.efi")
+    withkey.fail("test -e ${stage}/abtest_1.lower-db")
     withkey.succeed("test -f ${stage}/abtest_2.nix-store.raw")
     withkey.succeed("test -f ${stage}/abtest_3.nix-store.raw")
+    withkey.succeed("test -f ${stage}/abtest_2.lower-db")
+    withkey.succeed("test -f ${stage}/abtest_3.lower-db")
     # SHA256SUMS regenerated to match exactly the survivors
-    withkey.succeed("cd ${stage} && sha256sum *.raw *.efi | sort > /tmp/now && sort SHA256SUMS > /tmp/before && diff /tmp/before /tmp/now")
+    withkey.succeed("cd ${stage} && sha256sum *.raw *.efi *.lower-db | sort > /tmp/now && sort SHA256SUMS > /tmp/before && diff /tmp/before /tmp/now")
     # .gpg was RE-SIGNED (content changed) and the new signature VERIFIES
     post_gpg = withkey.succeed("sha256sum ${stage}/SHA256SUMS.gpg")
     assert pre_gpg != post_gpg, "withkey FAIL: .gpg not re-signed (still stale)"

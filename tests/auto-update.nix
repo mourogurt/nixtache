@@ -28,6 +28,8 @@ let
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
     nixpkgs.hostPlatform = system;
+    # The appliance world evaluates content-addressed (ab-image asserts it).
+    nixpkgs.config.contentAddressedByDefault = true;
     # Dummy root FS + grub off: lets probeOK force toplevel.outPath without
     # firing base NixOS bootability assertions (same pattern as ab-contract.nix).
     fileSystems."/".fsType = lib.mkDefault "tmpfs";

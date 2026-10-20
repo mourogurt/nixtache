@@ -574,23 +574,56 @@ self.nixosModules.runner
     checks = { refused = !tryAbMismatch.success; };
   };
 
-  # --- scenario J: clone on an appliance-style container (nix.enable=false) --
-  # On an A/B appliance there is no system nix-daemon, so nix-daemon-storage
-  # must not require it and must clone from the local store directly (no
-  # NIX_REMOTE=daemon), while nix-daemon-custom runs standalone (spec §11.3).
+  # --- scenario J: appliance HOST (nix.enable=false) → container appliance mode
+  # The module keys the container's appliance mode on the HOST: the container's
+  # nix module is disabled (no system daemon can exist inside it — the
+  # daemon-socket dir is a read-only host bind), gc/optimise go with it
+  # (nixpkgs asserts they need nix), the module renders nix.conf itself with
+  # the same settings content (CI keeps system-features/substituters/
+  # trusted-users), and the nix CLI ships explicitly. Clone seeds standalone
+  # from a scratch copy of the host's (now real) store DB (§11.3).
   hostApplianceClone = mkHost "/srv" {
     services.nixtache.runner.enableSandbox = false;
-    containers.runner.config = {
-      nix.enable = false;
-      # nixpkgs asserts nix.gc.automatic → nix.enable, so the GC timer goes
-      # with the daemon.
-      nix.gc.automatic = false;
+    nix.enable = false;
+  };
+  cfgAppliance = containerCfg hostApplianceClone;
+  svcAppliance = servicesOf hostApplianceClone;
+
+  # --- scenario: appliance HOST (nix.enable=false) — nspawn bind sources ----
+  # nixpkgs' container start unconditionally bind-ros the host's
+  # /nix/var/nix/db + daemon-socket into the container; on a nix-less
+  # appliance those paths don't exist and the container fails to start.
+  # The module guarantees them as empty dirs via tmpfiles.
+  hostApplianceHost = mkHost "/srv" {
+    services.nixtache.runner.enableSandbox = false;
+    nix.enable = false;
+  };
+  scenarioApplianceHost = {
+    name = "appliance host (nix.enable=false): nspawn bind sources guaranteed via tmpfiles";
+    checks = {
+      hostDbDir = lib.elem "d /nix/var/nix/db 0755 root root -"
+        hostApplianceHost.config.systemd.tmpfiles.rules;
+      hostSocketDir = lib.elem "d /nix/var/nix/daemon-socket 0755 root root -"
+        hostApplianceHost.config.systemd.tmpfiles.rules;
     };
   };
-  svcAppliance = servicesOf hostApplianceClone;
   scenarioApplianceClone = {
-    name = "clone on appliance container (nix.enable=false): storage standalone, custom daemon standalone (§11.3)";
+    name = "appliance host → container appliance mode: nix module disabled, nix.conf rendered, CLI shipped, clone standalone (§11.3)";
     checks = {
+      containerNixDisabled = cfgAppliance.nix.enable == false;
+      gcOff = cfgAppliance.nix.gc.automatic == false;
+      optimiseOff = cfgAppliance.nix.optimise.automatic == false;
+      nixConfRendered = cfgAppliance.environment.etc ? "nix/nix.conf";
+      # The fleet's closure is content-addressed — the rendered nix.conf must
+      # carry the feature (the daemon ignores client-side overrides, so the
+      # in-container system conf is the only effective source).
+      nixConfHasCa = lib.hasInfix "ca-derivations"
+        (cfgAppliance.environment.etc."nix/nix.conf".source.text or "");
+      nixCliShipped = builtins.elem cfgAppliance.nix.package cfgAppliance.environment.systemPackages;
+      # The CI-critical feature list still reaches the container's settings
+      # (the host's nix module is off, so the module propagates the evaluated
+      # value via specialArgs).
+      systemFeaturesKept = builtins.elem "kvm" (cfgAppliance.nix.settings.system-features or [ ]);
       hasStorage = has svcAppliance "nix-daemon-storage";
       storageNoRequires = (svcAppliance."nix-daemon-storage".requires or [ ]) == [ ];
       storageNoDaemonEnv = !(lib.elem "NIX_REMOTE=daemon"
@@ -604,6 +637,38 @@ self.nixosModules.runner
       customDaemonBuildsAsRoot =
         lib.hasInfix "build-users-group ="
           (svcAppliance."nix-daemon-custom".environment.NIX_CONF or "");
+    };
+  };
+
+  # --- scenario: overlay mode lower-store provider — host-dependent ----------
+  # nix-enabled host: the container's system nix-daemon provides the lower
+  # (lower-store=daemon). Appliance host: no system daemon can exist, so the
+  # overlay reads the RO-bound host DB directly (lower-store=local) — the
+  # daemon URL would self-reference and fork-loop otherwise.
+  hostOverlay = mkHost "/srv" {
+    services.nixtache.runner = {
+      enableSandbox = false;
+      store.mode = "overlay";
+    };
+  };
+  hostApplianceOverlay = mkHost "/srv" {
+    services.nixtache.runner = {
+      enableSandbox = false;
+      store.mode = "overlay";
+    };
+    nix.enable = false;
+  };
+  execOverlayOf = host: (servicesOf host)."nix-daemon-custom".serviceConfig.ExecStart or "";
+  scenarioOverlayLower = {
+    name = "overlay mode: lower-store=daemon on nix-enabled hosts, lower-store=local on appliance hosts";
+    checks = {
+      hostLowerDaemon = lib.hasInfix "lower-store=daemon" (execOverlayOf hostOverlay);
+      hostNoLocal = !(lib.hasInfix "lower-store=local" (execOverlayOf hostOverlay));
+      applianceLowerLocal = lib.hasInfix "lower-store=local" (execOverlayOf hostApplianceOverlay);
+      applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
+      # Appliance overlay: no storage oneshot (the overlay mount replaces it).
+      applianceNoStorage = !(has (servicesOf hostApplianceOverlay) "nix-daemon-storage");
+      applianceOverlayMount = has (servicesOf hostApplianceOverlay) "nix-daemon-overlay-mount";
     };
   };
 
@@ -684,6 +749,8 @@ self.nixosModules.runner
     scenarioForgejoPort
     scenarioAbBasenameAssert
     scenarioApplianceClone
+    scenarioApplianceHost
+    scenarioOverlayLower
     scenarioGitSshHost
     scenarioResources
   ];

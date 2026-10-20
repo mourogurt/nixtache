@@ -78,6 +78,10 @@ let
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest";
             nixpkgs.hostPlatform = system;
+            # The appliance ships its closure's REGISTERED validity records —
+            # content-true only under content-addressing (the ab-image module
+            # asserts this). All A/B fixtures therefore evaluate CA.
+            nixpkgs.config.contentAddressedByDefault = true;
 
             services.nixtache.ab-image = {
               enable = true;

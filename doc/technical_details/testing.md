@@ -29,6 +29,7 @@ scope here and belongs to NixOS VM tests if ever needed.
 | `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH creds, sandbox cap on/off, deploy map wiring, `runner.envs` | `checks.<system>.runner` |
 | `tests/deploy-target.nix` | the target side — apply unit, deploy user, polkit, health check, rollback wiring | `checks.<system>.deploy-target` |
 | `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify | `checks.<system>.ab-image` |
+| `tests/overlay-nix.nix` | the overlay-nix module — `upperOnUpdate` enum (wipe/reconcile), default, hook wiring (runtime swap behaviour lives in vmTests) | `checks.<system>.overlay-nix` |
 | `tests/ab-existing.nix` | conformance of the implemented ab-image / deploy-target wiring (image layout, transfers, verify) | `checks.<system>.ab-existing` |
 | `tests/ab-contract.nix` | wiring + assertion contracts for ab-provision / overlay-nix / runner store modes — unwired from `checks` while the in-flight overlay upper-lifecycle change rewrites those contracts (the suite pins the old defaults and would gate CI red mid-change); re-wire when that change lands | — |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
@@ -52,16 +53,30 @@ smoke subset) + a weekly-full / nightly-smoke schedule. Full inventory:
 `overlay-nix-vm`, `overlay-nix-install-vm`, `overlay-nix-ab-swap-vm`,
 `overlay-nix-ota-invalid-vm` (+ `-wipe`/`-reconcile`/`-reconcile-degraded`/
 `-tmpfs` variants), `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
-`ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `runner-store-mode-vm`,
-`ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
-`ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
+`ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `ab-ota-migrate-boot-vm` (+
+`-override` variant), `ab-data-pool-vm`, `runner-store-mode-vm`,
+`runner-store-swap-clone-vm`, `runner-store-swap-overlay-vm` (the runner's
+relocated store across a real appliance swap — green since the image ships
+the lower store DB), `ab-runner-compat-vm`, `ab-compression-vm`,
+`ab-staging-vm`, `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
+
+The migrate pair splits the migration contract:
+`ab-ota-migrate-vm` pins the live side (provisioning, idempotency, update
+machinery ready, live closure retained) and deliberately never boots the
+staged image; `ab-ota-migrate-boot-vm` boots a legacy-labeled disk
+(partlabels `ESP`/`nixos`, `default nixos-*` in loader.conf) through the
+first OTA cutover — unarmed staging does not cut over, wrong labels roll
+back safely, relabeled partitions (or mkForce'd `fileSystems`) cut over,
+signed staging throughout (Transfer.Verify=yes).
 
 Every overlay test names its lower-DB world (see
-[`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): the
-`ota-invalid` suite CONSTRUCTS the delta-upper world (validity seeded via
-`nix-store --load-db`), while `overlay-nix-install-vm` runs against a
-host-store lower with a real database — results do not transfer between
-worlds.
+[`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): since the
+appliance image ships the lower store DB, the `ota-invalid` and `ab-swap`
+suites run the shipped world A — validity out of the box, delta-only
+installs — with no manual DB-seeding construct anymore (the replication-era
+`--load-db` seeding is retired), while `overlay-nix-install-vm` runs against
+a host-store lower with its own database (a harness world) — results do not
+transfer between worlds.
 
 Every test file is a function `{ nixpkgs, self, system }:` returning a
 `pkgs.runCommand` derivation. Its builder prints a human-readable report (one
@@ -216,7 +231,7 @@ containers-on-bare-metal to skip nesting entirely.
 
 In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then an
 explicit `nix build` loop prints each `checks.x86_64-linux.<suite>` report
-(runner, deploy-target, ab-image, mkDocs, ab-existing,
+(runner, deploy-target, ab-image, overlay-nix, mkDocs, ab-existing,
 auto-update, ab-deploy-drift, ci-workflow-drift) to the job
 log, and the `nixtache-options` docs artifact is generated.
 

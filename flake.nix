@@ -58,6 +58,9 @@
         deploy-target = import ./tests/deploy-target.nix { inherit nixpkgs self system; };
         # ab-image module pure-eval: fixed vs max-disk sizing + Verify (fast, no KVM).
         ab-image = import ./tests/ab-image.nix { inherit nixpkgs self system; };
+        # overlay-nix module pure-eval: upperOnUpdate enum (wipe/reconcile),
+        # default, hook wiring. Runtime swap behaviour lives in vmTests.
+        overlay-nix = import ./tests/overlay-nix.nix { inherit nixpkgs self system; };
         mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
         # ── Conformance / contract tests for the landed A/B modules.
         # Pure-eval suites are fast (no KVM); the `*-vm` suites live in
@@ -124,14 +127,15 @@
         # boot v1 appliance → install vim into upper → sysupdate to v2 → reboot
         # into v2 → vim still works + v2 lower visible. 2-boot, heavy.
         overlay-nix-ab-swap-vm = import ./tests/overlay-nix-ab-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # overlay-nix-ota-invalid-vm: the replication research suite —
-        # constructs the delta-upper world (validity seeded via
-        # nix-store --load-db), realizes a tool whose interpreter lives only
-        # in v1's lower, swaps to v2 and pins the dangling-reference hazard
-        # plus the GC probe. Baseline variant: no lifecycle mode (world as
-        # shipped). The wipe / reconcile / degraded-reconcile variants cover
-        # the upperOnUpdate matrix (degraded cuts the substituter before the
-        # swap: red unit, intact boot, marker retry heals).
+        # overlay-nix-ota-invalid-vm: overlay-nix across a real OTA swap on the
+        # shipped world A (the image carries the lower store DB — loaded at
+        # boot, no manual seed): shipped validity out of the box, a delta-only
+        # install, then the swap pins the lifecycle matrix. Baseline = the
+        # module default ("wipe"); the explicit-wipe variant pins the value;
+        # reconcile / degraded-reconcile cover the substituter repair
+        # (degraded cuts the cache before the swap: red unit, intact boot,
+        # marker retry heals). tmpfs upper: nothing persists — overlay health
+        # across the swap only.
         overlay-nix-ota-invalid-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         overlay-nix-ota-invalid-wipe-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; overlayOptions.upperOnUpdate = "wipe"; };
         overlay-nix-ota-invalid-reconcile-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; overlayOptions.upperOnUpdate = "reconcile"; };
@@ -173,6 +177,25 @@
         # space (idempotent), signed first image into the inactive slot, the
         # live generation retained as fallback.
         ab-ota-migrate-vm = import ./tests/ab-ota-migrate-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # ab-ota-migrate-boot-vm: the disk side of migration — a legacy-labeled
+        # disk (ESP/nixos) boots the staged UKI: unarmed staging keeps the
+        # live-era `default nixos-*` pin (no cutover), armed-with-wrong-labels
+        # rolls back safely (boot counting), relabeling to root/boot cuts over
+        # with the legacy entry retained as fallback. The override variant
+        # mkForce's fileSystems at the legacy labels instead of relabeling.
+        ab-ota-migrate-boot-vm = import ./tests/ab-ota-migrate-boot-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        ab-ota-migrate-boot-override-vm = import ./tests/ab-ota-migrate-boot-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; fileSystemsOverride = true; };
+        # ab-data-pool-vm: consumer storage outside the slots across swaps —
+        # a ZFS pool on a second disk imports and serves state on v1 → v2 →
+        # rollback; the overlay-nix upper lives on the pool (OverlayFS-on-ZFS
+        # pin). Signed staging.
+        ab-data-pool-vm = import ./tests/ab-data-pool-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        # runner-store-swap-vm: R4 un-skipped — the runner's relocated store
+        # (clone / overlay) on a REAL appliance across a slot swap: container
+        # up on both boots, build works pre/post swap, clone additive,
+        # overlay coherent. Signed staging.
+        runner-store-swap-clone-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; storeMode = "clone"; };
+        runner-store-swap-overlay-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; storeMode = "overlay"; };
       };
 
       # --- This flake's own option docs -----------------------------------

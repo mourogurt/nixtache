@@ -58,6 +58,15 @@ jobs:
           - ab-ota-noop-vm
           - ab-ota-interrupted-vm
           - ab-ota-migrate-vm
+          - ab-ota-migrate-boot-vm
+          - ab-ota-migrate-boot-override-vm
+          - ab-data-pool-vm
+          # runner-store-swap-{clone,overlay}-vm: the runner's relocated store
+          # across a real appliance swap — green since the lower-store-db
+          # change (the image ships the lower DB; the container runs in
+          # appliance mode). Both modes in the matrix.
+          - runner-store-swap-clone-vm
+          - runner-store-swap-overlay-vm
           - auto-update-vm
           - overlay-nix-vm
           - overlay-nix-install-vm

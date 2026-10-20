@@ -236,22 +236,26 @@ in
     };
 
     upperOnUpdate = mkOption {
-      type = types.enum [ "none" "wipe" "reconcile" ];
-      default = "none";
+      type = types.enum [ "wipe" "reconcile" ];
+      default = "wipe";
       description = ''
         Lifecycle policy for the writable upper layer across A/B (OTA) updates.
-        A slot swap replaces the read-only lower store, which can leave upper
-        paths (and their database entries) referencing files that only existed
-        in the old lower image.
+        A slot swap replaces the read-only lower store, which — with the
+        shipped lower store database — deterministically leaves upper paths
+        referencing files that only existed in the old lower image. There is
+        no carry-over value: the policy applies whenever an update is
+        triggered, on every appliance shape (OTA on/off × overlay on/off
+        reduces to "no updates happen" when OTA is off, where the hook is
+        inert).
 
-        - `"none"` (default): no lifecycle action — upper content and database
-          entries are carried across the swap unchanged.
-        - `"wipe"`: before `systemd-sysupdate` writes the inactive slot, the
-          upper layer, its work dir and the overlay store state under
-          `/nix/var/nix` are cleared. Disposable-upper policy: deterministic
-          and substituter-independent, but ad-hoc installs do not survive an
-          update. The nix daemon is stopped for the wipe and restarted right
-          away (a no-op update must leave a working machine).
+        - `"wipe"` (default): before `systemd-sysupdate` writes the inactive
+          slot, the upper layer, its work dir and the overlay store state
+          under `/nix/var/nix` are cleared. Disposable-upper policy:
+          deterministic and substituter-independent, but ad-hoc installs do
+          not survive an update. The nix daemon is stopped for the wipe and
+          restarted right away (a no-op update must leave a working machine).
+          The shipped lower store database is re-seeded from the slot's dump
+          at the next boot.
         - `"reconcile"`: before the update, gc-roots and profile targets are
           captured to `/var/lib/nixtache/overlay-capture`; after the reboot a
           reconcile pass runs `nix-store --verify` (drops database entries
@@ -263,6 +267,12 @@ in
           references (e.g. the runner's binary cache); without it the
           reconcile unit fails red, the boot is unaffected and the pass
           retries on the next boot or a manual restart.
+
+        Migration from the removed `"none"` value: configurations that set it
+        explicitly fail evaluation (this enum lists the two valid values);
+        configurations that never set the option move to `"wipe"`. To keep a
+        carried upper across updates, choose `"reconcile"` with a substituter
+        that serves the old lower's paths.
       '';
     };
   };
@@ -292,7 +302,7 @@ in
     # (run/shell/build/realise/GC) talks to the system daemon via the standard
     # socket and gets the layered view.
     nix.settings.store = overlayStoreUrl;
-    nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" ];
+    nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" "ca-derivations" ];
     # A/B appliances are typically offline — the global flake registry download
     # would fail and block every `nix run/shell/build`. Disable it; local
     # registry entries (nix.registry.*) still work.
@@ -351,11 +361,13 @@ in
     };
     }
 
-    (mkIf (cfg.upperOnUpdate != "none") {
+    {
     # Lifecycle hook: one drop-in attachment point covers every update
     # trigger (the deploy action's SSH trigger, the idle-gated
     # nixtache-ab-apply, the auto-update poll and sysupdate's own timer) —
     # starting systemd-sysupdate always pulls the pre-update unit first.
+    # Unconditional: with only wipe/reconcile values left, a policy always
+    # applies (on hosts without OTA the hook simply never gets triggered).
     systemd.services.nixtache-overlay-preupdate = {
       description = "nixtache overlay-nix: ${cfg.upperOnUpdate} the upper layer before an A/B update";
       before = [ "systemd-sysupdate.service" ];
@@ -372,7 +384,7 @@ in
       wants = [ "nixtache-overlay-preupdate.service" ];
       after = [ "nixtache-overlay-preupdate.service" ];
     };
-    })
+    }
 
     (mkIf (cfg.upperOnUpdate == "reconcile") {
     systemd.services.nixtache-overlay-reconcile = {
