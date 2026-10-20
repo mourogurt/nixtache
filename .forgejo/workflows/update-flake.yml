@@ -28,25 +28,6 @@ jobs:
           path: .nixtache
           ref: main
 
-      - name: Guard — update-flake enabled?
-        # update-flake needs push credentials. The nixtache runner module
-        # exports NIXTACHE_UPDATE_GIT_USER only when `updateSshCreds` is set;
-        # if it's absent, no-op the whole job with a warning instead of failing
-        # at the push step.
-        id: guard
-        shell: bash
-        run: |
-          # The "Deploy artifacts" upload below is `if: always()` — the
-          # directory must exist even when every work step is skipped or the
-          # first step fails, so create it here unconditionally.
-          mkdir -p artifacts
-          if [ -z "${NIXTACHE_UPDATE_GIT_USER:-}" ]; then
-            echo "::warning::update-flake disabled: services.nixtache.runner.updateSshCreds is null (no push credential). Set updateSshCreds to enable."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Derive git host
         # SSH push target = NIXTACHE_GIT_SSH_HOST (the runner module's
         # gitHost.hostNames[0] — the canonical SSH endpoint). Fallback for
@@ -54,8 +35,8 @@ jobs:
         # hostname. GITHUB_SERVER_URL itself is the HTTP endpoint — its port
         # is the HTTP port (e.g. localhost:7111 behind nginx), NOT an SSH
         # port, so it must be stripped; ssh (default 22, or a Port from the
-        # ssh-setup config) handles transport.
-        if: steps.guard.outputs.enabled == 'true'
+        # ssh-setup config) handles transport. Runs unconditionally: both
+        # ssh-setup and the guard probe need the host.
         id: githost
         shell: bash
         run: |
@@ -67,12 +48,43 @@ jobs:
           echo "host=$host" >> "$GITHUB_OUTPUT"
 
       - name: Setup SSH
-        if: steps.guard.outputs.enabled == 'true'
+        # Unconditional: the action warns and skips bundles the runner does
+        # not provide, and the guard below needs the SSH config in place to
+        # probe the update credential. Both bundles: `flake` fetches private
+        # inputs during nix flake update, `update` pushes and signs.
         id: ssh
         uses: ./.nixtache/.forgejo/actions/ssh-setup
         with:
           git-host: ${{ steps.githost.outputs.host }}
-          creds: update
+          creds: flake update
+
+      - name: Guard — update-flake enabled?
+        # update-flake needs push credentials. The nixtache runner module
+        # exports NIXTACHE_UPDATE_GIT_USER only when `updateSshCreds` is set;
+        # if it's absent, no-op the whole job with a warning. When it IS set,
+        # validate the key immediately — authenticate and read the caller repo
+        # over the push URL — so a broken key fails here instead of at the
+        # final push, after a full update+validate+rebuild run. ls-remote
+        # proves auth and repo read access; write permission cannot be probed
+        # without pushing.
+        id: guard
+        shell: bash
+        run: |
+          # The "Deploy artifacts" upload below is `if: always()` — the
+          # directory must exist even when every work step is skipped or the
+          # first step fails, so create it here unconditionally.
+          mkdir -p artifacts
+          if [ -z "${NIXTACHE_UPDATE_GIT_USER:-}" ]; then
+            echo "::warning::update-flake disabled: services.nixtache.runner.updateSshCreds is null (no push credential). Set updateSshCreds to enable."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          url="ssh://${NIXTACHE_UPDATE_GIT_USER}@${{ steps.githost.outputs.host }}/${GITHUB_REPOSITORY}"
+          if ! timeout 30 git ls-remote "$url" HEAD > /dev/null 2>&1; then
+            echo "::error::update-flake: updateSshCreds is set but the update key cannot read $url (auth or repo access failed). Fix the deploy key on the git server, or set updateSshCreds = null to disable update-flake."
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
 
       - name: Setup Git
         # Bot identity (commit author) from the runner module (NIXTACHE_BOT_*),
@@ -96,6 +108,15 @@ jobs:
           # by the guard step above.
           set -o pipefail
           nix flake update --commit-lock-file 2>&1 | tee artifacts/flake-update.log
+          # nix downgrades input fetch failures to warnings ("using expired
+          # cached ref", "continuing with the most recent version") and still
+          # exits 0 — an unreachable private input would otherwise produce a
+          # green run pushing a stale lock file. Fail on the error lines in
+          # the captured log.
+          if grep -E '^error: Failed to fetch|Permission denied|Could not read from remote' artifacts/flake-update.log; then
+            echo "::error::nix flake update could not fetch all inputs (see artifacts/flake-update.log); refusing to push a stale lock file."
+            exit 1
+          fi
 
       - name: Validate Nix Configuration
         if: steps.guard.outputs.enabled == 'true'

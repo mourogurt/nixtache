@@ -9,8 +9,8 @@ not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
 
 | module option | job env / credential | used by |
 |---|---|---|
-| `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`) |
-| `updateSshCreds.user` | `NIXTACHE_UPDATE_GIT_USER` + `update_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: update) + `update-flake.yml` push URL + commit signing |
+| `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`, `nix flake update`) |
+| `updateSshCreds.user` | `NIXTACHE_UPDATE_GIT_USER` + `update_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: update) + `update-flake.yml` guard probe, push URL + commit signing |
 | `bot.name` / `bot.email` | `NIXTACHE_BOT_NAME` / `NIXTACHE_BOT_EMAIL` | `update-flake.yml` commit author |
 | `gitHost.hostNames[0]` | `NIXTACHE_GIT_SSH_HOST` | `update-flake.yml` SSH push host (canonical SSH endpoint; `GITHUB_SERVER_URL` is HTTP-only — its port is the HTTP port, not SSH) |
 | `deploy.targets` | `NIXTACHE_DEPLOY_TARGETS` (JSON, secret paths stripped to `hasKey` bools) + `deploy_ssh_<name>[.pub]` LoadCredential | `deploy-target` action → pairs configs and targets by attribute name |
@@ -36,5 +36,12 @@ The two credential bundles are **independent**: `flakeSshCreds` gates
 private-input fetch, `updateSshCreds` gates update-flake push. Typically the
 consumer points both at the same key files. If `updateSshCreds = null`,
 `NIXTACHE_UPDATE_GIT_USER` is empty and `update-flake.yml` **self-disables**
-(a guard step no-ops the job with a warning). The bot's commit identity is
-separate (`bot.*`).
+(a guard step no-ops the job with a warning). When it is set, the guard
+instead **validates** the credential: `git ls-remote` over the push URL proves
+the key authenticates and can read the caller repo, and a broken key fails the
+job at the guard — not at the final push (write permission itself cannot be
+probed without pushing). update-flake wires **both** bundles into one SSH
+config (`creds: "flake update"` — fetch with `flake`, push/sign with
+`update`); requirements:
+[`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md).
+The bot's commit identity is separate (`bot.*`).

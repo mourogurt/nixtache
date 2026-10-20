@@ -11,7 +11,7 @@ inputs:
     required: false
     default: "git"
   creds:
-    description: "Which credential bundle to use: `flake` (fetch private flake inputs) or `update` (update-flake push+sign). Selects the LoadCredential (flake_ssh_* / update_ssh_*) and the NIXTACHE_<CREDS>_GIT_USER env."
+    description: "Credential bundle(s) to use, space-separated: `flake` (fetch private flake inputs) and/or `update` (update-flake push+sign). Each selects the LoadCredential pair (<creds>_ssh_*) and the NIXTACHE_<CREDS>_GIT_USER env; one Host block gets one IdentityFile per available bundle."
     required: false
     default: "flake"
   required:
@@ -42,36 +42,52 @@ runs:
         # Keys are provided by the runner host via systemd LoadCredential, one
         # pair per purpose: `<creds>_ssh_private` / `<creds>_ssh_public` where
         # <creds> ∈ {flake, update} (see nixtache runner module flakeSshCreds /
-        # updateSshCreds). Each pair is present only when the consumer set the
-        # matching option, so missing creds => graceful skip (or error if
-        # `required: true`).
-        creds="${{ inputs.creds }}"
+        # updateSshCreds). `creds` accepts a space-separated list so one job
+        # can both fetch private inputs (flake) and push/sign (update) through
+        # a single core.sshCommand: the Host block below gets one IdentityFile
+        # line per available bundle and ssh offers them in order. A bundle
+        # whose key pair is absent is skipped with a warning (or fails the
+        # step when `required: true`).
         cred_dir="${CREDENTIALS_DIRECTORY:-}"
-        if [ -z "$cred_dir" ] || [ ! -f "$cred_dir/${creds}_ssh_private" ] || [ ! -f "$cred_dir/${creds}_ssh_public" ]; then
-          msg="ssh-setup: '${creds}' SSH credentials not provided by the runner (LoadCredential ${creds}_ssh_private/${creds}_ssh_public absent — services.nixtache.runner.${creds}SshCreds is null)."
-          if [ "${{ inputs.required }}" = "true" ]; then
-            echo "::error::$msg"
-            exit 1
+        requested="${{ inputs.creds }}"
+        available=""
+        for creds in $requested; do
+          if [ -n "$cred_dir" ] && [ -f "$cred_dir/${creds}_ssh_private" ] && [ -f "$cred_dir/${creds}_ssh_public" ]; then
+            # Single-bundle invocations keep the historical id_key filename so
+            # existing callers' generated configs stay byte-identical.
+            dest="id_key"
+            if [ "$requested" != "$creds" ]; then dest="id_key_$creds"; fi
+            cp "$cred_dir/${creds}_ssh_private" "$ssh_dir/$dest"
+            cp "$cred_dir/${creds}_ssh_public" "$ssh_dir/$dest.pub"
+            chmod 400 "$ssh_dir/$dest" "$ssh_dir/$dest.pub"
+            available="$available $creds"
+          else
+            msg="ssh-setup: '${creds}' SSH credentials not provided by the runner (LoadCredential ${creds}_ssh_private/${creds}_ssh_public absent — services.nixtache.runner.${creds}SshCreds is null)."
+            if [ "${{ inputs.required }}" = "true" ]; then
+              echo "::error::$msg"
+              exit 1
+            fi
+            echo "::warning::$msg Skipping the '${creds}' bundle."
           fi
-          echo "::warning::$msg Skipping SSH setup."
+        done
+        available="${available# }"
+
+        if [ -z "$available" ]; then
+          echo "::warning::ssh-setup: none of the requested bundles ($requested) provided by the runner; git/ssh fall back to the default environment."
           echo "key-path=" >> "$GITHUB_OUTPUT"
           echo "config-path=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        # Git SSH user for this purpose: the runner module exports
-        # NIXTACHE_<CREDS>_GIT_USER (server RUN_USER, e.g. forgejo/git); fall
-        # back to the `git-user` input.
-        case "$creds" in
-          flake) git_user="${NIXTACHE_FLAKE_GIT_USER:-${{ inputs.git-user }}}" ;;
-          update) git_user="${NIXTACHE_UPDATE_GIT_USER:-${{ inputs.git-user }}}" ;;
-          *) git_user="${{ inputs.git-user }}" ;;
+        # Git SSH user: the runner module exports NIXTACHE_<CREDS>_GIT_USER
+        # (server RUN_USER, e.g. forgejo/git); fall back to the `git-user`
+        # input. With several bundles the update user wins — push/sign is the
+        # privileged operation the config exists for.
+        case " $available " in
+          *" update "*) git_user="${NIXTACHE_UPDATE_GIT_USER:-${{ inputs.git-user }}}" ;;
+          *" flake "*)  git_user="${NIXTACHE_FLAKE_GIT_USER:-${{ inputs.git-user }}}" ;;
+          *)            git_user="${{ inputs.git-user }}" ;;
         esac
-
-        cp "$cred_dir/${creds}_ssh_private" "$ssh_dir/id_key"
-        cp "$cred_dir/${creds}_ssh_public" "$ssh_dir/id_key.pub"
-        chmod 400 "$ssh_dir/id_key"
-        chmod 400 "$ssh_dir/id_key.pub"
 
         # git-host may carry a port (host:port, e.g. a Forgejo test instance
         # at localhost:7111); split it into HostName + Port so the `Host`
@@ -86,9 +102,20 @@ runs:
         echo "  HostName $git_host" >> "$cfg"
         [ -n "$git_port" ] && echo "  Port $git_port" >> "$cfg"
         echo "  User $git_user" >> "$cfg"
-        echo "  IdentityFile $ssh_dir/id_key" >> "$cfg"
+        key_path=""
+        for creds in $available; do
+          dest="id_key"
+          if [ "$requested" != "$creds" ]; then dest="id_key_$creds"; fi
+          echo "  IdentityFile $ssh_dir/$dest" >> "$cfg"
+          # key-path feeds `git config user.signingkey`: the update (signing)
+          # bundle when present, else the first available bundle.
+          case " $available " in
+            *" update "*) if [ "$creds" = "update" ]; then key_path="$ssh_dir/$dest"; fi ;;
+            *) if [ -z "$key_path" ]; then key_path="$ssh_dir/$dest"; fi ;;
+          esac
+        done
 
         git config --global core.sshCommand "ssh -F $cfg"
 
-        echo "key-path=$ssh_dir/id_key" >> "$GITHUB_OUTPUT"
+        echo "key-path=$key_path" >> "$GITHUB_OUTPUT"
         echo "config-path=$cfg" >> "$GITHUB_OUTPUT"

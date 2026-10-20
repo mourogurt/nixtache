@@ -124,7 +124,9 @@ Available reusable workflows: `nix-check` (flake validation + rebuilds),
 `docs`
 ([docs-generation.md](docs-generation.md)), `update-flake` (scheduled flake
 input bump with SSH-signed bot commits; self-disables when the runner's
-`updateSshCreds` is null). See
+`updateSshCreds` is null — fetching private inputs additionally requires
+`flakeSshCreds`; the guard validates the update key before the pipeline runs,
+see [module-ci-wiring.md](../technical_details/module-ci-wiring.md)). See
 [`doc/technical_details/workflow-mechanics.md`](../technical_details/workflow-mechanics.md)
 for how reusable workflows resolve actions.
 
