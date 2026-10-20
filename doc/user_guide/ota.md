@@ -21,7 +21,7 @@ deploy-map entry.
    │ nix build sysupdate-package   │        │  ESP:  abtest_1.efi (blessed)│
    │  = nix-store.raw + UKI +      │ stage  │        abtest_2.efi (new)    │
    │    lower-db dump + sums       │───────►│  slot A: nix-store_1 (v1)    │
-   │ gpg --detach-sign SHA256SUMS  │        │  slot B: nix-store_2 (v2) ←─┼── systemd-sysupdate
+   │ gpg --detach-sign SHA256SUMS  │        │  slot B: nix-store_2 (v2) ←──┼── systemd-sysupdate
    │ (HTTPS or local dir)          │        │  root:   persistent /etc,/var│
    └───────────────────────────────┘        └──────────────────────────────┘
    reboot → systemd-boot picks the highest version → boot counting blesses
