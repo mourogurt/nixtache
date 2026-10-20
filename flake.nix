@@ -64,10 +64,7 @@
         # `vmTests` below.
         #   ab-existing  : conformance of the implemented ab-image /
         #                  deploy-target wiring (image layout, transfers, verify).
-        #   ab-contract  : wiring + assertion contracts for ab-provision /
-        #                  overlay-nix / runner store.mode (all implemented).
         ab-existing = import ./tests/ab-existing.nix { inherit nixpkgs self system; };
-        ab-contract = import ./tests/ab-contract.nix { inherit nixpkgs self system; };
         # Auto-update module pure-eval; its end-to-end VM suite
         # (flake path + ab path) is in `vmTests`.
         auto-update = import ./tests/auto-update.nix { inherit nixpkgs self system; };

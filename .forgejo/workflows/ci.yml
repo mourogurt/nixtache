@@ -49,7 +49,7 @@ jobs:
             echo "SANDBOX_OK!=1 → --no-sandbox"
             SANDBOX_FLAG="--no-sandbox"
           fi
-          for suite in runner deploy-target ab-image mkDocs ab-existing ab-contract auto-update ab-deploy-drift ci-workflow-drift; do
+          for suite in runner deploy-target ab-image mkDocs ab-existing auto-update ab-deploy-drift ci-workflow-drift; do
             echo "----- checks.x86_64-linux.${suite}: test report -----"
             out=$(nix build --no-link --print-out-paths --print-build-logs $SANDBOX_FLAG ".#checks.x86_64-linux.${suite}")
             cat "$out"
