@@ -237,10 +237,10 @@ in
           Free-space preset (bytes) for this target's runner-side pre-copy
           disk check. The action refuses the deploy pre-build when the
           target's store filesystem has less free space than this preset, and
-          post-build when it has less than (missing-closure-paths estimate ×
+          post-build when it has less than (missing-closure-paths estimate x
           1.1 + preset). `0` disables the pre-copy check entirely (no
           free-space query is issued — also useful while a target's SSH gate
-          predates the query command). Keep this ≥ the target-side
+          predates the query command). Keep this >= the target-side
           `services.nixtache.deploy-target.minFreeBytes` (the apply-unit
           guard), which it does not read.
         '';

@@ -4,7 +4,7 @@
 #   1. on the host — to pre-build toplevel / diskoScript / sysupdate-package /
 #      UKI into the test's store closure (system.extraDependencies);
 #   2. inside the deployer VM — the generated install flake re-evaluates it
-#      during `nixos-anywhere --flake …`; every input is the identical store
+#      during `nixos-anywhere --flake ...`; every input is the identical store
 #      path (path: flake inputs), so the derivations hash-match and the VM's
 #      `nix build` is always a store no-op (the VMs have no internet).
 #
@@ -61,7 +61,7 @@ fixture.mkAppliance {
         # The deployer VM re-evaluates this config with nixpkgs as a path:
         # flake input (no git sourceInfo), while the host pre-build sees the
         # github-fetched one — versionSuffix/revision would differ
-        # ("…20260804.dfce2e0" vs "…19700101.dirty"), producing different
+        # ("...20260804.dfce2e0" vs "...19700101.dirty"), producing different
         # derivations and forcing a real (offline-doomed) build in the VM.
         # Pinning both keeps the two evaluations bit-identical (same trick as
         # nixpkgs' nix-builder profile).

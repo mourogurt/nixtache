@@ -270,7 +270,7 @@ pkgs.testers.runNixOSTest {
       ab.gating = false;
       ab.partitions = {
         enable = true;
-        # Variant-controlled (A5: "25%" of the 2 GB test disk ≈ the 512M image).
+        # Variant-controlled (A5: "25%" of the 2 GB test disk ~ the 512M image).
         slotSize = vCfg.slotSize;
         autoInit = true;
         imageId = "abtest";
@@ -295,7 +295,7 @@ pkgs.testers.runNixOSTest {
     import yaml
     import re
 
-    # ── Parse the REAL action.yml to verify the extracted script is genuine ──
+    # -- Parse the REAL action.yml to verify the extracted script is genuine --
     action = yaml.safe_load(${builtins.toJSON actionYml})
     run_text = next(s["run"] for s in action["runs"]["steps"] if "run" in s)
     assert "sysupdate-package" in run_text, "action.yml missing sysupdate-package build"
@@ -310,7 +310,7 @@ pkgs.testers.runNixOSTest {
         "image-version write must precede the sysupdate-package build"
     print("Q5 OK: parsed action.yml (%d chars of run text)" % len(run_text))
 
-    # ── Boot both nodes ──────────────────────────────────────────────────────
+    # -- Boot both nodes ------------------------------------------------------
     deployer.start()
     target.start()
     deployer.wait_for_unit("nginx.service")
@@ -318,13 +318,13 @@ pkgs.testers.runNixOSTest {
     target.wait_for_unit("systemd-sysupdate.timer")
     target.wait_for_unit("nixtache-ab-provision.service")
 
-    # ── Verify initial GPT partition state on /dev/vdb (laid out by the
-    #    provision module: slot A + free slot B) ────────────────────────────
+    # -- Verify initial GPT partition state on /dev/vdb (laid out by the
+    #    provision module: slot A + free slot B) ----------------------------
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_1")
     target.succeed("sgdisk -p /dev/vdb | grep _empty")
     print("OK: provision module created nix-store_1 (v1 slot) + _empty (slot B) on /dev/vdb")
 
-    # ── Set up credentials directory (deploy key + signing key) ──────────────
+    # -- Set up credentials directory (deploy key + signing key) --------------
     deployer.succeed(
       "mkdir -p /run/credentials && "
       "cp /etc/deploy-key /run/credentials/deploy_ssh_abtest-remote && "
@@ -348,7 +348,7 @@ pkgs.testers.runNixOSTest {
         )
         return deployer.succeed("cat artifacts/deploy_abtest-remote.log")
 
-    # ── RUN 1: v1 baseline — NIXTACHE_AB_VERSION=1, dry-activate ────────────
+    # -- RUN 1: v1 baseline — NIXTACHE_AB_VERSION=1, dry-activate ------------
     # (non-main ref → mode=dry-activate: build + stage + sign, no apply).
     log = run_action("refs/heads/staging", "1")
     assert "assigning runtime version 1" in log, "v1 run did not assign runtime version 1: " + log[-500:]
@@ -362,7 +362,7 @@ pkgs.testers.runNixOSTest {
     deployer.succeed("test -f /var/lib/nixtache/ab-stage/abtest-remote/SHA256SUMS.gpg")
     print("OK: RUN 1 — runtime version 1 → image-version file → staged abtest_1.* (signed, dry-activate)")
 
-    # ── Populate slot A with the staged v1 store (the "current" system) ─────
+    # -- Populate slot A with the staged v1 store (the "current" system) -----
     # v1 = NixOS WITHOUT hello; v2 (staged by RUN 2) = NixOS WITH hello.
     # The target pulls the staged raw over HTTP — the same channel sysupdate
     # uses — and dd's it into slot A.
@@ -375,7 +375,7 @@ pkgs.testers.runNixOSTest {
     assert v1_hello == "0", f"v1 slot unexpectedly contains hello ({v1_hello})"
     print("OK: slot A populated with v1 store (no hello)")
 
-    # ── RUN 2: v2 update — NIXTACHE_AB_VERSION=2, switch (main) ─────────────
+    # -- RUN 2: v2 update — NIXTACHE_AB_VERSION=2, switch (main) -------------
     log = run_action("refs/heads/main", "2")
     assert "assigning runtime version 2" in log, "v2 run did not assign runtime version 2: " + log[-500:]
     assert deployer.succeed("cat /tmp/image-version").strip() == "2"
@@ -387,7 +387,7 @@ pkgs.testers.runNixOSTest {
     deployer.succeed("ls -la /var/lib/nixtache/ab-stage/abtest-remote/")
     deployer.succeed("cat /var/lib/nixtache/ab-stage/abtest-remote/SHA256SUMS")
 
-    # ── Verify: sysupdate pulled v2 over HTTP → wrote to GPT partition ───────
+    # -- Verify: sysupdate pulled v2 over HTTP → wrote to GPT partition -------
     # sysupdate processes transfers sequentially (nix-store first, then
     # boot-image) and sets the partition label BEFORE downloading content.
     # So we must wait for the ENTIRE service to finish, not just poll the
@@ -415,14 +415,14 @@ pkgs.testers.runNixOSTest {
     # version travelled env → image-version → build → stage → GPT label.
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
 
-    # ── Content proof: slot B holds v2 (hello), slot A still holds v1 ────────
+    # -- Content proof: slot B holds v2 (hello), slot A still holds v1 --------
     target.succeed("${helloInSlot { part = "b2"; }}")
     v1_still = target.succeed("${helloInSlot { part = "b1"; count = true; }}").strip()
     assert v1_still == "0", f"slot A was clobbered by the update ({v1_still})"
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # rollback slot intact
     print("OK: slot B = v2 (hello present), slot A = v1 (no hello, intact)")
 
-    # ── RUN 3: calver fallback — NIXTACHE_AB_VERSION unset, dry-activate ────
+    # -- RUN 3: calver fallback — NIXTACHE_AB_VERSION unset, dry-activate ----
     # Without the env override the action assigns a UTC calver
     # (YYYYMMDDhhmmss) — the production default. Dry mode: no apply, so the
     # deployed v2 state is untouched.

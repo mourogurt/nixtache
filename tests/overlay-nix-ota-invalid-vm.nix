@@ -32,7 +32,7 @@
 #
 # Variant knobs (flake attr = suite instance):
 #   overlayOptions — merged into services.nixtache.overlay-nix (the
-#     lifecycle mode: { upperOnUpdate = "reconcile"; } …; unset = the
+#     lifecycle mode: { upperOnUpdate = "reconcile"; } ...; unset = the
 #     module default, "wipe").
 #   upperTmpfs — move the upper layer to tmpfs (the "nothing to preserve"
 #     branch: lifecycle behaviour degenerates, only overlay health asserted
@@ -206,7 +206,7 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("nix --version", timeout=300)
     print("OK: v1 appliance booted, overlay-nix up")
 
-    # ── Shipped lower DB: validity out of the box, no manual seed ─────────
+    # -- Shipped lower DB: validity out of the box, no manual seed ---------
     # pkgs_1 sits in v1's toplevel closure, so the dump shipped on the ESP
     # registered it at boot: the lower store is a first-class readable store
     # from first contact.
@@ -217,7 +217,7 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("nix path-info " + P1)
     print("OK: shipped lower DB — pkgs_1 valid out of the box (no manual seed)")
 
-    # ── Realize pkgs_2 into the upper: the delta-only install ─────────────
+    # -- Realize pkgs_2 into the upper: the delta-only install -------------
     appliance.succeed("nix-store --realize " + P2, timeout=600)
     out = appliance.succeed(P2 + "/bin/tool")
     assert "tool-ok" in out, f"tool did not run on v1 ({out!r})"
@@ -225,7 +225,7 @@ pkgs.testers.runNixOSTest {
     appliance.fail(f"test -d {UPPER}/{P1B}")
     print("OK: pkgs_2 realized into the upper; pkgs_1 stayed lower-only (shipped DB held)")
 
-    # ── GC probe: pin overlay-GC behaviour on the shipped Nix version ─────
+    # -- GC probe: pin overlay-GC behaviour on the shipped Nix version -----
     # Root pkgs_2 (it must survive GC), realize an UNROOTED throwaway, GC it,
     # and capture the remount/journal evidence. The suite asserts only the
     # invariants (files gone, store usable, rooted tool alive); the journal
@@ -234,7 +234,7 @@ pkgs.testers.runNixOSTest {
     # plain-reboot control and would de-root pkgs_2 before the capture).
     appliance.succeed(f"nix-store --add-root /var/lib/nixtache/tool-root -r {P2}")
 
-    # ── Profile-install leg (the spec's "recorded installables are replayed"
+    # -- Profile-install leg (the spec's "recorded installables are replayed"
     # scenario): install the tool into root's per-user profile. The pre-update
     # capture records the profile link target; the reconcile pass re-realises
     # it after the swap. A bare store path is a valid installable — no eval,
@@ -257,7 +257,7 @@ pkgs.testers.runNixOSTest {
     assert "tool-ok" in out, f"rooted tool broken by GC ({out!r})"
     print("OK: GC removed the unrooted path, rooted tool alive")
 
-    # ── Plain-reboot control (no update): a persistent upper must survive ─
+    # -- Plain-reboot control (no update): a persistent upper must survive -
     # (tmpfs upper: nothing to preserve — skip to the swap leg.)
     if not TMPFS:
       appliance.reboot()
@@ -267,7 +267,7 @@ pkgs.testers.runNixOSTest {
       assert "tool-ok" in out, f"upper did not survive plain reboot ({out!r})"
       print("OK: plain-reboot control — upper survived, tool runs")
 
-    # ── Stage v2 + sysupdate → slot B → reboot into the new lower ─────────
+    # -- Stage v2 + sysupdate → slot B → reboot into the new lower ---------
     # The degraded variant cuts the substituter (nix-serve) before the swap:
     # nginx (port 80) still serves the sysupdate staging, but the reconcile
     # repair pass finds no cache — the unit must fail red without breaking
@@ -300,7 +300,7 @@ pkgs.testers.runNixOSTest {
     print("OK: booted v2, overlay remounted over the new lower")
 
     if MODE == "wipe":
-        # ── wipe: the pre-update unit cleared the upper at cutover ────────
+        # -- wipe: the pre-update unit cleared the upper at cutover --------
         appliance.fail(f"test -d {UPPER}/{P2B}")
         out = appliance.succeed(f"nix path-info {P2} 2>&1 || true")
         assert "is not valid" in out, f"wipe left DB entry ({out!r})"

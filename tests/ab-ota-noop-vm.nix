@@ -40,7 +40,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: v1 booted and blessed")
 
-    # ── First run: v2 installs to slot B ───────────────────────────────────
+    # -- First run: v2 installs to slot B -----------------------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/"
@@ -50,7 +50,7 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: v2 installed to slot B")
 
-    # ── Second run, same version: nothing changes ──────────────────────────
+    # -- Second run, same version: nothing changes --------------------------
     before_parts = appliance.succeed("sgdisk -p /dev/vda")
     before_efi = appliance.succeed("ls -la --time-style=full-iso /boot/EFI/Linux/")
     t0 = appliance.succeed("date '+%Y-%m-%d %H:%M:%S'").strip()
@@ -66,7 +66,7 @@ pkgs.testers.runNixOSTest {
     assert before_efi == after_efi, "boot entries changed on a no-op run"
     print("NOOP OK: same version → no install, no slot/boot-entry change, green exit")
 
-    # ── The staged v2 still boots when the operator reboots ────────────────
+    # -- The staged v2 still boots when the operator reboots ----------------
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")
     version = appliance.succeed("cat /etc/image-version").strip()

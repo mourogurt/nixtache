@@ -5,7 +5,7 @@
 # node imports `self.nixosModules.deploy-target` and sets the
 # `ab.partitions.*` option, then we assert on real sgdisk partition tables.
 #
-# Covers (TEST-SPECS.md §2): P1 init, P2 idempotent, P3 second-disk, S1 size-error,
+# Covers (TEST-SPECS.md sec. 2): P1 init, P2 idempotent, P3 second-disk, S1 size-error,
 # S2 size-wipe, S3 no-space, S4 percent, PR1 protected-label. Needs KVM.
 { nixpkgs, self, system ? "x86_64-linux" }:
 
@@ -121,7 +121,7 @@ pkgs.testers.runNixOSTest {
       '';
     };
 
-    # S4: slotSize="10%" on a 2GB disk → each slot ≈ 200M.
+    # S4: slotSize="10%" on a 2GB disk → each slot ~ 200M.
     s4_percent = mkNode {
       disks = [ 2048 ];
       part-extra = { slotSize = "10%"; autoInit = true; };
@@ -151,7 +151,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    # ── P1: empty disk + autoInit → two slots at slotSize ─────────────────
+    # -- P1: empty disk + autoInit → two slots at slotSize -----------------
     p1_init.start()
     p1_init.wait_for_unit("nixtache-ab-provision.service")
     p1_init.succeed("sgdisk -p /dev/vdb | grep nix-store_1")
@@ -160,7 +160,7 @@ pkgs.testers.runNixOSTest {
     p1_init.succeed("test $(${partSize "/dev/vdb1"}) -lt 580000000")   # <580M
     print("P1 OK: autoInit created nix-store_1 + _empty at ~512M")
 
-    # ── P2: idempotent — restart does not change the partition table ──────
+    # -- P2: idempotent — restart does not change the partition table ------
     p2_idem.start()
     p2_idem.wait_for_unit("nixtache-ab-provision.service")
     before = p2_idem.succeed("sgdisk -p /dev/vdb | sha256sum")
@@ -170,7 +170,7 @@ pkgs.testers.runNixOSTest {
     assert before == after, "P2 FAIL: provision was not idempotent"
     print("P2 OK: provision idempotent (partition table unchanged on restart)")
 
-    # ── P3: second disk — slots on /dev/vdc, /dev/vdb untouched ───────────
+    # -- P3: second disk — slots on /dev/vdc, /dev/vdb untouched -----------
     p3_second.start()
     p3_second.wait_for_unit("nixtache-ab-provision.service")
     p3_second.succeed("sgdisk -p /dev/vdc | grep nix-store_1")
@@ -178,7 +178,7 @@ pkgs.testers.runNixOSTest {
     p3_second.fail("sgdisk -p /dev/vdb | grep -E 'nix-store_1|_empty'")
     print("P3 OK: slots on /dev/vdc; /dev/vdb untouched")
 
-    # ── S1: size mismatch, onSizeMismatch=error → slots intact, sysupdate MASKED
+    # -- S1: size mismatch, onSizeMismatch=error → slots intact, sysupdate MASKED
     s1_error.start()
     s1_error.wait_until_succeeds(
       "systemctl is-failed nixtache-ab-provision.service", timeout=120
@@ -187,12 +187,12 @@ pkgs.testers.runNixOSTest {
     s1_error.succeed("journalctl -u nixtache-ab-provision --no-pager | grep -i mismatch")
     # updates STOP until manual resolution: sysupdate masked (runtime), unmask hint logged
     # updates STOP until manual resolution: the runtime-mask symlink exists
-    # (/run/systemd/system/… → /dev/null), unmask hint logged
+    # (/run/systemd/system/... → /dev/null), unmask hint logged
     s1_error.succeed("test \"$(readlink /run/systemd/system/systemd-sysupdate.service)\" = /dev/null")
     s1_error.succeed("journalctl -u nixtache-ab-provision --no-pager | grep 'systemctl unmask'")
     print("S1 OK: size mismatch detected, slots preserved, sysupdate masked, provision failed")
 
-    # ── S2: size mismatch, onSizeMismatch=wipe → both slots recreated at new size ──
+    # -- S2: size mismatch, onSizeMismatch=wipe → both slots recreated at new size --
     s2_wipe.start()
     s2_wipe.wait_for_unit("nixtache-ab-provision.service")
     # After wipe both slots are recreated as nix-store_1 + _empty (configured
@@ -211,13 +211,13 @@ pkgs.testers.runNixOSTest {
     assert before == after, "S2 FAIL: provision was not idempotent after wipe"
     print("S2 OK: wipe recreated both slots at new size (nix-store_1+_empty); idempotent on restart")
 
-    # ── S3: no free space, autoInit=true → provision fails clearly ────────
+    # -- S3: no free space, autoInit=true → provision fails clearly --------
     s3_nospace.start()
     s3_nospace.wait_until_succeeds("systemctl is-failed nixtache-ab-provision.service")
     s3_nospace.succeed("journalctl -u nixtache-ab-provision --no-pager | grep -iE 'free space|no space|not enough'")
     print("S3 OK: no-space case refused with a clear message")
 
-    # ── S4: percent slotSize → each slot ≈ 10% of 2G (≈200M) ──────────────
+    # -- S4: percent slotSize → each slot ~ 10% of 2G (~200M) --------------
     s4_percent.start()
     s4_percent.wait_for_unit("nixtache-ab-provision.service")
     s4_percent.succeed("sgdisk -p /dev/vdb | grep nix-store_1")
@@ -225,7 +225,7 @@ pkgs.testers.runNixOSTest {
     s4_percent.succeed("test $(${partSize "/dev/vdb1"}) -lt 260000000")   # <260M
     print("S4 OK: 10% slotSize resolved to ~200M")
 
-    # ── PR1: protected 'data' partition → provision refuses, data survives ─
+    # -- PR1: protected 'data' partition → provision refuses, data survives -
     pr1_protected.start()
     pr1_protected.wait_until_succeeds("systemctl is-failed nixtache-ab-provision.service")
     pr1_protected.succeed("mount /dev/vdb1 /mnt/data")

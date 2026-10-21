@@ -60,7 +60,7 @@ let
     time.sleep(6)  # let the autologin root shell settle on ttyS0
 
     # Sync on a sentinel WE emit (not on the prompt — the prompt has brackets +
-    # ANSI codes we don't want to match). $$ is the shell PID ⇒ unique per boot.
+    # ANSI codes we don't want to match). $$ is the shell PID => unique per boot.
     p.sendline("echo ABTEST_READY_$$")
     p.expect(r"ABTEST_READY_\d+", timeout=90)
 
@@ -92,7 +92,7 @@ let
     print("RESULT_DATA=" + run("echo alive >/mnt/data/marker 2>/dev/null; cat /mnt/data/marker 2>/dev/null || echo MISSING"))
     # Real-nixtache proof: the deploy-target.ab module provisioned the polkit rule
     # authorizing the deploy user to start systemd-sysupdate + nixtache-ab-apply.
-    # 0 ⇒ the module is NOT active on this target.
+    # 0 => the module is NOT active on this target.
     print("RESULT_NIXTACHE_POLKIT=" + run("grep -cE 'systemd-sysupdate.service|nixtache-ab-apply.service' /etc/polkit-1/rules.d/49-nixtache-ab.rules 2>/dev/null || echo 0"))
     # Signature verification: the ab-image module forces Transfer.Verify=yes when a
     # publicKey is set; check sysupdate's transfer files actually say so. NixOS

@@ -1,5 +1,5 @@
 # QEMU (pexpect) BEHAVIORAL test for the module
-# `services.nixtache.overlay-nix.*` (spec 08 §6): a Nix `local-overlay-store`
+# `services.nixtache.overlay-nix.*` (spec 08 sec. 6): a Nix `local-overlay-store`
 # layered over the read-only squashFS /nix/store of an A/B appliance.
 #
 # Boots a REAL A/B appliance image (built with the REAL deploy-target + ab-image
@@ -14,9 +14,9 @@
 # (which fetch from a registry) are NOT exercised here — the read-only+overlay
 # COW mechanism at the filesystem level IS (the user's stated priority). The
 # nix-command tests (O2/O3) are deferred to a networked integration run; see
-# TEST-SPECS.md §5 / review §11.4 (merged mountpoint ambiguity).
+# TEST-SPECS.md sec. 5 / review sec. 11.4 (merged mountpoint ambiguity).
 #
-# Needs KVM (requiredSystemFeatures). Covers TEST-SPECS.md §5: O1, O7.
+# Needs KVM (requiredSystemFeatures). Covers TEST-SPECS.md sec. 5: O1, O7.
 { nixpkgs, self, system ? "x86_64-linux" }:
 
 let
@@ -64,7 +64,7 @@ let
               ab.gating = false;
             };
 
-            # The overlay-nix config (spec 08 §6).
+            # The overlay-nix config (spec 08 sec. 6).
             services.nixtache.overlay-nix = {
               enable = true;
               inherit upperDir workDir;
@@ -75,6 +75,13 @@ let
             users.users.root.initialPassword = "";
             environment.systemPackages = with pkgs; [ util-linux gawk findutils ];
             environment.etc."image-version".text = version;
+            # Faithful-imaging coverage: a closure path that is itself a
+            # top-level symlink. The image must ship it AS a symlink (not its
+            # target's content) with a DB record that resolves — see
+            # modules/ab-image/store-tree.nix and the assertions below.
+            system.extraDependencies = [
+              (pkgs.runCommand "symlink-fixture" { } "ln -s ${pkgs.hello} $out")
+            ];
           }
         )
       ];
@@ -123,8 +130,8 @@ let
     print("RESULT_WORK_DIR=" + run("test -d /var/lib/nix-overlay/work && echo yes || echo no"))
 
     # --- The read-only + overlay COW proof (user's priority) -------------------
-    # Detect the overlay's merged mountpoint (spec §6 mountpoint is ambiguous —
-    # review §11.4 — so detect from `mount` rather than assume). Then write a
+    # Detect the overlay's merged mountpoint (spec sec. 6 mountpoint is ambiguous —
+    # review sec. 11.4 — so detect from `mount` rather than assume). Then write a
     # probe THROUGH the merged view and confirm it lands in the upper dir while
     # the lower squashFS stays read-only. Single-line: the pexpect serial driver
     # cannot handle multi-line `\` continuations (the shell hangs waiting for
@@ -145,7 +152,21 @@ let
     print("RESULT_LOWER_DUMP=" + run("test -f /boot/EFI/nixtache/abtest_1.lower-db && echo present || echo missing"))
     print("RESULT_LOWER_DB_LOADER=" + run("systemctl is-active nixtache-lower-store-db-load.service 2>/dev/null || echo inactive"))
     print("RESULT_LOWER_DB_VERSION=" + run("cat /var/lib/nixtache/lower-db-version 2>/dev/null || echo missing"))
-    print("RESULT_LOWER_PATH_VALID=" + run("nix path-info ${pkgs.nix} >/dev/null 2>&1 && echo valid || echo missing"))
+    # A lower path must resolve through standard nix tooling with no manual
+    # seed. /run/current-system, not a host-side store path: the appliance
+    # evaluates content-addressed, so its shipped paths hash differently
+    # than the IA paths of the flake-level pkgs this test file evaluates
+    # with — but the toplevel (and its closure) is covered by the dump.
+    print("RESULT_LOWER_PATH_VALID=" + run("nix path-info /run/current-system >/dev/null 2>&1 && echo valid || echo missing"))
+
+    # --- Faithful imaging: a top-level symlink closure path ships as a symlink -
+    # The fixture pulls a symlink store path into the closure (see
+    # system.extraDependencies above). It must be a symlink in the image, its
+    # recorded target must exist, and its validity must resolve through the
+    # shipped lower DB.
+    print("RESULT_SYMLINK_IS_LINK=" + run("p=$(ls -d /nix/store/*-symlink-fixture 2>/dev/null | head -1); [ -n \"$p\" ] && [ -L \"$p\" ] && echo link || echo notalink"))
+    print("RESULT_SYMLINK_TARGET=" + run("p=$(ls -d /nix/store/*-symlink-fixture 2>/dev/null | head -1); t=$(readlink \"$p\" 2>/dev/null); [ -n \"$t\" ] && [ -e \"$t\" ] && echo resolves || echo broken"))
+    print("RESULT_SYMLINK_PATH_INFO=" + run("p=$(ls -d /nix/store/*-symlink-fixture 2>/dev/null | head -1); nix path-info \"$p\" >/dev/null 2>&1 && echo valid || echo invalid"))
 
     # --- INFO (human visibility) -----------------------------------------------
     print("INFO_MOUNTS=" + run("mount | grep -E 'overlay|/nix/store' | head -20"))
@@ -185,6 +206,9 @@ pkgs.runCommand "overlay-nix-vm-test"
     [ "$(val LOWER_DB_LOADER)" = "RESULT_LOWER_DB_LOADER=active" ] && pass "lower DB loader oneshot ran at boot" || fail "loader not active ($(val LOWER_DB_LOADER))"
     [ "$(val LOWER_DB_VERSION)" = "RESULT_LOWER_DB_VERSION=1" ] && pass "lower DB version marker = running image version" || fail "marker wrong ($(val LOWER_DB_VERSION))"
     [ "$(val LOWER_PATH_VALID)" = "RESULT_LOWER_PATH_VALID=valid" ] && pass "lower path resolves nix path-info with no manual seed" || fail "lower path not valid ($(val LOWER_PATH_VALID))"
+    [ "$(val SYMLINK_IS_LINK)" = "RESULT_SYMLINK_IS_LINK=link" ] && pass "top-level symlink closure path ships as a symlink" || fail "symlink closure path not a symlink in the image ($(val SYMLINK_IS_LINK))"
+    [ "$(val SYMLINK_TARGET)" = "RESULT_SYMLINK_TARGET=resolves" ] && pass "symlink closure path's target exists in the image" || fail "symlink target broken ($(val SYMLINK_TARGET))"
+    [ "$(val SYMLINK_PATH_INFO)" = "RESULT_SYMLINK_PATH_INFO=valid" ] && pass "symlink closure path resolves nix path-info (record matches shipped bytes)" || fail "symlink path-info invalid ($(val SYMLINK_PATH_INFO))"
 
     cat $out/report
     [ "$FAIL" = "0" ] || exit 1

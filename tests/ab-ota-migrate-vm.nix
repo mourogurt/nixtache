@@ -134,7 +134,7 @@ pkgs.testers.runNixOSTest {
     # the health signal here.
     print("OK: live target booted (no A/B machinery)")
 
-    # ── Migrate: switch to the A/B config; provision lays the slots ────────
+    # -- Migrate: switch to the A/B config; provision lays the slots --------
     prev_system = target.succeed("readlink -f /run/current-system").strip()
     target.succeed(
       "${migrated.config.system.build.toplevel}/bin/switch-to-configuration switch",
@@ -156,7 +156,7 @@ pkgs.testers.runNixOSTest {
     assert parts_before == parts_after, "second provision run changed the GPT"
     print("OK: provisioning idempotent")
 
-    # ── Post-migration OTA readiness ────────────────────────────────────────
+    # -- Post-migration OTA readiness ----------------------------------------
     # The first image INSTALL into provisioned slots is covered by
     # ab-ota-e2e / ab-ota-noop-vm / ab-ota-interrupted-vm with the same
     # modules; this suite pins the migration STEP, so it stops at readiness:

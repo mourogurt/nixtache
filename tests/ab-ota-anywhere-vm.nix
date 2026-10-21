@@ -3,7 +3,7 @@
 #
 #   given:  a deployer node carrying nixtache's deploy action, and a target
 #           node WITHOUT nixtache — a plain NixOS VM with a bare second disk;
-#   1. INSTALL: the deployer runs REAL `pkgs.nixos-anywhere --flake …` against
+#   1. INSTALL: the deployer runs REAL `pkgs.nixos-anywhere --flake ...` against
 #      the target: kexec into a nixos-images-style installer → disko A/B
 #      layout → closure copy → nixos-install → reboot. The installed system
 #      is a real consumer config (tests/ab-anywhere-install.nix): nixtache
@@ -336,7 +336,7 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import yaml
 
-    # ── Parse the REAL action.yml to verify the extracted script is genuine ──
+    # -- Parse the REAL action.yml to verify the extracted script is genuine --
     action = yaml.safe_load(${builtins.toJSON actionYml})
     run_text = next(s["run"] for s in action["runs"]["steps"] if "run" in s)
     assert "sysupdate-package" in run_text, "action.yml missing sysupdate-package build"
@@ -351,22 +351,22 @@ pkgs.testers.runNixOSTest {
     deployer.wait_for_unit("sshd.service")
     target.wait_for_unit("sshd.service")
 
-    # ── Stage the v1 baseline store image (out-of-band "factory flash" of
-    #    slot A; the install itself puts the v1 closure on the ext4 root) ────
+    # -- Stage the v1 baseline store image (out-of-band "factory flash" of
+    #    slot A; the install itself puts the v1 closure on the ext4 root) ----
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/v1-stage && "
       "cp ${v1SysupdatePkg}/* /var/lib/nixtache/v1-stage/"
     )
 
-    # ── Install credentials + a writable copy of the install flake (nix needs
-    #    to materialise flake.lock next to flake.nix; /etc is store-linked) ──
+    # -- Install credentials + a writable copy of the install flake (nix needs
+    #    to materialise flake.lock next to flake.nix; /etc is store-linked) --
     deployer.succeed(
       "install -D -m600 /etc/install-key /root/.ssh/install_key && "
       "cp -rL /etc/ab-install-flake /tmp/install-flake && "
       "chmod -R u+w /tmp/install-flake"
     )
 
-    # ── INSTALL: real nixos-anywhere — kexec → disko (A/B layout) → install →
+    # -- INSTALL: real nixos-anywhere — kexec → disko (A/B layout) → install →
     #    reboot. --flake + buildOn=local: the deployer builds diskoScript +
     #    toplevel from the install flake (store no-ops, see header), kexecs
     #    the target into the installer env, partitions /dev/vdb, copies the
@@ -416,7 +416,7 @@ pkgs.testers.runNixOSTest {
     except Exception:
         pass
 
-    # ── BOOT the installed disk in a fresh QEMU (nixos-anywhere test-suite
+    # -- BOOT the installed disk in a fresh QEMU (nixos-anywhere test-suite
     #    mechanism): OVMF UEFI boot of empty0.qcow2 — ESP fallback →
     #    systemd-boot → UKI is the ONLY boot path on the disk. The machine
     #    joins the vde test LAN (vlan 1) with nodeNumber 3 → 192.168.1.3.
@@ -460,8 +460,8 @@ pkgs.testers.runNixOSTest {
     installed.wait_for_unit("multi-user.target")
     installed.wait_for_unit("sshd.service")
 
-    # ── The installed v1 system: real disk boot, UKI on the ESP, signature
-    #    verification configured, A/B slots laid out by disko ────────────────
+    # -- The installed v1 system: real disk boot, UKI on the ESP, signature
+    #    verification configured, A/B slots laid out by disko ----------------
     assert installed.succeed("cat /etc/image-version").strip() == "1"
     installed.succeed("ls /boot/EFI/Linux/ | grep -E 'abtest_1(\\+3)?\\.efi'")
     installed.succeed("test -f /etc/systemd/import-pubring.pgp")
@@ -471,7 +471,7 @@ pkgs.testers.runNixOSTest {
     installed.succeed("sgdisk -p /dev/vda | grep _empty")
     print("OK: installed v1 system booted from disk (UKI), Verify=yes, slots nix-store_1 + _empty present")
 
-    # ── Populate slot A with the staged v1 store (the "current" system) ──────
+    # -- Populate slot A with the staged v1 store (the "current" system) ------
     installed.succeed(
       "curl -sf http://deployer/v1-stage/abtest_1.nix-store.raw | "
       "dd of=/dev/vda2 bs=4M conv=fsync",
@@ -481,11 +481,11 @@ pkgs.testers.runNixOSTest {
     assert v1_hello == "0", f"v1 slot unexpectedly contains hello ({v1_hello})"
     print("OK: slot A populated with v1 store (no hello)")
 
-    # ── UPDATE: real action.yml run — stage v2 (GPG-signed manifest) → SSH
+    # -- UPDATE: real action.yml run — stage v2 (GPG-signed manifest) → SSH
     #    trigger of systemd-sysupdate on the installed machine. The trigger
     #    chains update → reboot-assessment; with v2 (2) newer than the booted
     #    baseline (1) the installed machine REALLY reboots — handled after
-    #    the .efi wait below. ────────────────────────────────────────────────
+    #    the .efi wait below. ------------------------------------------------
     deployer.succeed(
       "mkdir -p /run/credentials && "
       "cp /etc/deploy-key /run/credentials/deploy_ssh_abanywhere && "
@@ -509,9 +509,9 @@ pkgs.testers.runNixOSTest {
     deployer.succeed("grep abtest_2 /var/lib/nixtache/ab-stage/abanywhere/SHA256SUMS")
     print("OK: v2 staged + manifest GPG-signed, sysupdate triggered over SSH")
 
-    # ── Verify: sysupdate pulled v2 over HTTP, verified the signature, wrote
+    # -- Verify: sysupdate pulled v2 over HTTP, verified the signature, wrote
     #    slot B. The .efi transfer runs after the nix-store one, so its
-    #    arrival means the whole service finished. ───────────────────────────
+    #    arrival means the whole service finished. ---------------------------
     try:
         installed.wait_until_succeeds(
           "test -f /boot/EFI/Linux/abtest_2+*.efi",
@@ -533,7 +533,7 @@ pkgs.testers.runNixOSTest {
     # travelled env → image-version → build → stage → GPT label.
     installed.succeed("sgdisk -p /dev/vda | grep nix-store_2")
 
-    # ── Content proof: slot B holds v2 (hello), slot A still holds v1 ────────
+    # -- Content proof: slot B holds v2 (hello), slot A still holds v1 --------
     installed.succeed("unsquashfs -l /dev/vda3 | grep hello")
     v1_still = installed.succeed("unsquashfs -l /dev/vda2 | grep -c hello || true").strip()
     assert v1_still == "0", f"slot A was clobbered by the update ({v1_still})"

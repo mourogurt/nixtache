@@ -1,5 +1,5 @@
 # Live activation via a root systemd unit — the V2 design (no deploy-rs, no
-# sudo/doas/run0). Background: doc/archive/specs/0001-direct-deploy.md §7.2/§9.2.
+# sudo/doas/run0). Background: doc/archive/specs/0001-direct-deploy.md sec. 7.2/sec. 9.2.
 #
 # The runner pushes a built closure to the target with `nix copy --to`, drops
 # its store path into `/var/lib/nixtache/pending-system`, and triggers:

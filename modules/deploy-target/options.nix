@@ -80,7 +80,7 @@ with lib;
         policy (what to GC) stays a consumer-side concern. The runner-side
         pre-copy check has its own preset
         (`services.nixtache.runner.deploy.targets.<name>.minFreeBytes`) —
-        keep that one ≥ this one.
+        keep that one >= this one.
       '';
     };
 
@@ -152,7 +152,7 @@ with lib;
         = no deploy user provisioned (the consumer sets up auth out-of-band).
 
         The account is added to `nix.settings.trusted-users` unconditionally:
-        `nix copy --to ssh://…` pushes locally-built (unsigned) closures, and
+        `nix copy --to ssh://...` pushes locally-built (unsigned) closures, and
         the nix daemon only imports those for trusted users — this is a
         protocol requirement of the live path, not an optional privilege.
       '';

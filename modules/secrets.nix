@@ -80,7 +80,7 @@ in
             default = { };
             description = ''
               Provider-specific settings (endpoint, mapping, delivery mode,
-              …). Shape depends on the provider; see the provider's own docs.
+              ...). Shape depends on the provider; see the provider's own docs.
             '';
           };
         };

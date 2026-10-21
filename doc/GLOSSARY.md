@@ -130,3 +130,16 @@ _Avoid_: writable store, delta dir
 The OverlayFS view at `/nix/store` that combines lower and upper — what
 every nix command on the appliance sees.
 _Avoid_: combined store, overlay view
+
+**Lower store database**:
+The validity records (path, narHash, narSize, references) shipped inside
+the appliance image and seeded into `/nix/var/nix/db` at boot; what makes
+the read-only lower layer a first-class readable nix store.
+_Avoid_: store dump (that is the carrier file on the ESP), nix db (any
+db.sqlite qualifies)
+
+**Store tree**:
+The build-time directory that materialises the slot closure (top-level
+symlink paths recreated as symlinks) and feeds the image builder as its
+single copy source — the unit of faithful store imaging.
+_Avoid_: staging tree (collides with Staging above)

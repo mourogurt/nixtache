@@ -228,7 +228,7 @@ pkgs.testers.runNixOSTest {
       "cp /etc/signing-key /run/credentials/sysupdate_signing_key"
     )
 
-    # ── C4 (positive control, FIRST): full action run, correctly signed ─────
+    # -- C4 (positive control, FIRST): full action run, correctly signed -----
     # The action's trigger chains update → reboot-assessment; with v2 (2)
     # newer than the booted baseline (1) the target REALLY reboots — see
     # the reboot handling after the .efi wait below.
@@ -304,24 +304,24 @@ pkgs.testers.runNixOSTest {
           "grep -iE 'verify|signature|checksum|hash|sha256|gpg'"
         )
 
-    # ── C1: signed with the WRONG key (testSignKey2) → rejected ────────────
+    # -- C1: signed with the WRONG key (testSignKey2) → rejected ------------
     stage_v3("/etc/signing-key2")
     attempt_v3("C1")
     print("C1 OK: wrong-key signature rejected — no v3 committed")
 
-    # ── C2: right key, then one byte of the payload flipped → hash mismatch ──
+    # -- C2: right key, then one byte of the payload flipped → hash mismatch --
     stage_v3("/etc/signing-key")
     deployer.succeed(f"printf 'x' | dd of={stage}/abtest_3.nix-store.raw bs=1 seek=1024 conv=notrunc")
     attempt_v3("C2")
     print("C2 OK: tampered payload rejected — no v3 committed")
 
-    # ── C3: signature removed entirely → unsigned rejected ──────────────────
+    # -- C3: signature removed entirely → unsigned rejected ------------------
     stage_v3("/etc/signing-key")
     deployer.succeed(f"rm {stage}/SHA256SUMS.gpg")
     attempt_v3("C3")
     print("C3 OK: unsigned manifest rejected — no v3 committed")
 
     target.succeed("sgdisk -p /dev/vdb")
-    print("PASS: C1–C4 — Verify=yes accepts the correct signature, rejects wrong-key/tampered/unsigned")
+    print("PASS: C1-C4 — Verify=yes accepts the correct signature, rejects wrong-key/tampered/unsigned")
   '';
 }

@@ -73,10 +73,14 @@ Every overlay test names its lower-DB world (see
 [`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): since the
 appliance image ships the lower store DB, the `ota-invalid` and `ab-swap`
 suites run the shipped world A — validity out of the box, delta-only
-installs — with no manual DB-seeding construct anymore (the replication-era
-`--load-db` seeding is retired), while `overlay-nix-install-vm` runs against
-a host-store lower with its own database (a harness world) — results do not
-transfer between worlds.
+installs — with no manual DB-seeding construct anymore, while
+`overlay-nix-install-vm` runs against a host-store lower with its own
+database (a harness world) — results do not transfer between worlds.
+Faithful store imaging (top-level symlink closure paths ship as symlinks)
+is pinned twice: `checks.ab-image` builds the store tree for a tiny
+closure containing a symlink path, and `overlay-nix-vm` boots an appliance
+whose closure carries one and asserts it is a symlink, resolves
+`nix path-info` and its target exists.
 
 Every test file is a function `{ nixpkgs, self, system }:` returning a
 `pkgs.runCommand` derivation. Its builder prints a human-readable report (one

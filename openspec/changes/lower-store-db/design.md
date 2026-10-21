@@ -73,17 +73,19 @@ Two independent failure modes, with different fixes:
    path hash IS the content hash — a build computes content→path,
    substitution verifies content against the narinfo, so the DB cannot lie
    about content.
-2. **repart resolves top-level symlinks when imaging.** A store path that
-   IS a symlink to another store path ships as a real directory with the
-   target's content — the shipped bytes contradict the path's record (the
-   azs59nr9 mismatch above is this class). **CA does not fix this**: it is
-   imaging behaviour, not hashing. The interim fix — rewriting the record
-   from the resolved path's content — is *invalid under CA* (a record whose
-   narHash contradicts the path's content-addressed hash fails `nix copy`
-   just as hard). Mitigation: a **build-time guard** — the image build
-   fails, listing any closure path that is a top-level symlink (rare; the
-   offender gets repackaged). A silent runtime landmine becomes a loud
-   build error.
+ 2. **repart resolves top-level symlinks when imaging.** A store path that
+    IS a symlink to another store path ships as a real directory with the
+    target's content — the shipped bytes contradict the path's record (the
+    azs59nr9 mismatch above is this class). **CA does not fix this**: it is
+    imaging behaviour, not hashing. Rewriting the record from the resolved
+    path's content is *invalid under CA* (a record whose narHash contradicts
+    the path's content-addressed hash fails `nix copy` just as hard). The
+    interim mitigation — a build-time guard failing the image on such paths —
+    is untenable: standard closures contain them (nixpkgs' `nix.man`/
+    `nix.doc` outputs are symlinks into `nix-manual`, and the appliance
+    ships `pkgs.nix`), so real images hit the guard. Superseded by D6
+    (faithful imaging), which also fixes this class for input-addressed
+    stores.
 
 **Decision (revised after review): the OTA + overlay-nix fleet runs
 content-addressed.** The original design rejected CA as a module contract
@@ -124,7 +126,8 @@ that CA makes redundant. Consequences:
   enter it from CA-enabled builds.
 - The custom dumper (`lower-store-db-dump.py`) and its
   `__structuredAttrs`/`exportReferencesGraph` machinery are deleted; the
-  dump becomes `closureInfo.registration` plus the symlink guard above.
+  dump becomes `closureInfo.registration` (the symlink guard it briefly
+  carried is superseded by D6).
 
 Alternative considered: shipping a prebuilt `db.sqlite` — rejected as the
 primary mechanism because merging a binary DB at runtime needs
@@ -228,6 +231,68 @@ old lower genuinely dangle after a swap. Consequences:
 Both modes green on a real appliance: clone (additive re-clone incl. the new
 lower's content) and overlay (coherent merged view, builds keep working).
 The suite joins the `vmtests.yml` full matrix.
+
+### D6 — Faithful store imaging: store tree, one copy source (post-review revision 2)
+
+**Problem (self-contained).** The image builder (systemd-repart, pinned
+261.x) populates a partition from `CopyFiles=` lines; its `do_copy_files`
+opens every source via `chase_and_open`, which resolves symlinks — a copy
+source that IS a symlink to a directory ships as that directory's content.
+nixpkgs' `image.repart` `storePaths` emits one `CopyFiles=` line per closure
+path (its amend script; no symlink handling upstream as of nixpkgs
+dfce2e0/master). Therefore every closure path that is a top-level symlink
+currently ships with its target's content, contradicting its DB record —
+and such paths are standard (`nix.man`/`nix.doc` → `nix-manual`; 27
+visible on the reference build host), so the interim build-time guard fails
+real images instead of protecting them.
+
+**Fix.** The module stops using `storePaths` for the nix-store partition. A
+store-tree derivation (`modules/ab-image/store-tree.nix`) reads
+`pkgs.closureInfo`'s store-paths list at *build* time (no IFD — the tree's
+outPath is eval-time known) and materialises the store: `cp -a
+--reflink=auto` for every regular path, `ln -s "$(readlink …)"` for every
+top-level symlink path (absolute target strings are recreated verbatim, so
+chains resolve inside the image). One `repartConfig.CopyFiles =
+"${storeTree}:/"` hands the tree to repart: the single top-level source is
+chased (the tree dir itself — a real directory), while every entry *inside*
+is copied type-faithfully (systemd `copy.c`: `fd_copy_symlink` recreates
+symlinks; only the top source is dereferenced). This is store-agnostic —
+input-addressed and content-addressed closures image identically — and it
+deletes the guard. The `contents` entries (`.links/.keep`) and the dump
+pipeline are untouched; `Minimize=`/sizing behave as before (CopyFiles
+still counts as partition content).
+
+Alternatives rejected: `MakeSymlinks=` (repart can create the symlinks, but
+the per-path `CopyFiles=` lines from `storePaths` would still copy the
+resolved content first and collide — the split needs build-time knowledge
+that only our tree has); building the squashfs/erofs outside repart
+(forks mkfs/compression/verity machinery the module currently gets for
+free); patching nixpkgs' amend script (not overridable without forking
+`repart-image.nix`).
+
+**Test coverage.** A build-cheap check builds the tree for a fixture
+closure containing a top-level symlink path and asserts the symlink and its
+target survive; an overlay-nix VM suite adds such a path to the fixture
+(`system.extraDependencies`) and asserts on the booted appliance that it
+IS a symlink, `nix path-info` resolves it, and its target exists.
+
+### D7 — Max-disk layout: pin the ESP, root takes the leftover (post-review revision 2)
+
+**Problem (self-contained).** With `diskSize` set, repart distributes the
+leftover space by `Weight` (integer arithmetic — deterministic, verified in
+`repart.c` `scale_by_weight` + experiment). The ESP carried no
+`SizeMaxBytes` and defaults to Weight 1000, so it *shares* the leftover
+with root: measured on 261.1, a 2G image splits 1023.5M ESP / 1023.5M root
+(the intended "root fills the disk" only appeared below ~520M total, where
+the ESP's enforced minimum exceeds its share). Separately, repart enforces
+`ESP_MIN_SIZE_4K` = 260MiB for a vfat ESP at 4K fs sectors (the image-build
+default), silently overriding the configured `SizeMinBytes = "200M"`.
+
+**Fix.** The ESP is pinned `SizeMinBytes = SizeMaxBytes = "260M"` — an
+explicit fixed partition matching the enforced floor — so root (Weight
+1000, min `rootSize`, no max) deterministically takes everything the ESP
+and the fixed slots leave. Option descriptions state the real mechanics
+(deterministic weight distribution; fixed ESP; the 260MiB vfat floor).
 
 ## Risks / Trade-offs
 

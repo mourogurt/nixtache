@@ -529,7 +529,7 @@ let
 
   # --- behavioral: the SSH gate's exact-match free-space entry ---------------
   # The gate script is extracted from the provisioned key line of hostApply
-  # (`restrict,command="<store path>" ssh-ed25519 …`) — the REAL artifact the
+  # (`restrict,command="<store path>" ssh-ed25519 ...`) — the REAL artifact the
   # target's sshd would force on the deploy key.
   gateScriptPath = lib.elemAt (lib.splitString "\"" (lib.head
     hostApply.config.users.users.nixos-deploy.openssh.authorizedKeys.keys)) 1;

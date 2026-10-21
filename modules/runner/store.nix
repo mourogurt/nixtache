@@ -11,7 +11,7 @@
 #   - `clone`  (default): `nix copy --all` into `<path>/nix` (full writable copy).
 #   - `overlay`: OverlayFS mount (lower=/nix/store ro, upper=<path>/overlay/upper)
 #               served as a `local-overlay://` store — instant (no copy), proper
-#               GC, but requires Nix ≥ 2.19 + CAP_SYS_ADMIN on the container.
+#               GC, but requires Nix >= 2.19 + CAP_SYS_ADMIN on the container.
 {
   config,
   lib,
@@ -120,7 +120,7 @@ in
         `overlay`: an OverlayFS mount combines the read-only lower store
         (`/nix/store`) with a writable upper (`<store.path>/overlay/upper`),
         served as a `local-overlay://` store. Instant (no copy), proper GC
-        (upper-layer paths reaped, lower untouched), but requires Nix ≥ 2.19
+        (upper-layer paths reaped, lower untouched), but requires Nix >= 2.19
         (the `local-overlay-store` experimental feature) AND `CAP_SYS_ADMIN`
         on the container (set `additionalCapabilities = ["CAP_SYS_ADMIN"]` and
         `enableSandbox = false`) so the overlay mount can happen inside nspawn.
@@ -308,8 +308,8 @@ in
                 ExecStart =
                   let
                     daemonCmd = if useOverlay
-                      then "${config.nix.package}/bin/nix-daemon --store '${overlayStoreUrl}'"
-                      else "${config.nix.package}/bin/nix-daemon --daemon";
+                      then "${lib.getExe' config.nix.package "nix-daemon"} --store '${overlayStoreUrl}'"
+                      else "${lib.getExe' config.nix.package "nix-daemon"} --daemon";
                   in
                   if cfg.enableSandbox
                   then "${lib.getExe' pkgs.util-linux "unshare"} -m ${pkgs.writeShellScript "nix-daemon-custom-fresh-proc" ''
@@ -371,19 +371,19 @@ in
                   #     experimental feature) skips the remount, and the
                   #     createDirs calls succeed because the slot image ships
                   #     /nix/store/.links (see ab-image).
-                  ${pkgs.coreutils}/bin/mkdir -p /run/nix-clone-state
-                  ${pkgs.coreutils}/bin/cp -a /nix/var/nix/db /run/nix-clone-state/db
-                  ${pkgs.coreutils}/bin/echo "clone seed: scratch DB holds $(${pkgs.nix}/bin/nix-store --store 'local?root=/&state=/run/nix-clone-state&read-only=true' --extra-experimental-features read-only-local-store -q --valid-paths | ${pkgs.coreutils}/bin/wc -l) valid paths"
+                  ${lib.getExe' pkgs.coreutils "mkdir"} -p /run/nix-clone-state
+                  ${lib.getExe' pkgs.coreutils "cp"} -a /nix/var/nix/db /run/nix-clone-state/db
+                  ${lib.getExe' pkgs.coreutils "echo"} "clone seed: scratch DB holds $(${lib.getExe' pkgs.nix "nix-store"} --store 'local?root=/&state=/run/nix-clone-state&read-only=true' --extra-experimental-features read-only-local-store -q --valid-paths | ${lib.getExe' pkgs.coreutils "wc"} -l) valid paths"
                 ''}
-                ${pkgs.coreutils}/bin/echo "Starting nix copy loop as root..."
+                ${lib.getExe' pkgs.coreutils "echo"} "Starting nix copy loop as root..."
                 # tee: progress (and any recurring failure) lands in the unit
                 # journal — a silent multi-minute copy and an infinite retry
                 # loop are indistinguishable without it. The log file stays
                 # for post-mortem. pipefail (set above) keeps the loop
                 # condition on nix's exit code, not tee's.
-                until ${pkgs.nix}/bin/nix ${lib.optionalString (!config.nix.enable) "--extra-experimental-features 'nix-command read-only-local-store'"} copy --no-check-sigs --all ${lib.optionalString (!config.nix.enable) "--from 'local?root=/&state=/run/nix-clone-state&read-only=true'"} --to ${cfg.store.path} 2>&1 | ${pkgs.coreutils}/bin/tee /var/log/nix-copy-setup.log; do
-                  ${pkgs.coreutils}/bin/echo "Copy failed (locked or RO), retrying in 5 seconds..."
-                  ${pkgs.coreutils}/bin/sleep 5
+                until ${lib.getExe pkgs.nix} ${lib.optionalString (!config.nix.enable) "--extra-experimental-features 'nix-command read-only-local-store'"} copy --no-check-sigs --all ${lib.optionalString (!config.nix.enable) "--from 'local?root=/&state=/run/nix-clone-state&read-only=true'"} --to ${cfg.store.path} 2>&1 | ${lib.getExe' pkgs.coreutils "tee"} /var/log/nix-copy-setup.log; do
+                  ${lib.getExe' pkgs.coreutils "echo"} "Copy failed (locked or RO), retrying in 5 seconds..."
+                  ${lib.getExe' pkgs.coreutils "sleep"} 5
                 done
               '';
               User = "root";

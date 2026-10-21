@@ -40,7 +40,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: v1 booted and blessed")
 
-    # ── Kill sysupdate inside the download window ──────────────────────────
+    # -- Kill sysupdate inside the download window --------------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/"
@@ -58,14 +58,14 @@ pkgs.testers.runNixOSTest {
     appliance.fail("test -f /boot/EFI/Linux/abtest_2+*.efi")
     print("OK: sysupdate killed mid-download (slot labelled, no boot entry)")
 
-    # ── Reboot: the half-written slot is never chosen ──────────────────────
+    # -- Reboot: the half-written slot is never chosen ----------------------
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")
     version = appliance.succeed("cat /etc/image-version").strip()
     assert version == "1", f"partial slot booted: got version {version}"
     print("OK: reboot after interruption still boots v1 (active slot untouched)")
 
-    # ── The next run rewrites the inactive slot completely ─────────────────
+    # -- The next run rewrites the inactive slot completely -----------------
     # sysupdate refuses a partially-installed version ("already acquired and
     # partially installed. Vacuum it") — vacuum removes the partial instance,
     # then the retry installs it in full.

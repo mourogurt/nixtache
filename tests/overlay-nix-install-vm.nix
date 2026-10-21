@@ -1,5 +1,5 @@
 # QEMU (runNixOSTest) CONTRACT for overlay-nix: FULL working nix over a
-# read-only lower store (spec 08 §6). The point of overlay-nix is to restore a
+# read-only lower store (spec 08 sec. 6). The point of overlay-nix is to restore a
 # normal nix on an A/B appliance (`nix.enable=false`, /nix/store ro squashFS) —
 # not just `nix-store` ops but the everyday nix surface.
 #
@@ -142,14 +142,14 @@ pkgs.testers.runNixOSTest {
     # name — that's the implementing agent's choice).
     appliance.wait_until_succeeds("nix --version")
 
-    # ── O2: nix-store --realize hello from the cache → upper layer, runs ─────
+    # -- O2: nix-store --realize hello from the cache → upper layer, runs -----
     appliance.succeed("nix-store --realize ${helloPath}", timeout=240)
     out = appliance.succeed("${helloPath}/bin/hello")
     assert "Hello, world" in out, f"O2 FAIL: hello did not run ({out!r})"
     appliance.succeed("test -d /var/lib/nix-overlay/upper/${helloBasename}")
     print("O2 OK: nix-store --realize → runs → in upper")
 
-    # ── O-delta: a lower-valid path is never copied into the upper ───────────
+    # -- O-delta: a lower-valid path is never copied into the upper -----------
     # The overlay's lower-store=local reads the node's nix DB, which registers
     # the toplevel closure — so realizing a member of it (the shipped nix CLI)
     # is a no-op for the upper layer; only genuinely missing paths (hello/vim)
@@ -158,14 +158,14 @@ pkgs.testers.runNixOSTest {
     appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf pkgs.nix.outPath}")
     print("O-delta OK: lower-valid path realized without an upper copy")
 
-    # ── O3: full-nix UX — `nix run` and `nix shell` over the overlay ─────────
+    # -- O3: full-nix UX — `nix run` and `nix shell` over the overlay ---------
     out = appliance.succeed("nix run nixpkgs#hello", timeout=240)
     assert "Hello, world" in out, f"O3-run FAIL: nix run did not work ({out!r})"
     out = appliance.succeed("nix shell nixpkgs#hello -c hello", timeout=240)
     assert "Hello, world" in out, f"O3-shell FAIL: nix shell did not work ({out!r})"
     print("O3 OK: nix run + nix shell work over the overlay")
 
-    # ── O-build: `nix build nixpkgs#hello` → output realized into upper ──────
+    # -- O-build: `nix build nixpkgs#hello` → output realized into upper ------
     out = appliance.succeed(
       "nix build nixpkgs#hello --no-link --print-out-paths", timeout=240
     ).strip()
@@ -173,14 +173,14 @@ pkgs.testers.runNixOSTest {
     appliance.succeed(f"test -d /var/lib/nix-overlay/upper/$(basename {out})")
     print("O-build OK: nix build output realized into upper")
 
-    # ── O8: nix path-info sees BOTH lower (system closure) and upper (hello) ──
+    # -- O8: nix path-info sees BOTH lower (system closure) and upper (hello) --
     appliance.succeed("nix path-info /run/current-system")  # lower closure visible
     pi = appliance.succeed("nix path-info --all")
     assert "${helloBasename}" in pi, "O8 FAIL: upper path (hello) not listed"
     print("O8 OK: path-info sees lower closure + upper path")
 
-    # ── O4: profile install → profile remove → GC deletes the upper-only
-    #        path, NEVER the lower (spec §5.5) ───────────────────────────────
+    # -- O4: profile install → profile remove → GC deletes the upper-only
+    #        path, NEVER the lower (spec sec. 5.5) -------------------------------
     appliance.succeed("nix profile install nixpkgs#hello", timeout=300)
     out = appliance.succeed("/root/.nix-profile/bin/hello")
     assert "Hello, world" in out, f"O4 FAIL: profile-installed hello did not run ({out!r})"
@@ -191,13 +191,13 @@ pkgs.testers.runNixOSTest {
     # hello until the history is wiped (same for `nix-env -e` generations).
     appliance.succeed("nix profile wipe-history", timeout=120)
     appliance.succeed("nix-collect-garbage", timeout=240)
-    # unpinned + collected from upper…
+    # unpinned + collected from upper...
     appliance.fail("test -d /var/lib/nix-overlay/upper/${helloBasename}")
-    # …but the lower store (system closure) is read-only and MUST be untouched.
+    # ...but the lower store (system closure) is read-only and MUST be untouched.
     appliance.succeed("nix path-info /run/current-system")
     print("O4 OK: profile remove + GC deleted the upper path, lower store intact")
 
-    # ── O5: upperDir on the persistent root FS — the install survives reboot ─
+    # -- O5: upperDir on the persistent root FS — the install survives reboot -
     # Probe the cache first: right after boot the test LAN may still be coming
     # up, and a failed first narinfo fetch makes nix plan a full source build.
     appliance.wait_until_succeeds(
@@ -218,8 +218,8 @@ pkgs.testers.runNixOSTest {
     print("O5 OK: vim installed in the persistent upper survived a reboot")
     appliance.shutdown()
 
-    # ── O6: upperDir on tmpfs — the install is GONE after reboot (by design),
-    #        the overlay mount itself comes back up ───────────────────────────
+    # -- O6: upperDir on tmpfs — the install is GONE after reboot (by design),
+    #        the overlay mount itself comes back up ---------------------------
     applianceTmpfs.start(allow_reboot=True)
     applianceTmpfs.wait_until_succeeds("nix --version", timeout=300)
     # Same boot-timing guard as O5 (this node installs right after boot).
@@ -238,9 +238,9 @@ pkgs.testers.runNixOSTest {
     # appliance (the squashFS lower lacks vim, so a wiped upper removes it).
     # In this harness the lower is the HOST store (9p), which contains vim
     # (the test closure references it), so vim stays runnable from the lower.
-    # The faithful assertions here: the tmpfs upper IS wiped …
+    # The faithful assertions here: the tmpfs upper IS wiped ...
     applianceTmpfs.fail("test -d /tmp/nix-overlay/upper/${vimBasename}")
-    # … and the remounted overlay is functional — vim now resolves from the
+    # ... and the remounted overlay is functional — vim now resolves from the
     # LOWER layer through the merged view.
     out = applianceTmpfs.succeed("${pkgs.vim.outPath}/bin/vim --version")
     assert "VIM" in out, f"O6 FAIL: merged store broken after reboot ({out!r})"

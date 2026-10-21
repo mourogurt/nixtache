@@ -124,7 +124,7 @@ in
       }
       {
         assertion = config.boot.loader.systemd-boot.bootCounting.enable or false;
-        message = "services.nixtache.deploy-target.ab.enable = true requires boot.loader.systemd-boot.bootCounting.enable = true on this target (A/B rollback relies on Automatic Boot Assessment — see doc/archive/specs/direct-deploy/06-ab-image.md §5).";
+        message = "services.nixtache.deploy-target.ab.enable = true requires boot.loader.systemd-boot.bootCounting.enable = true on this target (A/B rollback relies on Automatic Boot Assessment — see doc/archive/specs/direct-deploy/06-ab-image.md sec. 5).";
       }
       {
         assertion = !ab.gating || ab.forgejoApiTokenFile != null;

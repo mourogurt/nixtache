@@ -211,7 +211,7 @@ let
       }) ];
 
   scenarioPartAssertBadStorage = assertContract
-    "ab.partitions assert: partition + storage not /dev/…/auto → eval refuses (A4)"
+    "ab.partitions assert: partition + storage not /dev/.../auto → eval refuses (A4)"
     abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg {
         slot_a = { type = "partition"; storage = "/srv/foo"; label = "nix-store_1"; };
@@ -414,7 +414,7 @@ let
   # The provision script source (the unit's `script` attr only carries the
   # writeShellScript store path; the source text is the checkable artifact).
   # Two-step proof for the baked labels: option defaults are asserted above
-  # (slotADefault/slotBDefault) + the script consumes ${…slot.label} below.
+  # (slotADefault/slotBDefault) + the script consumes ${...slot.label} below.
   abProvisionSource = pkgs.writeText "ab-provision.nix"
     (builtins.readFile ../modules/deploy-target/ab-provision.nix);
 

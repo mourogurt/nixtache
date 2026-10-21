@@ -12,7 +12,7 @@ description: |
   targets).   Offline / unmapped / keyless targets are skipped with a warning
   (R1/R5) — they never fail the whole job. Each `live` target's free store
   space is checked twice against its `minFreeBytes` preset: pre-build (fast
-  refuse below the preset) and post-build (missing-closure-paths estimate ×
+  refuse below the preset) and post-build (missing-closure-paths estimate x
   1.1 + preset; full closure as fallback). A target that cannot hold the
   deployment records a per-target error, the loop continues with the
   remaining targets, and the job fails at the end if any target errored. A
@@ -39,7 +39,7 @@ runs:
         set -uo pipefail
         mkdir -p artifacts
 
-        # --- mode from branch (§7.1): PR → dry-activate; main → switch ---------
+        # --- mode from branch (sec. 7.1): PR → dry-activate; main → switch ---------
         if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
           mode=dry-activate
         elif [ "$(basename "$GITHUB_REF")" = "main" ]; then
@@ -108,7 +108,7 @@ runs:
             fi
           fi
 
-          echo "→ $cfg: live (mode=$mode) — building toplevel…"
+          echo "→ $cfg: live (mode=$mode) — building toplevel..."
           # stdout (--print-out-paths) = the store path; stderr (build log) → artifact.
           local P
           P=$(nix build --no-link --print-out-paths $SANDBOX_FLAG .#nixosConfigurations.$cfg.config.system.build.toplevel 2>&1)
@@ -121,10 +121,10 @@ runs:
 
           # Stage 2 (post-build sized check): need = Σ narSize of closure paths
           # MISSING on the target (remote store inventory through the serve
-          # channel) × 1.1 + preset headroom. Text output (`-r -S` / `--all`)
+          # channel) x 1.1 + preset headroom. Text output (`-r -S` / `--all`)
           # rather than `--json` (deprecated without --json-format; shape
           # differs across nix versions). When either side of the inventory
-          # fails, fall back to the conservative full closure size × 1.1 +
+          # fails, fall back to the conservative full closure size x 1.1 +
           # preset (a conservative refusal is safe; a delta-unaware one would
           # falsely block routine deploys).
           if [ "$preset" -gt 0 ]; then
@@ -197,7 +197,7 @@ runs:
           local stage="$stage_root/$cfg"
           mkdir -p "$stage"
 
-          echo "→ $cfg: ab-image (mode=$mode) — assigning runtime version…"
+          echo "→ $cfg: ab-image (mode=$mode) — assigning runtime version..."
           # Runtime versioning: the version is assigned HERE, at CI build time
           # (after the config evaluated, before the image builds) — NOT
           # hardcoded in the consumer config. Default: UTC calver
@@ -214,7 +214,7 @@ runs:
           echo "$version" > image-version
           git add -f image-version 2>/dev/null || true
 
-          echo "→ $cfg: ab-image (mode=$mode) — building sysupdate-package…"
+          echo "→ $cfg: ab-image (mode=$mode) — building sysupdate-package..."
           local img
           img=$(nix build --no-link --print-out-paths ${SANDBOX_FLAG:-} .#nixosConfigurations.$cfg.config.system.build.sysupdate-package 2>&1)
           img=$(grep -E '^/nix/store/' <<<"$img" | tail -n1)
@@ -272,7 +272,7 @@ runs:
           echo "✓ $cfg: ab-image staged + apply signalled"
         }
 
-        # Exported so the per-target `timeout … bash -c` subshells below see
+        # Exported so the per-target `timeout ... bash -c` subshells below see
         # the functions and the sandbox flag.
         export SANDBOX_FLAG
         export -f _liveApply _abImage

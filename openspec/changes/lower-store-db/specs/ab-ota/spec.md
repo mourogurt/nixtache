@@ -30,14 +30,33 @@ The appliance image evaluation MUST build its toplevel closure with nixpkgs cont
 - **WHEN** a content-addressed appliance image is built
 - **THEN** the shipped dump equals the closure's registered validity records (no per-path re-hashing at dump time), and a shipped path reports its `ca:fixed:r:` marker through standard nix tooling (`nix path-info`)
 
-### Requirement: A top-level symlink closure path fails the image build
+### Requirement: Top-level symlink closure paths ship faithfully
 
-The image build MUST fail listing the offending paths when any toplevel-closure path is a top-level symlink: the image builder resolves top-level symlinks when imaging, which would ship content contradicting the path's content-addressed hash.
+The image build MUST ship a toplevel-closure path that is itself a symlink as that symlink — never as its target's content. The imaging mechanism MUST dereference at most the single copy source it is pointed at and preserve the type of every entry inside it, so the shipped store filesystem matches the database records for any closure composition (input-addressed or content-addressed alike; standard closures contain such paths, e.g. multi-output `man`/`doc` symlinks).
 
-#### Scenario: A top-level symlink closure path fails the build
+#### Scenario: A symlink store path ships as a symlink
 
-- **WHEN** the toplevel closure contains a store path that is itself a symlink
-- **THEN** the image build fails listing the offending path(s), instead of shipping content that contradicts its database record
+- **WHEN** the toplevel closure contains a store path that is itself a symlink to another store path
+- **THEN** the image's store filesystem contains it as a symlink to its recorded target, standard nix tooling resolves its validity from the shipped database, and copying from the image verifies its hash without mismatch
+
+#### Scenario: A closure without symlink paths builds unchanged
+
+- **WHEN** the toplevel closure contains no top-level symlink paths
+- **THEN** the image builds exactly as before the faithful-imaging change (same content, same records)
+
+### Requirement: Max-disk mode fills the root partition, not the ESP
+
+When the image is built at a fixed total size (`diskSize` set), the leftover space MUST land on the root partition: the ESP and both A/B slots keep fixed sizes (the ESP claims no proportional share), and the distribution MUST be deterministic — identical inputs produce an identical partition layout.
+
+#### Scenario: Max-disk layout gives the leftover space to root
+
+- **WHEN** an image is built with `diskSize` set
+- **THEN** the ESP stays at its pinned size and the root partition takes the space left by the ESP and the fixed slots
+
+#### Scenario: The ESP minimum is explicit
+
+- **WHEN** the ESP partition size is configured below the builder's enforced vfat minimum (260MiB at 4K filesystem sectors)
+- **THEN** the effective configuration carries the enforced minimum explicitly (no silent divergence between the configured and shipped sizes)
 
 ### Requirement: A boot-time loader seeds the lower store database when missing or stale
 

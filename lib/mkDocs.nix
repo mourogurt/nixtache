@@ -60,8 +60,8 @@ let
   # the surviving options. When `optionPrefixes` is non-empty we prune the
   # tree to options whose dotted location starts with one of the prefixes
   # (string-prefix match, so "services.my-" catches my-forgejo, my-nextcloud,
-  # …; "services.monitoring" catches monitoring.grafana etc.); otherwise we
-  # pass the full `options` (≈6000 NixOS options — large but searchable).
+  # ...; "services.monitoring" catches monitoring.grafana etc.); otherwise we
+  # pass the full `options` (~6000 NixOS options — large but searchable).
   keepMatching = prefixes: path: node:
     if lib.isOption node then
       (if lib.any (p: lib.hasPrefix p (lib.concatStringsSep "." path)) prefixes
@@ -98,7 +98,7 @@ let
   # Combine per-machine option references into one markdown with headings.
   # Each machine's docs file is interpolated directly into the script (the
   # store path is forced + added as a dependency). Empty nixosConfigurations
-  # ⇒ no per-machine lines ⇒ empty output.
+  # => no per-machine lines => empty output.
   configurationDocsCombined = pkgs.runCommand "configuration-docs.md" { } ''
     : > $out
     ${lib.concatStringsSep "\n" (lib.mapAttrsToList

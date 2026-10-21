@@ -41,10 +41,11 @@ upstream-intended overlay design ("world A"):
   only in the OLD lower genuinely break (missing interpreter/library) and
   their DB entries dangle — `upperOnUpdate` below exists exactly for this.
 
-(The historical "world B" — no lower DB, realize downloading full
-closures, the upper surviving swaps by accident of completeness — is what
-nixtache appliances ran before the shipped DB; the replication-era suites
-that constructed world A by hand now pin the shipped reality.)
+(History: nixtache appliances once ran without a shipped DB — realize
+downloaded full closures and the upper survived swaps only by accident of
+closure completeness. The test suites of that era built world A by hand
+(seeding the DB in the fixture); since the image ships the DB they pin the
+shipped reality instead, with no manual seeding.)
 
 ## Upper-layer persistence
 

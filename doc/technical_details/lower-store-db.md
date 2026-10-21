@@ -7,14 +7,33 @@ Functional behaviour (what loads when, lifecycle across swaps) lives in
 [`openspec/specs/ab-ota/spec.md`](../../openspec/specs/ab-ota/spec.md).
 This document is for contributors and owns the internals.
 
-The problem being solved: an appliance boots `nix.enable = false` with a
-read-only squashFS `/nix/store` and no `/nix/var/nix/db`. Without a
-database the runner container's clone mode enumerates an empty store
-(copies nothing), its overlay mode's `lower-store=daemon` self-references
-(no system daemon exists), and overlay installs download full closures
-instead of deltas. The image therefore ships validity records (path,
-narHash, narSize, references per store path) and a boot-time loader seeds
-`/nix/var/nix/db` from them.
+## The problem, stated in full
+
+An appliance slot is a squashFS/erofs image: `/nix/store` is a read-only
+mount populated with the system closure, and the image-based-appliance
+profile disables nix entirely (`nix.enable = false` — appliances are not
+rebuilt in place). Consequently nothing ever creates `/nix/var/nix/db`,
+the database that tells nix which paths exist and what their contents'
+hashes are. Three consumer surfaces break on such a store:
+
+- **Runner container, clone mode** (`services.nixtache.runner.store.mode =
+  "clone"`): the storage seeder enumerates "all valid paths" through the
+  host's database — with no database the enumeration is empty, and the
+  clone copies nothing.
+- **Runner container, overlay mode**: the overlay store URL pointed the
+  lower layer at `lower-store=daemon`, but no system nix daemon exists on
+  a nix-less host — the custom daemon's workers connect to their own
+  socket and fork-loop.
+- **Runtime installs through overlay-nix**: nix must realize the closure of
+  whatever is installed — with no validity records for the lower store it
+  cannot know that most of that closure already ships in the image, so it
+  downloads everything into the upper layer (no delta installs).
+
+The fix: the image build ships the closure's validity records (path,
+narHash, narSize, deriver, references per store path) as a dump on the ESP,
+and a boot-time loader seeds `/nix/var/nix/db` from it. The rest of this
+document covers the internals: how the dump is generated, how the store is
+imaged, and why the runtime workarounds exist.
 
 ## Dump generation: registered records, content-true via content-addressing
 
@@ -37,7 +56,20 @@ the first:
    The divergence detonates in the production path: the runner's clone seed
    runs `nix copy --all`, which re-serializes every path and verifies it
    against the source DB's recorded narHash — a mismatch aborts the copy
-   and the retry loop never converges:
+   and the retry loop never converges. Under `ca:fixed:r:` the path hash IS
+   the content hash — a build computes content→path, substitution verifies
+   content against the narinfo — so the DB cannot lie about content.
+
+2. **repart resolves top-level symlink copy sources (imaging behaviour —
+   fixed by faithful imaging, works for any store).** The image builder
+   (systemd-repart, pinned 261.x) populates a partition from `CopyFiles=`
+   lines, and it opens every copy source through path resolution that
+   follows symlinks: a source that IS a symlink to a directory ships as
+   that directory's content. nixpkgs' `image.repart` `storePaths` option
+   emits one `CopyFiles=` line per closure path — so a closure path that is
+   itself a symlink shipped as its target's content, contradicting its
+   database record. The original incident (the runner's clone seed dying in
+   an infinite retry on the real appliance):
 
    ```
    error: hash mismatch importing path '/nix/store/…-nix-2.34.8-man';
@@ -45,19 +77,19 @@ the first:
           got:       sha256:0c6z1cjk…   (the shipped content: 476 KB of files)
    ```
 
-   Under `ca:fixed:r:` the path hash IS the content hash — a build computes
-   content→path, substitution verifies content against the narinfo — so the
-   DB cannot lie about content.
-
-2. **repart resolves top-level symlinks (NOT resolved by CA — guarded).**
-   A store path that IS a symlink to another store path ships as a real
-   directory with the target's content — imaging behaviour, not hashing, so
-   CA changes nothing (and rewriting the record from the resolved content
-   would contradict the path↔content binding and fail verification just as
-   hard). The generator therefore ships a **build-time guard**: the image
-   build fails, listing any closure path that is a top-level symlink (rare;
-   the offender gets repackaged). A silent runtime landmine becomes a loud
-   build error.
+   Such paths are standard (nixpkgs' `nix.man`/`nix.doc` outputs are
+   symlinks into `nix-manual`, and the appliance ships `pkgs.nix`), and
+   rewriting the record instead would be invalid under CA. The module
+   therefore does not use `storePaths`: a store-tree derivation
+   (`modules/ab-image/store-tree.nix`) materialises the closure at build
+   time — regular paths are copied, symlink paths are recreated as
+   symlinks — and the partition receives ONE `CopyFiles` line pointing at
+   the tree. Only the tree itself is resolved; every entry inside is
+   copied type-faithfully (systemd `copy.c` recreates symlinks), so the
+   image matches the records for input-addressed and content-addressed
+   closures alike. Covered by `tests/ab-image.nix` (the store tree
+   preserves a symlink path in a real build) and the `overlay-nix-vm`
+   suite (a symlink path ships, `nix path-info` resolves it).
 
 ### Enabling CA (the two knobs, and a daemon quirk)
 
@@ -96,33 +128,45 @@ the runner's staging retain-GC, the test harnesses) must include
 
 ## Read-only store opens: `.links` and the remount
 
-Two `LocalStore` constructor behaviours (nix 2.34, `local-store.cc`) bite
-on an appliance whose `/nix/store` is a read-only mount without `.links`:
+Why runtime needs workarounds at all: nix's `LocalStore` constructor (nix
+master as of 2026-10, `local-store.cc`) unconditionally creates its state
+directories when ANY local store opens — `realStoreDir`, `realStoreDir/
+.links`, and the state dirs under `nix/var/nix` — even when the store URL
+says `read-only=true` (that flag only skips the remount step below). On an
+appliance the store dir sits on a read-only squashFS mount, so two
+constructor behaviours would otherwise fail every store open:
 
-- `createDirs(realStoreDir)` and `createDirs(storeDir/.links)` run
-  **unconditionally** — even with `read-only=true` in the store URL (that
-  flag only skips `makeStoreWritable`). Opening any local store on a bare
-  appliance fails with `creating directory "/nix/store/.links": Read-only
-  file system`.
-- `makeStoreWritable()` (writable mode, as root) attempts to **remount** a
-  read-only store writable — which the squashFS/nspawn binds refuse.
+- `createDirs(realStoreDir/.links)` — a write onto the read-only squashFS.
+- `makeStoreWritable()` (writable mode, as root) — attempts to remount the
+  read-only store writable, which the squashFS/nspawn binds refuse.
 
-Consequences wired into the modules:
+The three workarounds, each mapped to the behaviour that forces it:
 
-- The image ships an empty `/nix/store/.links` (a `.keep` placeholder via
-  the partition contents; GC may later delete the file — the directory
-  stays, and that is all the constructor needs).
-- The appliance's loader (`nixtache-lower-store-db-load.service`) runs
-  `nix-store --load-db` inside `unshare -m --propagation private` with a
-  tmpfs-upper OverlayFS over `/nix/store`: the store stays readable, the
-  dir-init lands in the discarded namespace, the DB write to `/nix/var/nix`
-  persists. (A unit-level `TemporaryFileSystem=/nix/store` cannot be used —
-  it would mask the unit script's own store path at exec time, status
-  203/EXEC.)
-- The runner container's clone seed reads the host DB through a writable
-  scratch copy plus a `local?root=/&state=…&read-only=true` source URL
-  (the `read-only-local-store` experimental feature skips the remount;
-  `.links` shipped above satisfies the init).
+- **The image ships an empty `/nix/store/.links`** (a `.keep` placeholder
+  via the partition contents). Every later `createDirs(.links)` becomes a
+  no-op on an existing directory. GC may delete the placeholder file
+  itself; the directory stays, and that is all the constructor needs.
+- **The appliance's DB loader
+  (`nixtache-lower-store-db-load.service`) runs `nix-store --load-db`
+  inside `unshare -m --propagation private` with a tmpfs-upper OverlayFS
+  over `/nix/store`**: the store stays readable (the loader's own binaries
+  resolve), the directory-init lands in the discarded namespace, and the
+  DB write to `/nix/var/nix` (on the writable root filesystem) persists.
+  The namespace trick is load-bearing for the swap case — records must
+  merge additively into the EXISTING database, so the DB cannot simply be
+  rebuilt elsewhere and swapped in. (A unit-level
+  `TemporaryFileSystem=/nix/store` cannot replace it: systemd would mask
+  the unit script's own store path at exec time — status 203/EXEC.)
+- **The runner container's clone seed reads the host DB through a writable
+  scratch copy plus a `local?root=/&state=…&read-only=true` source URL**:
+  sqlite cannot open the read-only bind-mounted DB file, so the seed
+  copies it to `/run` first; the `read-only-local-store` experimental
+  feature skips the remount attempt, and the `.links` entry shipped in the
+  image satisfies the directory init.
+
+These were re-verified against nix master in October 2026 — the
+unconditional directory creation is still there, so none of the
+workarounds can be dropped yet; re-check on every nix bump.
 
 ## Alternatives considered
 
@@ -135,8 +179,10 @@ Consequences wired into the modules:
   schema-aware tooling on the appliance; the records format is nix's own
   stable import format and merges additively by construction.
 
-Test coverage: the dump and loader wiring are pinned by
-`checks.<system>.ab-image` (pure-eval), boot-time seeding by
-`vmTests.overlay-nix-vm`, the clone/overlay consumption across a real swap
-by `vmTests.runner-store-swap-{clone,overlay}-vm` — see
+Test coverage: the dump, loader and store-tree wiring are pinned by
+`checks.<system>.ab-image` (pure-eval; the store tree is also BUILT for
+a tiny closure containing a symlink path), boot-time seeding and
+symlink-faithful imaging by `vmTests.overlay-nix-vm`, the clone/overlay
+consumption across a real swap by
+`vmTests.runner-store-swap-{clone,overlay}-vm` — see
 [`testing.md`](testing.md).

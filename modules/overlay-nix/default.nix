@@ -23,14 +23,14 @@
 #      `workDir`. The merged view IS `/nix/store` (default root for the
 #      local-overlay store). Runs before `nix-daemon` so the daemon always sees
 #      the merged view.
-#   4. `nix.settings.store = local-overlay://…` — the SYSTEM nix-daemon serves
+#   4. `nix.settings.store = local-overlay://...` — the SYSTEM nix-daemon serves
 #      the overlay store (not a side daemon). Every nix command (`nix run`,
 #      `nix shell`, `nix build`, `nix-store --realize`, `nix-collect-garbage`)
 #      talks to the daemon via the standard socket and gets the layered store.
 #   5. `ignore-gc-delete-failure=true` — GC deletes upper-layer paths; lower
 #      (squashFS) delete failures are ignored as warnings (lower is read-only).
 #
-# Assert: requires Nix ≥ 2.19 (the experimental feature is absent in earlier
+# Assert: requires Nix >= 2.19 (the experimental feature is absent in earlier
 # versions — `nix-daemon` would reject the store URL).
 { config, lib, pkgs, ... }:
 
@@ -211,7 +211,7 @@ in
 
         Re-enables nix on appliances (`nix.enable = mkOverride 900 true`, beating
         the appliance profile's `nix.enable = false` without mkForce). Requires
-        Nix ≥ 2.19 (the `local-overlay-store` experimental feature).
+        Nix >= 2.19 (the `local-overlay-store` experimental feature).
       '';
     };
 
@@ -244,7 +244,7 @@ in
         shipped lower store database — deterministically leaves upper paths
         referencing files that only existed in the old lower image. There is
         no carry-over value: the policy applies whenever an update is
-        triggered, on every appliance shape (OTA on/off × overlay on/off
+        triggered, on every appliance shape (OTA on/off x overlay on/off
         reduces to "no updates happen" when OTA is off, where the hook is
         inert).
 
@@ -314,7 +314,7 @@ in
       "d ${cfg.workDir} 0755 root root -"
     ];
 
-    # ── OverlayFS mount service ────────────────────────────────────────────
+    # -- OverlayFS mount service --------------------------------------------
     # Mounts the merged view AT `/nix/store` (overmounting the read-only
     # squashFS). The kernel allows stacking: the squashFS stays mounted
     # underneath, the OverlayFS merges it with the writable upper layer.

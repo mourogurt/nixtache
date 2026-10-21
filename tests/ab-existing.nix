@@ -122,7 +122,7 @@ let
       sortsDesc = lib.hasInfix "sort -rn" gcScript;
       regenSums = lib.hasInfix "sha256sum" gcScript && lib.hasInfix "SHA256SUMS" gcScript;
       removesRawAndEfi = lib.hasInfix ".nix-store.raw" gcScript && lib.hasInfix ".efi" gcScript;
-      # §11.1 fix: with signingKeyFile set, GC re-signs SHA256SUMS.gpg (host-path
+      # sec. 11.1 fix: with signingKeyFile set, GC re-signs SHA256SUMS.gpg (host-path
       # sops key, readable on the host) so Verify=yes targets don't reject a stale .gpg.
       reSignsWhenKey = lib.hasInfix "gpg --batch --yes --detach-sign" gcScript;
       gnupgInPath =

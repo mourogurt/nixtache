@@ -94,7 +94,7 @@ let
     };
   };
 
-  # --- scenario 3: publicKey ⇒ Verify=yes on every transfer --------------------
+  # --- scenario 3: publicKey => Verify=yes on every transfer --------------------
   hostSigned = mkHost {
     services.nixtache.ab-image = {
       enable = true;
@@ -106,7 +106,7 @@ let
     };
   };
   scenarioSigned = {
-    name = "publicKey set ⇒ Transfer.Verify=yes on both transfers + import-pubring shipped";
+    name = "publicKey set => Transfer.Verify=yes on both transfers + import-pubring shipped";
     checks = {
       verifyYesStore = (transfers hostSigned)."10-nix-store".Transfer.Verify == "yes";
       verifyYesBoot = (transfers hostSigned)."20-boot-image".Transfer.Verify == "yes";
@@ -148,17 +148,24 @@ let
   # The dump MUST be produced by the module's dump generator for THIS host's
   # toplevel: rebuilding the derivation here pins both that the dump exists
   # and that its records cover exactly the running toplevel's closure (the
-  # closure's REGISTERED records — content-true because the fixture evaluates
-  # content-addressed; a build-time guard rejects top-level symlink paths).
-  # The dump ships on the ESP at a versioned path and rides updates via the
-  # 15-lower-db transfer — it cannot live in /etc (derivation cycle: the dump
-  # covers the toplevel) nor inside /nix/store (overlay GC hard-fails on
-  # non-store-path entries in the merged store dir).
+  # closure's REGISTERED records — content-true because the fixture
+  # evaluates content-addressed). The store content itself ships via the
+  # store tree (one CopyFiles source — see scenario 6): top-level symlink
+  # closure paths image as symlinks, so the records match the shipped bytes
+  # for any closure composition. The dump ships on the ESP at a versioned
+  # path and rides updates via the 15-lower-db transfer — it cannot live in
+  # /etc (derivation cycle: the dump covers the toplevel) nor inside
+  # /nix/store (overlay GC hard-fails on non-store-path entries in the
+  # merged store dir).
   #
   # Rebuilt with the FIXTURE's pkgs (hostFixed.pkgs): under CA every
   # derivation outPath depends on the pkgs instance's config, so the identity
   # pin must use the same instance the module evaluated with.
   expectedDump = import ../modules/ab-image/lower-store-db.nix {
+    pkgs = hostFixed.pkgs;
+    toplevel = hostFixed.config.system.build.toplevel;
+  };
+  expectedTree = import ../modules/ab-image/store-tree.nix {
     pkgs = hostFixed.pkgs;
     toplevel = hostFixed.config.system.build.toplevel;
   };
@@ -193,7 +200,9 @@ let
       dumpShipped = dumpContent != null;
       dumpIsToplevelClosure = dumpContent != null && toString dumpContent.source == toString expectedDump;
       dumpIsRegistration = dumpContent != null && lib.hasInfix "registration" (expectedDump.passthru.checkScript or "");
-      dumpGuardRejectsSymlinks = dumpContent != null && lib.hasInfix "[ -L" (expectedDump.passthru.checkScript or "");
+      storeTreeIsCopySource = dumpContent != null
+        && (pf.nix-store.repartConfig.CopyFiles or null) == [ "${toString expectedTree}:/" ];
+      storePathsAbandoned = (pf.nix-store.storePaths or [ ]) == [ ];
       dumpTransferExists = lowerDbTransfer != null;
       dumpTransferPattern = lowerDbTransfer != null
         && (lowerDbTransfer.Source.MatchPattern or [ ]) == [ "h_@v.lower-db" ]
@@ -215,7 +224,50 @@ let
     scenarioSigned
     scenarioVersionFile
     scenarioLowerStoreDb
+    scenarioStoreTreeFaithful
   ];
+
+  # --- scenario 6: faithful store imaging (store tree) ----------------------
+  # The image builder (systemd-repart) dereferences each CopyFiles source it
+  # is handed, so the store partition must receive ONE source — the staging
+  # tree — whose per-path entries are materialised with top-level symlink
+  # paths recreated as symlinks. The build-level half below builds the tree
+  # for a tiny closure that CONTAINS a top-level symlink path and asserts
+  # the symlink and its target survive staging (a mangled tree would fail
+  # this derivation, failing the check); the boot-level half lives in the
+  # overlay-nix VM suites (symlink path ships, path-info resolves it).
+  symlinkFixturePath = pkgs.runCommand "symlink-fixture" { }
+    "ln -s ${pkgs.hello} $out";
+  storeTreeSymlinkCheck = pkgs.runCommand "store-tree-symlink-check"
+    { tree = import ../modules/ab-image/store-tree.nix {
+        inherit pkgs;
+        toplevel = symlinkFixturePath;
+      };
+    }
+    ''
+      set -euo pipefail
+      link=""
+      for p in "$tree"/*; do
+        case "$p" in *-symlink-fixture) link="$p";; esac
+      done
+      [ -n "$link" ] || { echo "symlink fixture path missing from the staged tree" >&2; exit 1; }
+      [ -L "$link" ] || { echo "staged entry is not a symlink: $link" >&2; exit 1; }
+      target=$(readlink "$link")
+      [ "$target" = "${pkgs.hello}" ] || { echo "symlink target mangled: $target" >&2; exit 1; }
+      [ -x "$tree/$(basename "${pkgs.hello}")/bin/hello" ] \
+        || { echo "closure content missing from the staged tree" >&2; exit 1; }
+      touch "$out"
+    '';
+  scenarioStoreTreeFaithful = {
+    name = "store imaging: store tree preserves top-level symlink closure paths";
+    checks = {
+      symlinkCheckIsBuild = lib.isDerivation storeTreeSymlinkCheck;
+      espPinned = pf.esp.repartConfig.SizeMinBytes or null == "260M"
+        && pf.esp.repartConfig.SizeMaxBytes or null == "260M";
+      espPinnedMaxDisk = pm.esp.repartConfig.SizeMinBytes or null == "260M"
+        && pm.esp.repartConfig.SizeMaxBytes or null == "260M";
+    };
+  };
 
   failed = builtins.concatMap
     (s: if builtins.all (c: c) (builtins.attrValues s.checks) then [ ] else [ s.name ])
@@ -231,6 +283,9 @@ in
 pkgs.runCommand "ab-image-module-test"
   {
     inherit report failMsg;
+    # Builds the store-tree symlink check as part of this check output —
+    # a tree that mangles top-level symlink paths fails the whole suite.
+    inherit storeTreeSymlinkCheck;
     passAsFile = [ "report" "failMsg" ];
   }
   ''

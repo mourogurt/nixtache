@@ -8,7 +8,7 @@
 #                                         carrying the live-era `default
 #                                         nixos-*` pin + one Type#1 entry
 #     p2 root (partlabel "nixos", ext4) — the toplevel closure + seeded /etc
-#     free space at the end (2 × 512M slots fit)
+#     free space at the end (2 x 512M slots fit)
 #
 #   systemd-boot v261 semantics under test (src/boot/boot.c):
 #     * entry sort: tries_left==0 LAST, then sort-key strcmp ASC, then
@@ -100,7 +100,7 @@ let
 
     system.image.id = "legacy";
     image.repart = {
-      # 512M ESP + 2G root leaves ~1.5G free for 2 × 512M slots. The ext4
+      # 512M ESP + 2G root leaves ~1.5G free for 2 x 512M slots. The ext4
       # holds a full store closure (tens of thousands of small files) — the
       # default bytes-per-inode ratio exhausts inodes before space, so the
       # inode count is set explicitly.
@@ -207,12 +207,12 @@ pkgs.testers.runNixOSTest {
     legacy.wait_for_unit("multi-user.target")
     assert legacy.succeed("hostname").strip() == "legacymig"
 
-    # ── Migration phase 1: slots provisioned on the legacy disk's free space
+    # -- Migration phase 1: slots provisioned on the legacy disk's free space
     legacy.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_1", timeout=300)
     legacy.wait_until_succeeds("sgdisk -p /dev/vda | grep -q _empty", timeout=300)
     print("OK: slots provisioned on the legacy disk's free space")
 
-    # ── Stage v2 SIGNED (the migration path verifies from the first pull) ──
+    # -- Stage v2 SIGNED (the migration path verifies from the first pull) --
     legacy.succeed("test -f /etc/systemd/import-pubring.pgp")
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
@@ -230,7 +230,7 @@ pkgs.testers.runNixOSTest {
     legacy.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+3.efi", timeout=300)
     print("OK: v2 staged (nix-store_2 written, UKI on the ESP, tries=3)")
 
-    # ── Leg A1: unarmed staging — the live-era pin keeps the UKI from booting
+    # -- Leg A1: unarmed staging — the live-era pin keeps the UKI from booting
     legacy.reboot()
     legacy.wait_for_unit("multi-user.target")
     assert legacy.succeed("hostname").strip() == "legacymig"
@@ -245,7 +245,7 @@ pkgs.testers.runNixOSTest {
     print("OK: armed — default pin removed")
   '' + (
     if !fileSystemsOverride then ''
-      # ── Leg A2: labels still wrong → boot fails, tries exhaust, rollback ──
+      # -- Leg A2: labels still wrong → boot fails, tries exhaust, rollback --
       # Self-describing loop: a boot that reaches userspace on the legacy
       # hostname ends the leg; a boot that hangs (the appliance initrd
       # waiting for /dev/disk/by-partlabel/root, 90s device timeout) burns a
@@ -269,7 +269,7 @@ pkgs.testers.runNixOSTest {
       legacy.wait_until_succeeds("ls /boot/EFI/Linux/abtest_2+0-*.efi", timeout=60)
       print("LEG A2 OK: exhausted UKI skipped, legacy entry booted (rollback net held)")
 
-      # ── Leg B: contract honoured — relabel, re-arm, cut over ─────────────
+      # -- Leg B: contract honoured — relabel, re-arm, cut over -------------
       legacy.succeed("sgdisk --change-name=2:root /dev/vda")
       legacy.succeed("sgdisk --change-name=1:boot /dev/vda")
       legacy.succeed("udevadm settle || true")
@@ -277,11 +277,11 @@ pkgs.testers.runNixOSTest {
       legacy.succeed("mv /boot/EFI/Linux/abtest_2+0-*.efi /boot/EFI/Linux/abtest_2+3.efi")
       print("OK: partitions relabeled root/boot, UKI re-armed")
     '' else ''
-      # ── Leg C: override hatch — labels untouched, fileSystems mkForce'd ───
+      # -- Leg C: override hatch — labels untouched, fileSystems mkForce'd ---
       print("OK: override variant — cutover proceeds with legacy labels kept")
     ''
   ) + ''
-    # ── Cutover: the armed UKI is the sorted-first candidate ────────────────
+    # -- Cutover: the armed UKI is the sorted-first candidate ----------------
     legacy.reboot()
     legacy.wait_for_unit("multi-user.target", timeout=900)
     assert legacy.succeed("hostname").strip() == "abtest"

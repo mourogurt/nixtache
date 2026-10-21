@@ -78,7 +78,7 @@ in
       ] ++ extraModules;
     };
 
-  # Single-string start command for `create_machine(start_command=…)`;
+  # Single-string start command for `create_machine(start_command=...)`;
   # each suite embeds it via Nix interpolation (`"${otaLib.startCommand v1Image}"`).
   startCommand = image:
     lib.concatStringsSep " " [

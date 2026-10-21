@@ -55,14 +55,12 @@ let
   # REGISTERED records (`pkgs.closureInfo`'s `registration` output, the
   # `nix-store --load-db` format) — content-true because the appliance
   # evaluation is content-addressed (asserted below: `ca:fixed:r:` binds
-  # each path's hash to its content, so the daemon's records cannot lie
+  # each path's hash to its content hash, so the daemon's records cannot lie
   # about shipped bytes; under input-addressing they provably can —
   # substitution churn, multi-realisation artifacts — and the runner's
   # clone seed verifies every copied path against these records).
-  # A build-time guard rejects closures containing top-level symlink paths
-  # (repart resolves symlinks when imaging, which would contradict the
-  # records). One derivation per toplevel, so image rebuilds with an
-  # unchanged closure reuse it.
+  # One derivation per toplevel, so image rebuilds with an unchanged
+  # closure reuse it.
   #
   # Carrier constraints (both discovered at implementation time):
   #   - NOT environment.etc / a toplevel-referenced store path: the dump
@@ -79,6 +77,15 @@ let
   };
   lowerStoreDbName = "${cfg.imageId}_${config.system.image.version}.lower-db";
   lowerStoreDbEspPath = "/EFI/nixtache/${lowerStoreDbName}";
+
+  # Faithful store imaging: the closure staged as one tree (see
+  # store-tree.nix) and handed to repart as a single CopyFiles source, so
+  # top-level symlink closure paths ship as symlinks instead of their
+  # target's content (repart dereferences each copy source it is handed).
+  storeTree = import ./store-tree.nix {
+    inherit pkgs;
+    toplevel = config.system.build.toplevel;
+  };
 
   # Default sysupdate transfers. `@v` carries the version; Path is STATIC
   # (sysupdate.d(5)). Local-self uses a plain-path regular-file source; a
@@ -270,7 +277,7 @@ in
       default = "zstd";
       description = ''
         Compression algorithm for the nix-store image. Passed to repart as
-        `Compression=` (systemd ≥257), which dispatches to the correct
+        `Compression=` (systemd >=257), which dispatches to the correct
         mkfs flag:
         - squashfs → `mksquashfs -comp <algo>`
         - erofs    → `mkfs.erofs -z<algo>`
@@ -286,7 +293,7 @@ in
       description = ''
         Numeric compression level (FS-specific meaning). Passed to repart as
         `CompressionLevel=`. Only honored when `storeCompression` is non-null.
-        Typical ranges: zstd 1–22 (19 = high), xz 0–9, lz4 1–12.
+        Typical ranges: zstd 1-22 (19 = high), xz 0-9, lz4 1-12.
         null = tool default.
       '';
     };
@@ -296,8 +303,9 @@ in
       default = "5G";
       description = ''
         Persistent root partition (ext4) size: /etc, /var, and state that survives updates.
-        When `diskSize` is set, this becomes the MINIMUM (root grows via Weight to
-        fill `diskSize`); otherwise it is the fixed size.
+        When `diskSize` is set, this becomes the MINIMUM (root deterministically grows to
+        fill `diskSize`; the ESP and both slots are fixed and take no share); otherwise it
+        is the fixed size.
       '';
     };
 
@@ -307,14 +315,17 @@ in
       example = "20G";
       description = ''
         "Max disk" sizing mode: total image size (K/M/G/T). When set, the image is
-        built at this size and the root partition grows (Weight, SizeMinBytes=
-        `rootSize` floor, no SizeMax) to fill the space left by the fixed A/B
-        slots + ESP. When null (default), every partition is fixed
+        built at this size and the root partition grows (Weight=, SizeMinBytes=
+        `rootSize` floor, no SizeMax) to fill the space left by the fixed A/B slots
+        and the pinned ESP. The distribution is deterministic: the image builder
+        distributes leftover space with integer weight arithmetic (identical inputs
+        produce an identical layout), and root is the only growable partition.
+        When null (default), every partition is fixed
         (SizeMinBytes = SizeMaxBytes) — the appliance is a minimal image of exactly
         the sum of its partitions (the nixcademy pattern). The A/B nix-store slots
         are ALWAYS fixed-equal regardless (they must hold the same squashfs image).
-        Note: repart SizeMin/Max take only bytes+KMG (no `%`); proportional fill is
-        via Weight (see repart.d(5)).
+        Note: repart SizeMin/Max take only bytes+KMG (no `%`); percentage inputs
+        are resolved at runtime by the provision module instead.
       '';
     };
 
@@ -350,7 +361,7 @@ in
       type = types.attrsOf (types.submodule {
         options.repartConfig = mkOption {
           type = types.attrs;
-          description = "systemd-repart repartConfig for this extra partition (Type, Label, Format, SizeMinBytes, …).";
+          description = "systemd-repart repartConfig for this extra partition (Type, Label, Format, SizeMinBytes, ...).";
         };
       });
       default = { };
@@ -434,7 +445,7 @@ in
       # (Weight) what the fixed slots + ESP leave. null (default) = minimal image.
       imageSize = mkIf (cfg.diskSize != null) cfg.diskSize;
       # EROFS density: block-aligned file tails waste ~half a block per file
-      # (≈40M on a ~22K-file closure), which makes erofs lose to squashfs
+      # (~40M on a ~22K-file closure), which makes erofs lose to squashfs
       # despite zstd. fragments/ztailpacking pack the tails; -C1M (big_pcluster)
       # lets zstd compress across 4K block boundaries. No-ops when the store is
       # uncompressed. Repart appends these after the positional args (getopt
@@ -459,23 +470,35 @@ in
           };
           repartConfig = {
             Type = "esp"; Label = "boot"; Format = "vfat";
-            SizeMinBytes = "200M"; SplitName = "-";
+            # Pinned (min=max): in max-disk mode an unpinned ESP would claim
+            # a proportional share of the leftover space by default Weight
+            # (measured: a 2G image splits ~1024M ESP / ~1024M root), and
+            # root — not the ESP — is meant to fill the disk. 260M matches
+            # repart's ESP_MIN_SIZE_4K: the enforced minimum for a vfat ESP
+            # at 4K filesystem sectors (the image-build default), which
+            # silently overrode the previously configured 200M anyway.
+            SizeMinBytes = "260M"; SizeMaxBytes = "260M"; SplitName = "-";
           };
         };
         nix-store = {
-          storePaths = [ config.system.build.toplevel ];
           # Ship an (empty) .links dir in the store image. Opening ANY local
-          # store unconditionally runs createDirs(/nix/store/.links) (Nix
-          # 2.34, even with read-only=true) — which fails on the RO squashFS
-          # unless the directory already exists. The lower-DB loader, the
-          # runner container's clone seed and local-overlay lowers all open
-          # local stores here. GC skips `.links` by name (it may delete the
-          # placeholder file itself — nlink==1 — which is harmless: the
-          # directory stays). Not a store path, so absent from the dump.
+          # store unconditionally runs createDirs(/nix/store/.links) (nix
+          # master as of 2026-10, even with read-only=true) — which fails on
+          # the RO squashFS unless the directory already exists. The lower-DB
+          # loader, the runner container's clone seed and local-overlay
+          # lowers all open local stores here. GC skips `.links` by name (it
+          # may delete the placeholder file itself — nlink==1 — which is
+          # harmless: the directory stays). Not a store path, so absent from
+          # the dump and from the store tree's CopyFiles source.
           contents."/.links/.keep".source = pkgs.writeText "links-keep" "";
-          nixStorePrefix = "/";
+          # Store content ships via ONE CopyFiles source (the store tree)
+          # — NOT `storePaths`: that option emits a CopyFiles line per
+          # closure path, and repart dereferences each source, so top-level
+          # symlink paths would ship as their target's content (see
+          # store-tree.nix).
           repartConfig = mkMerge [
             {
+              CopyFiles = [ "${storeTree}:/" ];
               Type = "linux-generic"; Label = "nix-store_${cfg.imageVersion}";
               # Minimize=on: the partition image shrinks to fit the compressed
               # squashfs/erofs content (needed for the compression size comparison
@@ -487,7 +510,7 @@ in
               SizeMaxBytes = if (hasSuffix "%" cfg.storeSize) then "2G" else cfg.storeSize;
               Format = cfg.storeFs; ReadOnly = "yes"; SplitName = "nix-store";
             }
-            # Compression keys (systemd ≥257): same key names for squashfs and erofs,
+            # Compression keys (systemd >=257): same key names for squashfs and erofs,
             # repart dispatches to the correct mkfs flag internally.
             (optionalAttrs (cfg.storeCompression != null) {
               Compression = cfg.storeCompression;
@@ -623,7 +646,7 @@ in
           tmp=$(mktemp -d)
           mkdir -p "$tmp/upper" "$tmp/work"
           mount -t overlay overlay -o lowerdir=/nix/store,upperdir="$tmp/upper",workdir="$tmp/work" /nix/store
-          ${pkgs.nix}/bin/nix-store --load-db < "$dump"
+          ${lib.getExe' pkgs.nix "nix-store"} --load-db < "$dump"
         ''}
         echo "$version" > "$marker"
         echo "loaded lower store DB for image version $version"

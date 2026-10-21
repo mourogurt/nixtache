@@ -216,7 +216,7 @@ pkgs.runCommand "ab-compression-vm-test"
     fi
 
     # K3: zstd level monotonic NON-INCREASING: size(1) >= size(9) >= size(19).
-    # Per spec §3.3, on a tiny closure the compressed sizes may be EQUAL — the
+    # Per spec sec. 3.3, on a tiny closure the compressed sizes may be EQUAL — the
     # >= relation still holds, so this is the robust (non-strict) form.
     if [ "$sqZstd1" -ge "$sqZstd9" ] && [ "$sqZstd9" -ge "$sqZstd19" ]; then
       pass "K3 zstd levels monotonic non-increasing ($sqZstd1 >= $sqZstd9 >= $sqZstd19)"

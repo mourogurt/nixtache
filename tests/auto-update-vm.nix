@@ -1,6 +1,6 @@
 # auto-update-vm — runNixOSTest behavioral contracts for the auto-update module
-# (spec 09; TEST-SPECS-AUTO-UPDATE.md §4): AU-F1…F4 (flake path) and
-# AU-A1…A5 (ab path). AU-F5 (kernel-change reboot) stays a manual runbook —
+# (spec 09; TEST-SPECS-AUTO-UPDATE.md sec. 4): AU-F1...F4 (flake path) and
+# AU-A1...A5 (ab path). AU-F5 (kernel-change reboot) stays a manual runbook —
 # see the comment block at the bottom of this file.
 #
 # When the auto-update module is absent the suite degrades to a clearly-named
@@ -15,7 +15,7 @@
 # from the local store. The fixture config carries test-instrumentation.nix so
 # the test-driver backdoor unit survives the switch-to-configuration.
 #
-# Deviation from the test-spec fixture sketch (§0.3/§4.1): the spec asks for a
+# Deviation from the test-spec fixture sketch (sec. 0.3/sec. 4.1): the spec asks for a
 # bare git repo with v1/v2 commits and the VM built FROM v1. A runNixOSTest
 # node cannot be bit-identical to a flake-built v1 (the test harness injects
 # qemu-vm/test-instrumentation modules), so the repo holds the v2 config only;
@@ -30,7 +30,7 @@ let
 
   autoMod = self.nixosModules.auto-update or null;
 
-  # ── flake-path fixture ----------------------------------------------------
+  # -- flake-path fixture ----------------------------------------------------
   hostName = "autest";
 
   # Per-node self-contained flake (nixpkgs by store path — no network) whose
@@ -127,7 +127,7 @@ let
 
   fixtureTarget = mkFlakeFixture { criticalUnits = [ "multi-user.target" ]; };
   # v3: a NEWER source than v2 — AU-F3 needs built ≠ current while a CI
-  # pointer exists, otherwise the unchanged-check (spec §5 runs it before the
+  # pointer exists, otherwise the unchanged-check (spec sec. 5 runs it before the
   # pending-check) no-ops first and the skip branch is unreachable.
   fixtureTargetV3 = mkFlakeFixture {
     criticalUnits = [ "multi-user.target" ];
@@ -159,7 +159,7 @@ let
     };
   };
 
-  # ── ab-path fixture (B1-style: local staging, provision on /dev/vdb) ------
+  # -- ab-path fixture (B1-style: local staging, provision on /dev/vdb) ------
   v2SysupdatePkg =
     (fixture.mkAppliance {
       version = "2";
@@ -227,7 +227,7 @@ pkgs.testers.runNixOSTest {
   name = "auto-update-vm";
 
   nodes = {
-    # AU-F1…F3: flake path, healthy probe.
+    # AU-F1...F3: flake path, healthy probe.
     target = flakeNode {
       criticalUnits = [ "multi-user.target" ];
       fixture = fixtureTarget;
@@ -276,7 +276,7 @@ pkgs.testers.runNixOSTest {
     def boot_ts(node):
         return node.succeed("systemctl show -p ActiveEnterTimestamp multi-user.target")
 
-    # ── AU-F1: flake timer → apply unit activates the new toplevel ──────────
+    # -- AU-F1: flake timer → apply unit activates the new toplevel ----------
     # A qemu-vm test node has no /nix/var/nix/profiles/system generation (it
     # boots the toplevel directly), so the switch is tracked via
     # /run/current-system (updated by every activation).
@@ -293,7 +293,7 @@ pkgs.testers.runNixOSTest {
     target.succeed("journalctl -u nixtache-auto-update --no-pager | grep 'nixtache-auto-update:'")
     print("AU-F1 OK: flake pull → pointer → apply-unit activation (probe passed)")
 
-    # ── AU-F2: unchanged flake → idempotent no-op ───────────────────────────
+    # -- AU-F2: unchanged flake → idempotent no-op ---------------------------
     def apply_activations():
         return int(target.succeed("journalctl -u nixtache-apply --no-pager | grep -c activated").strip())
     runs_before = apply_activations()
@@ -303,7 +303,7 @@ pkgs.testers.runNixOSTest {
     assert apply_activations() == runs_before, "apply unit must not re-run on a no-op"
     print("AU-F2 OK: unchanged source is a no-op — no pointer, apply not re-run")
 
-    # ── AU-F3: CI pointer present → auto-update skips, pointer intact ───────
+    # -- AU-F3: CI pointer present → auto-update skips, pointer intact -------
     # Move the source to v3 (built ≠ current, so the run reaches the pending
     # check) and plant a foreign pointer, as a CI deploy in flight would.
     target.succeed("rm -rf /srv/test-flake && cp -r ${fixtureTargetV3.repo} /srv/test-flake && chmod -R u+w /srv/test-flake")
@@ -316,7 +316,7 @@ pkgs.testers.runNixOSTest {
     print("AU-F3 OK: CI deploy pending → skip, foreign pointer untouched")
     target.shutdown()
 
-    # ── AU-F4: apply probe fail → Tier-1 rollback, service exits non-zero ───
+    # -- AU-F4: apply probe fail → Tier-1 rollback, service exits non-zero ---
     # The profile-revert arm of nixtache-apply's rollback needs a previous
     # profile generation, which a qemu-vm boot never creates — so the
     # behavioral contract asserted here is: non-zero exit, the rollback marker
@@ -330,7 +330,7 @@ pkgs.testers.runNixOSTest {
     print("AU-F4 OK: broken criticalUnit → Tier-1 rollback through the timer path")
     targetfail.shutdown()
 
-    # ── AU-A1: ab timer → sysupdate writes slot B ───────────────────────────
+    # -- AU-A1: ab timer → sysupdate writes slot B ---------------------------
     a.start()
     a.wait_for_unit("nixtache-ab-provision.service")
     a.wait_for_unit("multi-user.target")
@@ -345,7 +345,7 @@ pkgs.testers.runNixOSTest {
     assert boot_ts(a) == ts_before, "rebootPolicy default never — VM must not reboot"
     print("AU-A1 OK: auto-update triggered sysupdate — nix-store_2 + abtest_2+*.efi, no reboot")
 
-    # ── AU-A5: rerun with unchanged staging → idempotent, single slot B ─────
+    # -- AU-A5: rerun with unchanged staging → idempotent, single slot B -----
     a.succeed("systemctl start nixtache-auto-update.service", timeout=300)
     a.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
     a.succeed("test \"$(sgdisk -p /dev/vdb | grep -c nix-store_2)\" -eq 1")
@@ -353,7 +353,7 @@ pkgs.testers.runNixOSTest {
     print("AU-A5 OK: repeat pull idempotent — exactly one nix-store_2, v1 slot kept")
     a.shutdown()
 
-    # ── AU-A2: no newer image staged → exit 0, slots untouched, no reboot ───
+    # -- AU-A2: no newer image staged → exit 0, slots untouched, no reboot ---
     # (Spec stages "v2 already installed"; an empty staging dir on a fresh VM
     # is the same 'nothing newer' condition for sysupdate.)
     abidle.start()
@@ -367,7 +367,7 @@ pkgs.testers.runNixOSTest {
     print("AU-A2 OK: nothing newer → clean no-op, if-needed did not reboot")
     abidle.shutdown()
 
-    # ── AU-A3: gating host → ci-driven no-op, sysupdate untouched ───────────
+    # -- AU-A3: gating host → ci-driven no-op, sysupdate untouched -----------
     abgating.start()
     abgating.wait_for_unit("nixtache-ab-provision.service")
     abgating.wait_for_unit("nginx.service")
@@ -381,7 +381,7 @@ pkgs.testers.runNixOSTest {
     print("AU-A3 OK: gating host — ci-driven marker, sysupdate not triggered")
     abgating.shutdown()
 
-    # ── AU-A4: signed staging (Verify=yes) accepted via the timer trigger ───
+    # -- AU-A4: signed staging (Verify=yes) accepted via the timer trigger ---
     absigned.start()
     absigned.wait_for_unit("nixtache-ab-provision.service")
     absigned.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
@@ -401,8 +401,8 @@ pkgs.testers.runNixOSTest {
   '';
 }
 
-# ── AU-F5 (📋 manual): rebootPolicy = "if-needed" reboots on kernel change ───
-# Flagged as an open question in the test-spec (§9.1): flipping
+# -- AU-F5 (📋 manual): rebootPolicy = "if-needed" reboots on kernel change ---
+# Flagged as an open question in the test-spec (sec. 9.1): flipping
 # boot.kernelPackages between two full VM builds is too expensive for CI, and
 # /run/booted-system is a boot-time symlink that cannot be re-pointed safely on
 # a live system. The branch is covered pure-eval by AU-12A. Manual runbook:

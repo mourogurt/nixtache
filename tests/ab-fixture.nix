@@ -49,7 +49,7 @@ let
   # modules. `signVerify` ships the test pubring (Verify=yes). `dataPartition`
   # adds a data mount (T6). `stagingPath` selects local (file://) vs remote
   # (http://) sysupdate source. `deployKey` (path to a private key) authorizes
-  # its public half on the target so the action can SSH `systemctl start …`.
+  # its public half on the target so the action can SSH `systemctl start ...`.
   # `extraPackages` lands in the store image (e.g. pkgs.hello in v2 — lets a
   # deploy test prove the update delivered NEW content, not just a new label).
   # `extraModules` appends consumer modules (e.g. the nixos-anywhere install

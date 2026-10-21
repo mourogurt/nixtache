@@ -229,7 +229,7 @@ let
     ON_MISMATCH="${partitions.onSizeMismatch}"
     PROTECTED="${concatStringsSep " " partitions.protectedLabels}"
 
-    # ── resolve "auto" disk: find the device backing / ──────────────────────
+    # -- resolve "auto" disk: find the device backing / ----------------------
     resolve_disk() {
       local d="$1"
       if [ "$d" = "auto" ]; then
@@ -240,7 +240,7 @@ let
       fi
     }
 
-    # ── parse size to bytes; percent needs the disk as $2 ───────────────────
+    # -- parse size to bytes; percent needs the disk as $2 -------------------
     size_to_bytes() {
       local size="$1" disk="''${2:-}"
       if [[ "$size" == *% ]]; then
@@ -270,9 +270,9 @@ let
     DISK=$(resolve_disk "$DISK_A")
     echo "nixtache-ab-provision: target disk = $DISK"
 
-    # ── 1. detect GPT state via label count (stateless) ────────────────────
+    # -- 1. detect GPT state via label count (stateless) --------------------
     # Two states only (fewer states = fewer bugs):
-    #   Normal:  ≥1 slot label (nix-store_N or _empty) → slots exist → check sizes
+    #   Normal:  >=1 slot label (nix-store_N or _empty) → slots exist → check sizes
     #   Missing: 0 slot labels                         → no slots    → migration
     # Both label families count: `nix-store_N` is a written slot, `_empty` is
     # sysupdate's hardcoded free-slot marker. The active-vs-inactive choice is
@@ -280,7 +280,7 @@ let
     has_slots=$(lsblk -no PARTLABEL "$DISK" 2>/dev/null | grep -cE 'nix-store_[0-9]|_empty' || true)
     echo "nixtache-ab-provision: nix-store slots on $DISK: $has_slots"
 
-    # ── Normal state → size check ───────────────────────────────────────────
+    # -- Normal state → size check -------------------------------------------
     if [ "$has_slots" -ge 1 ]; then
       expected_bytes=$(size_to_bytes "$SLOT_SIZE" "$DISK")
       # Find the actual size of the first slot partition via lsblk.
@@ -348,7 +348,7 @@ let
       exit 0
     fi
 
-    # ── Missing state → migration ───────────────────────────────────────────
+    # -- Missing state → migration -------------------------------------------
     if [ "$AUTO_INIT" != "1" ]; then
       echo "nixtache-ab-provision: A/B slots missing on $DISK and autoInit=false." >&2
       echo "  Set services.nixtache.deploy-target.ab.partitions.autoInit = true," >&2
@@ -364,9 +364,9 @@ let
     slot_bytes=$(size_to_bytes "$SLOT_SIZE" "$DISK")
     needed_bytes=$(( slot_bytes * 2 ))
 
-    echo "nixtache-ab-provision: free space = $free_bytes bytes, needed = $needed_bytes (2 × $SLOT_SIZE)"
+    echo "nixtache-ab-provision: free space = $free_bytes bytes, needed = $needed_bytes (2 x $SLOT_SIZE)"
     if [ "$free_bytes" -lt "$needed_bytes" ]; then
-      echo "nixtache-ab-provision: Not enough free space for A/B slots: need $needed_bytes bytes (2 × $SLOT_SIZE = $SLOT_SIZE each), have $free_bytes bytes." >&2
+      echo "nixtache-ab-provision: Not enough free space for A/B slots: need $needed_bytes bytes (2 x $SLOT_SIZE = $SLOT_SIZE each), have $free_bytes bytes." >&2
       echo "  Options:" >&2
       echo "    1. Shrink root manually (ext4: resize2fs offline; btrfs: btrfs filesystem resize online; xfs/zfs: impossible)." >&2
       echo "    2. Use nixos-anywhere for a full wipe-and-reinstall (by SSH, no physical access)." >&2
@@ -644,7 +644,7 @@ in
       }
     ];
 
-    # ── pubring install (target side of the signing pair) ───────────────────
+    # -- pubring install (target side of the signing pair) -------------------
     # The deployer signs with its PRIVATE key (runner module's signingKeyFile);
     # the target verifies with this PUBLIC key. Skipped when ab-image is
     # co-imported with its own key — its pubring install is authoritative.
@@ -658,7 +658,7 @@ in
       "L+ /usr/lib/systemd/import-pubring.pgp - - - - ${pubringSource}"
     ];
 
-    # ── provision service (partition type only) ─────────────────────────────
+    # -- provision service (partition type only) -----------------------------
     # Idempotent oneshot that runs BEFORE systemd-sysupdate at every boot,
     # detects the GPT state, and migrates / size-checks / wipes per config.
     # Regular-file targets skip this — sysupdate creates the backing files.
@@ -679,7 +679,7 @@ in
       '';
     };
 
-    # ── sysupdate transfers (sole owner when active) ─────────────────────────
+    # -- sysupdate transfers (sole owner when active) -------------------------
     # Normal priority overrides ab-image's mkDefault. Same-disk → one transfer
     # (InstancesMax=2); different disks → two (InstancesMax=1 each); regular-
     # file → Target.Type = "regular-file" (sysupdate creates the files). The

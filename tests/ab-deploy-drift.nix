@@ -8,7 +8,7 @@
 # covered by the deploy-target VM suites).
 #
 # Fake boundary: `ssh` and `nix` are wrappers on PATH. The fake OLD gate:
-# the probe (`ssh … true`) passes; the free-space query (any ssh invocation
+# the probe (`ssh ... true`) passes; the free-space query (any ssh invocation
 # carrying `df -B1`) is REJECTED, like a forced-command whitelist that
 # predates the query. The rest of the live path is never reached (the
 # action skips the target before any build/copy). Fast, no KVM — wired

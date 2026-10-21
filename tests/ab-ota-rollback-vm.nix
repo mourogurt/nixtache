@@ -70,7 +70,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: v1 booted and blessed")
 
-    # ── Install the broken v2 (tries=2) ────────────────────────────────────
+    # -- Install the broken v2 (tries=2) ------------------------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/"
@@ -80,7 +80,7 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: broken v2 installed to slot B")
 
-    # ── Burn both tries: boot v2 twice, each unblessed ─────────────────────
+    # -- Burn both tries: boot v2 twice, each unblessed ---------------------
     for i in (1, 2):
         appliance.reboot()
         appliance.wait_for_unit("multi-user.target")
@@ -96,7 +96,7 @@ pkgs.testers.runNixOSTest {
         )
         print(f"OK: v2 boot {i} unblessed (canary failed, no bless)")
 
-    # ── Tries exhausted → the loader falls back to blessed v1 ──────────────
+    # -- Tries exhausted → the loader falls back to blessed v1 --------------
     # NOTE: the rolled-back v1 boot does NOT (re)reach boot-complete.target:
     # its entry was blessed on the first boot (the counter became the done
     # form), systemd-bless-boot therefore skips and does not pull the target
@@ -110,7 +110,7 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("systemctl is-active --quiet sshd.service")
     print("ROLLBACK OK: exhausted v2 (+0 tries left) skipped, blessed v1 boots")
 
-    # ── Post-rollback OTA state: machine stable, update machinery live ─────
+    # -- Post-rollback OTA state: machine stable, update machinery live -----
     # OBSERVED (systemd 257-era sysupdate): instance selection is purely
     # version-driven — after a rollback the RUNNING slot is the oldest, so a
     # fresh higher-version update would target and overwrite the RUNNING

@@ -86,7 +86,7 @@ in
           nix.settings.sandbox = lib.mkForce cfg.enableSandbox;
 
           # Make the Nix sandbox ACTUALLY work under systemd-nspawn. nspawn
-          # over-mounts /proc subdirs (/proc/sys, /proc/bus, /proc/fs, …) read-only,
+          # over-mounts /proc subdirs (/proc/sys, /proc/bus, /proc/fs, ...) read-only,
           # which the kernel "locks" (mounts propagated from a more privileged
           # mount namespace are locked together). Nix's sandbox preflight
           # (mountAndPidNamespacesSupported: clone(NEWNS|NEWPID|NEWUSER), then a
@@ -112,7 +112,7 @@ in
               ""
               "${lib.getExe' pkgs.util-linux "unshare"} -m ${pkgs.writeShellScript "nix-daemon-fresh-proc" ''
                 ${lib.getExe' pkgs.util-linux "mount"} proc -t proc /proc
-                exec -a nix-daemon ${config.nix.package}/bin/nix-daemon --daemon
+                exec -a nix-daemon ${lib.getExe' config.nix.package "nix-daemon"} --daemon
               ''}"
             ];
           };

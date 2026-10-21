@@ -1,10 +1,10 @@
 # Tests for lib/mkDocs.nix — the docStrictMode matrix.
 #
-# 4 cases = docStrictMode (true/false) × all options documented (yes/no):
-#   1. false × yes  → builds OK
-#   2. false × no   → builds OK (missing description is a build-log warning)
-#   3. true  × yes  → builds OK
-#   4. true  × no   → BUILD FAILS (warningsAreErrors=true rejects missing desc)
+# 4 cases = docStrictMode (true/false) x all options documented (yes/no):
+#   1. false x yes  → builds OK
+#   2. false x no   → builds OK (missing description is a build-log warning)
+#   3. true  x yes  → builds OK
+#   4. true  x no   → BUILD FAILS (warningsAreErrors=true rejects missing desc)
 #
 # Cases 1-3 are built as REAL dependencies of this test derivation:
 # referencing their outPaths in the builder forces Nix to build them, so if any

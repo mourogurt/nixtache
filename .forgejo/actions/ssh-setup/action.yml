@@ -40,7 +40,7 @@ runs:
 
         # Keys are provided by the runner host via systemd LoadCredential, one
         # pair per purpose: `<creds>_ssh_private` / `<creds>_ssh_public` where
-        # <creds> ∈ {flake, update} (see nixtache runner module flakeSshCreds /
+        # <creds> in {flake, update} (see nixtache runner module flakeSshCreds /
         # updateSshCreds). `creds` accepts a space-separated list so one job
         # can both fetch private inputs (flake) and push/sign (update) through
         # a single core.sshCommand: the Host block below gets one IdentityFile

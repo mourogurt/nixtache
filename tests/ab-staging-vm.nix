@@ -1,5 +1,5 @@
-# QEMU (runNixOSTest) REAL-RUN test of the A/B staging retain-GC (spec 06 §«retain»,
-# review §11.1). Complements the pure-eval script-text checks in ab-existing.nix
+# QEMU (runNixOSTest) REAL-RUN test of the A/B staging retain-GC (spec 06 sec. "retain",
+# review sec. 11.1). Complements the pure-eval script-text checks in ab-existing.nix
 # (V1) by actually RUNNING `nixtache-ab-gc` against a populated staging dir and
 # verifying the post-GC state end-to-end — including that the re-signed
 # SHA256SUMS.gpg GPG-verifies against the public keyring (the exact thing the
@@ -86,7 +86,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    # ── withkey: GC deletes v1 + RE-SIGNS the manifest (key readable on host) ─
+    # -- withkey: GC deletes v1 + RE-SIGNS the manifest (key readable on host) -
     withkey.start()
     withkey.wait_for_unit("ab-pre-stage.service")
     # initial state: 3 versions + a signed manifest
@@ -115,7 +115,7 @@ pkgs.testers.runNixOSTest {
     )
     print("withkey OK: GC dropped v1, kept v2/v3, regenerated SHA256SUMS, re-signed .gpg verifies")
 
-    # ── nokey: GC removes the (stale) .gpg when no signing key is configured ──
+    # -- nokey: GC removes the (stale) .gpg when no signing key is configured --
     nokey.start()
     nokey.wait_for_unit("ab-pre-stage.service")
     # the pre-stage laid down a .gpg (simulating a prior-key signed manifest)

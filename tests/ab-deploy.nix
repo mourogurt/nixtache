@@ -12,7 +12,7 @@
 # the VM has no internet for real flake evaluation). Everything else the live
 # path uses runs for REAL, delegated to the real nix binary: `nix copy --to
 # ssh://` pushes the closure over REAL ssh, and the final
-# `ssh … systemctl start nixtache-apply.service` triggers the REAL root apply
+# `ssh ... systemctl start nixtache-apply.service` triggers the REAL root apply
 # unit on the target (polkit-authorized for the deploy user). One extra stub
 # outside fake-nix: `nixos-rebuild` (a separate binary the dry-activate branch
 # shells out to) is a no-op logger — a real dry-activate needs flake
@@ -127,7 +127,7 @@ let
   # starved path reports a 1 TiB narSize. Everything else the live path uses
   # runs for REAL, delegated to the real nix binary — including
   # `nix copy --to ssh://` and the remote store inventory
-  # (`nix path-info --store ssh://… --all`, served through the gate).
+  # (`nix path-info --store ssh://... --all`, served through the gate).
   fakeNix = pkgs.writeShellScript "fake-nix" ''
     if [ "$1" = "flake" ] && [ "$2" = "show" ]; then
       echo '${builtins.toJSON { nixosConfigurations = { ${cfgName} = { }; ${starvedCfg} = { }; ${driftCfg} = { }; }; }}'
@@ -387,7 +387,7 @@ let
     testScript = ''
       import yaml
 
-      # ── Parse the REAL action.yml to verify the extracted script is genuine ──
+      # -- Parse the REAL action.yml to verify the extracted script is genuine --
       action = yaml.safe_load(${builtins.toJSON actionYml})
       run_text = next(s["run"] for s in action["runs"]["steps"] if "run" in s)
       assert "_liveApply" in run_text, "action.yml missing the live apply function"
@@ -408,7 +408,7 @@ let
           "action.yml must read the per-target minFreeBytes preset (default 5 GiB)"
       print("OK: parsed action.yml (%d chars of run text)" % len(run_text))
 
-      # ── Boot both nodes ──────────────────────────────────────────────────────
+      # -- Boot both nodes ------------------------------------------------------
       deployer.start()
       target.start()
       deployer.wait_for_unit("nginx.service")
@@ -420,8 +420,8 @@ let
         timeout=120
       )
 
-      # ── Runner-module nginx staging (old Q1): the module-wired ab-stage
-      #    location actually serves staged files over HTTP ────────────────────
+      # -- Runner-module nginx staging (old Q1): the module-wired ab-stage
+      #    location actually serves staged files over HTTP --------------------
       deployer.succeed("test -d /var/lib/nixtache/ab-stage")
       deployer.succeed("mkdir -p /var/lib/nixtache/ab-stage/cfg && echo BODY > /var/lib/nixtache/ab-stage/cfg/x")
       deployer.succeed("curl -sf http://localhost/ab-stage/cfg/x | grep BODY")
@@ -429,7 +429,7 @@ let
       deployer.succeed("test -s ${fixture.testSignKey}/priv.asc")
       print("OK: runner module nginx serves ab-stage + signing key present")
 
-      # ── Credentials directory (the deploy key, LoadCredential-style) ────────
+      # -- Credentials directory (the deploy key, LoadCredential-style) --------
       deployer.succeed(
         "mkdir -p /run/credentials && "
         "cp /etc/deploy-key /run/credentials/deploy_ssh_${cfgName} && "
@@ -462,7 +462,7 @@ let
               out = deployer.succeed(cmd, timeout=600)
           return out, deployer.succeed("cat /tmp/artifacts/*.log 2>/dev/null || true")
 
-      # ── RUN 1: dry-activate (non-main ref) — REAL dry branch, no mutation ──
+      # -- RUN 1: dry-activate (non-main ref) — REAL dry branch, no mutation --
       # V2: the branch pushes the closure and triggers the root
       # nixtache-apply-dry.service through the gate (no nixos-rebuild stub).
       _, log = run_action("refs/heads/staging")
@@ -473,9 +473,9 @@ let
         "journalctl -u nixtache-apply-dry.service --no-pager | grep 'no mutation'",
         timeout=60
       )
-      # The closure WAS pushed (the dry unit needs it locally)…
+      # The closure WAS pushed (the dry unit needs it locally)...
       target.succeed("nix path-info ${newToplevel}")
-      # …but nothing mutated: profile unchanged, no activation pointer, no
+      # ...but nothing mutated: profile unchanged, no activation pointer, no
       # marker, and the dry pointer is consumed.
       assert target.succeed("readlink -f /nix/var/nix/profiles/system").strip() == pre_profile, \
           "dry-activate changed the system profile"
@@ -486,7 +486,7 @@ let
       target.fail("test -e /etc/deploy-marker")
       print("OK: RUN 1 — dry-activate via root unit, diff generated, target untouched")
 
-      # ── RUN 2: switch (main ref) — copy closure → pointer → apply unit ──────
+      # -- RUN 2: switch (main ref) — copy closure → pointer → apply unit ------
       # On failure, dump the apply unit's journal — the probe/rollback detail
       # lives on the target, not in the deploy log.
       try:
@@ -501,14 +501,14 @@ let
       # adds the deploy user to nix.settings.trusted-users — a protocol
       # requirement of the serve-write channel, not an optional privilege).
       target.succeed("nix path-info ${newToplevel}")
-      # The apply unit set the system profile to the staged toplevel…
+      # The apply unit set the system profile to the staged toplevel...
       profile = target.succeed("readlink -f /nix/var/nix/profiles/system").strip()
       assert profile == "${newToplevel}", f"system profile not switched: {profile}"
-      # …and switch-to-configuration really ran (the marker /etc file is only
-      # in the NEW config)…
+      # ...and switch-to-configuration really ran (the marker /etc file is only
+      # in the NEW config)...
       target.succeed("grep -q live-v2 /etc/deploy-marker")
       target.succeed("test \"$(readlink -f /run/current-system)\" = ${newToplevel}")
-      # …and consumed the pointer file.
+      # ...and consumed the pointer file.
       target.fail("test -e /var/lib/nixtache/pending-system")
       # The criticalUnits probe passed (the synchronous `systemctl start`
       # returned 0 — the action would have failed otherwise) and the unit
@@ -518,7 +518,7 @@ let
       assert "activated ${newToplevel}" in journal, "apply unit journal: " + journal[-500:]
       print("OK: RUN 2 — closure copied, profile switched, criticalUnits probe passed")
 
-      # ── RUN 3: HOME-less runner env — no /.ssh warnings, workspace known_hosts
+      # -- RUN 3: HOME-less runner env — no /.ssh warnings, workspace known_hosts
       # The runner job env has no HOME; the action pins UserKnownHostsFile to
       # $PWD/.deploy-known-hosts (probe + copy + triggers), so ssh never tries
       # to create /.ssh and the host key (accepted in RUN 1) verifies.
@@ -531,7 +531,7 @@ let
       deployer.succeed("grep -q '^target ' /tmp/.deploy-known-hosts")
       print("OK: RUN 3 — HOME-less deploy: no /.ssh warnings, host key in workspace known_hosts")
 
-      # ── RUN 4: matrix — starved target + drifted gate + healthy ────────────
+      # -- RUN 4: matrix — starved target + drifted gate + healthy ------------
       # jq keys[] order: aa-full-disk < aadrift < livetest, so both anomalies
       # are hit BEFORE livetest deploys (proving the loop continues).
       out, _ = run_action("refs/heads/main", envfile="/etc/deploy-env-matrix.sh", must_fail=True)
@@ -565,14 +565,14 @@ let
           "drift must surface as a per-target warning"
       print("OK: RUN 4 — starved refused pre-copy (red), drifted skipped (warning), healthy deployed")
 
-      # ── RUN 5: drift-only — the job stays GREEN ────────────────────────────
+      # -- RUN 5: drift-only — the job stays GREEN ----------------------------
       out, log = run_action("refs/heads/main", envfile="/etc/deploy-env-drift.sh")
       assert "activated ${newToplevel}" in log, "livetest log: " + log[-500:]
       assert any("::warning::" in l and "${driftCfg}" in l for l in out.splitlines())
       assert "failed targets" not in out, "drift alone must not fail the job"
       print("OK: RUN 5 — drift-only run: healthy target deployed, job green")
 
-      # ── RUN 6: apply-unit low-disk guard on a REALLY full store ───────────
+      # -- RUN 6: apply-unit low-disk guard on a REALLY full store -----------
       # Fill the target's store filesystem until free space drops below the
       # target's minFreeBytes (256 MiB in this suite), then trigger the apply
       # unit directly — the guard must refuse BEFORE touching the profile,
@@ -619,7 +619,7 @@ let
       target.fail("test -e /var/lib/nixtache/pending-system")
       print("OK: RUN 6 — apply unit refused on a full store (no mutation, pointer consumed), activated after freeing space")
 
-      # ── deploy-user is a SYSTEM user — invisible in display managers ────────
+      # -- deploy-user is a SYSTEM user — invisible in display managers --------
       # SDDM & co. only list normal users (uid >= 1000); the deploy account
       # exists solely for the gated SSH channel.
       uid = int(target.succeed("id -u nixos-deploy").strip())
@@ -629,7 +629,7 @@ let
       )
       print("OK: deploy user is a system user (uid %d) — hidden from SDDM" % uid)
 
-      # ── SSH gate (deployUser.sshGate default "gate") — positives were RUN 2 ─
+      # -- SSH gate (deployUser.sshGate default "gate") — positives were RUN 2 -
       # (probe / nix-store --serve / apply trigger all passed through the gate).
       # Negatives: arbitrary commands and port forwarding are rejected. Use the
       # 0600 credentials copy — ssh refuses world-readable /etc/deploy-key.

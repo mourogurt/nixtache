@@ -16,7 +16,7 @@
 # path resolution). In the Forgejo UI a reusable call renders as two jobs
 # (`deploy` 0s caller + `deploy-1` work) — expected.
 #
-# Mode is derived from the branch INSIDE the action (§7.1): PR → dry-activate,
+# Mode is derived from the branch INSIDE the action (sec. 7.1): PR → dry-activate,
 # main → switch. The workflow itself takes no inputs (the gate is PR review/merge).
 name: Direct Deploy
 

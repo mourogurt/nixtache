@@ -178,7 +178,7 @@ pkgs.testers.runNixOSTest {
         node.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
         node.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
 
-    # ── B1: local staging + direct sysupdate trigger ────────────────────────
+    # -- B1: local staging + direct sysupdate trigger ------------------------
     b1.start()
     check_provisioned(b1)
     stage_v2(b1)
@@ -190,7 +190,7 @@ pkgs.testers.runNixOSTest {
     print("B1 OK: self-deploy wrote nix-store_2 + abtest_2+*.efi from local staging")
     b1.shutdown()
 
-    # ── B2: gating, runners idle → apply ────────────────────────────────────
+    # -- B2: gating, runners idle → apply ------------------------------------
     b2.start()
     check_provisioned(b2)
     b2.wait_for_unit("nginx.service")
@@ -231,7 +231,7 @@ pkgs.testers.runNixOSTest {
     print("B2 OK: idle gate passed — sysupdate applied, pending cleared")
     b2.shutdown()
 
-    # ── B3: gating, runner busy, forceAfterTimeout=false → stays pending ────
+    # -- B3: gating, runner busy, forceAfterTimeout=false → stays pending ----
     b3.start()
     check_provisioned(b3)
     b3.wait_for_unit("nginx.service")
@@ -245,7 +245,7 @@ pkgs.testers.runNixOSTest {
     print("B3 OK: busy + no force — apply deferred, pending kept, slot B untouched")
     b3.shutdown()
 
-    # ── B4: gating, runner busy, forceAfterTimeout=true → forced apply ──────
+    # -- B4: gating, runner busy, forceAfterTimeout=true → forced apply ------
     b4.start()
     check_provisioned(b4)
     b4.wait_for_unit("nginx.service")
@@ -257,6 +257,6 @@ pkgs.testers.runNixOSTest {
     print("B4 OK: busy + forceAfterTimeout=true — update applied after the idle window")
     b4.shutdown()
 
-    print("PASS: B1–B4 — self-deploy (local staging) + idle/busy/forced gating all behave per spec")
+    print("PASS: B1-B4 — self-deploy (local staging) + idle/busy/forced gating all behave per spec")
   '';
 }

@@ -143,7 +143,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: v1 appliance booted and blessed")
 
-    # ── First boot: the pool does not exist yet ─────────────────────────────
+    # -- First boot: the pool does not exist yet -----------------------------
     appliance.fail("zpool status tank")
     # systemd-tmpfiles pre-created /tank/nix-overlay/{upper,work} on the root
     # fs at boot (the overlay upperDir/workDir rules) and the overlay already
@@ -164,7 +164,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: tank created; overlay remounted with the upper on the pool")
 
-    # ── Runtime install into the overlay upper (on the pool) ────────────────
+    # -- Runtime install into the overlay upper (on the pool) ----------------
     appliance.wait_until_succeeds("nix --version", timeout=300)
     appliance.succeed("nix-store --realize ${vimPath}", timeout=600)
     out = appliance.succeed("${vimPath}/bin/vim --version")
@@ -172,7 +172,7 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("test -d /tank/nix-overlay/upper/${vimBasename}")
     print("OK: vim realized into the pool-resident upper, runs via the merged store")
 
-    # ── Stage v2 SIGNED + sysupdate → slot B → reboot ───────────────────────
+    # -- Stage v2 SIGNED + sysupdate → slot B → reboot -----------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
@@ -206,7 +206,7 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("test -d /nix/store/${helloBasename}")
     print("OK: v2 booted — pool imported, state served, upper intact, new lower visible")
 
-    # ── Rollback leg: the previous slot must still import the pool ──────────
+    # -- Rollback leg: the previous slot must still import the pool ----------
     # Simulate the rollback with a Type#1 entry booting v1's blessed UKI:
     # same sort-key as the image entries ("abtest", from os-release IMAGE_ID)
     # but a higher version — it sorts first and boots the OLD slot. (A bare

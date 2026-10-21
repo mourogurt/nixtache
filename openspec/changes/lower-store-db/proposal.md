@@ -29,9 +29,9 @@ lower a first-class readable store and fixes all three at the root.
   `registration` — trustworthy because the fleet is content-addressed, see
   the next bullet) are shipped as a dump and loaded into `/nix/var/nix/db`
   at boot when the DB is missing (first boot, and after `upperOnUpdate =
-  "wipe"` cleared it). A build-time guard fails the image if any closure
-  path is a top-level symlink (the image builder resolves those when
-  imaging, which would ship content contradicting the record).
+  "wipe"` cleared it). The store itself is imaged faithfully: closure paths
+  that are top-level symlinks ship as symlinks (a store tree feeds the
+  image builder one copy source, so no path is dereferenced individually).
 - **Content-addressed fleet (CA pivot)**: the OTA + overlay-nix target's
   nixpkgs evaluation runs `config.contentAddressedByDefault = true`, and
   the `ca-derivations` experimental feature is enabled in every
@@ -72,8 +72,10 @@ lower a first-class readable store and fixes all three at the root.
 
 - `ab-ota`: the appliance image ships the lower store DB; new requirements
   covering its build-time generation, boot-time loading and lifecycle across
-  slot swaps and overlay wipes, and the content-addressing contract that
-  makes the records content-true (plus a build-time symlink guard).
+  slot swaps and overlay wipes, the content-addressing contract that
+  makes the records content-true, faithful shipping of top-level symlink
+  closure paths, and a deterministic max-disk layout (fixed ESP, root takes
+  the leftover).
 - `overlay-nix`: world A becomes the shipped reality — installs are delta
   against a valid lower; the persistence/coherence requirements are reworked
   accordingly, and the lifecycle policy loses its `"none"` value (new

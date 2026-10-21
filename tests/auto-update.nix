@@ -1,5 +1,5 @@
 # Pure-eval CONTRACT tests for the auto-update module (spec 09 — option tree
-# `services.nixtache.auto-update.*`), implementing the pure-eval cases AU-1…AU-25
+# `services.nixtache.auto-update.*`), implementing the pure-eval cases AU-1...AU-25
 # of doc/archive/specs/direct-deploy/TEST-SPECS-AUTO-UPDATE.md.
 #
 # Wiring scenarios degrade to a named `moduleImplemented=false` check and
@@ -38,7 +38,7 @@ let
 
   defaultUrl = "git+https://example.invalid/org/repo.git";
 
-  # Host flavours per test-spec §0.2.
+  # Host flavours per test-spec sec. 0.2.
   flakeMods = au: [
     self.nixosModules.deploy-target
     autoMod
@@ -125,10 +125,10 @@ let
     in
     if r.success then r.value else [ ];
 
-  # Assert contract (A1–A8): green only when the module is present AND the bad
+  # Assert contract (A1-A8): green only when the module is present AND the bad
   # config refuses toplevel eval AND some failed assertion mentions one of the
   # hints — distinguishing a firing assertion from an attribute-missing crash
-  # (test-spec §2, the A2 boundary).
+  # (test-spec sec. 2, the A2 boundary).
   assertContract = name: modules: hints: {
     inherit name;
     checks = {
@@ -144,7 +144,7 @@ let
   auTmr = cfg: cfg.systemd.timers."nixtache-auto-update" or { };
 
   # =========================================================================
-  # §1 wiring (AU-1…AU-14)
+  # sec. 1 wiring (AU-1...AU-14)
   # =========================================================================
   scenarioAu1 = contract "AU-1: disabled by default → no units"
     (flakeMods { enable = false; })
@@ -357,7 +357,7 @@ let
       });
 
   # =========================================================================
-  # §2 assert matrix (AU-15…AU-22 → A1…A8)
+  # sec. 2 assert matrix (AU-15...AU-22 → A1...A8)
   # =========================================================================
   scenarioAu15 = assertContract "AU-15/A1: system.autoUpgrade.enable + auto-update → eval refuses"
     (flakeMods { } ++ [ { system.autoUpgrade.enable = true; } ])
@@ -392,7 +392,7 @@ let
     ]
     [ "systemd.sysupdate" ];
 
-  # Strict A4 (spec 09 §7): sysupdate alone is NOT enough — the ab path also
+  # Strict A4 (spec 09 sec. 7): sysupdate alone is NOT enough — the ab path also
   # needs a resolvable source (ab-image module, ab.partitions.source, or
   # consumer-owned transfers carrying a Source). None here → refuses.
   scenarioAu18b = assertContract "AU-18b/A4-strict: ab path + sysupdate on + NO source anywhere → eval refuses"
@@ -433,7 +433,7 @@ let
     [ "ab-image" ];
 
   # =========================================================================
-  # §3 precedence / idempotency (AU-23…AU-25)
+  # sec. 3 precedence / idempotency (AU-23...AU-25)
   # =========================================================================
   scenarioAu23 = contract "AU-23: CI-pending skip branch (pointer checked before write)"
     (flakeMods { })

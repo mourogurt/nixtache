@@ -1,5 +1,5 @@
 # Behavioral QEMU test for the `services.nixtache.runner.store.mode` option
-# (spec 08 §8 — "Runner store: clone → overlay").
+# (spec 08 sec. 8 — "Runner store: clone → overlay").
 #
 # This is a CONFORMANCE test: it exercises the implemented `store.mode`
 # option (`modules/runner/store.nix`) and fails on any behavioural drift
@@ -19,13 +19,13 @@
 # appliance, heavy/fragile). A regular NixOS VM is used. The appliance's
 # read-only squashFS `/nix/store` is faithfully simulated by the NixOS
 # container's OWN default behavior: a declarative container bind-mounts the
-# host `/nix/store` READ-ONLY into the container (spec §7 lines 1236–1239:
+# host `/nix/store` READ-ONLY into the container (spec sec. 7 lines 1236-1239:
 # `--bind-ro=/nix/store:/nix/store`). So inside the container the lower layer
 # is genuinely read-only for free — no squashFS/appliance image needed. The
 # test then verifies the overlay makes it writable. This is the simplest QEMU
 # setup that genuinely proves read-only-lower + overlay-upper = writable.
 #
-# Covered (spec TEST-SPECS §7):
+# Covered (spec TEST-SPECS sec. 7):
 #   RO1 overlay mounted, no clone service, custom daemon active
 #   RO2 no `nix copy --all` in the journal
 #   RO3 a write through the overlay lands in the UPPER layer, not the lower
@@ -38,7 +38,7 @@
 #   + config contract: nix-daemon-custom uses `local-overlay://` with
 #     `ignore-gc-delete-failure=true`.
 #
-# Deferred (intentionally out of scope — see TEST-SPECS §7.7/§7.8):
+# Deferred (intentionally out of scope — see TEST-SPECS sec. 7.7/sec. 7.8):
 #   RO6 A/B swap (multi-boot pexpect), RO7 boot-time benchmark.
 #
 # Needs KVM (runNixOSTest boots QEMU). `requiredSystemFeatures` is set
@@ -116,7 +116,7 @@ pkgs.testers.runNixOSTest {
         "nixos-container run runner -- systemctl is-active nix-daemon-custom"
     )
 
-    # ── RO1: overlay mounted at /srv/nix/store, clone service gone ─────────
+    # -- RO1: overlay mounted at /srv/nix/store, clone service gone ---------
     crun("mount | grep overlay | grep '/srv/nix/store'")
     assert "active" in crun("systemctl is-active nix-daemon-overlay-mount")
     assert "active" in crun("systemctl is-active nix-daemon-custom")
@@ -130,13 +130,13 @@ pkgs.testers.runNixOSTest {
     print("RO1 OK: overlay mounted at /srv/nix/store; "
           "no nix-daemon-storage; nix-daemon-custom active")
 
-    # ── RO2: no `nix copy --all` clone in the container journal ────────────
+    # -- RO2: no `nix copy --all` clone in the container journal ------------
     journal = crun("journalctl -u nix-daemon-storage --no-pager 2>&1 || true")
     assert "nix copy" not in journal, \
         "nix copy --all must not run in overlay mode (instant overlay, no clone)"
     print("RO2 OK: no 'nix copy' clone in the journal")
 
-    # ── Config contract: custom daemon serves local-overlay:// + GC-safe ───
+    # -- Config contract: custom daemon serves local-overlay:// + GC-safe ---
     unit = crun("systemctl cat nix-daemon-custom")
     assert "local-overlay" in unit, \
         "nix-daemon-custom ExecStart must use a local-overlay:// store"
@@ -148,13 +148,13 @@ pkgs.testers.runNixOSTest {
     print("CFG OK: nix-daemon-custom serves local-overlay:// "
           "with ignore-gc-delete-failure=true, upper=/srv/overlay/upper")
 
-    # ── RO4: a lower-store path is visible through the merged overlay ──────
+    # -- RO4: a lower-store path is visible through the merged overlay ------
     hello = crun("ls -d /srv/nix/store/*-hello-* 2>/dev/null | head -n1")
     assert "-hello-" in hello, \
         "a lower-store path (hello) must be visible through the overlay"
     print("RO4 OK: lower-store path visible via overlay: " + hello.strip())
 
-    # ── RO3 + THE READ-ONLY PROOF (key requirement) ────────────────────────
+    # -- RO3 + THE READ-ONLY PROOF (key requirement) ------------------------
     # The appliance condition is: /nix/store is read-only squashFS. Inside the
     # NixOS container /nix/store is a read-only bind of the host store, so the
     # RO condition holds for free. We (a) verify the lower is RO, (b) write a
@@ -205,7 +205,7 @@ pkgs.testers.runNixOSTest {
           "lower /nix/store read-only and unchanged")
     print("RESULT_READONLY_BUILD=yes")
 
-    # ── RO5: overlay copy-on-delete (upper deletable, lower preserved) ─────
+    # -- RO5: overlay copy-on-delete (upper deletable, lower preserved) -----
     # Real `nix-collect-garbage` over the local-overlay store requires a build
     # registered with nix (a network-dependent `nix build`), which is not
     # reliably reproducible offline in a VM. We instead exercise the overlay
@@ -227,8 +227,8 @@ pkgs.testers.runNixOSTest {
           "(overlay copy-on-delete / GC semantics)")
     print("RESULT_GC_SEMANTICS=yes")
 
-    # ── Deferred: RO6 (A/B swap, multi-boot pexpect) + RO7 (boot benchmark) ─
-    # Intentionally out of scope here; see TEST-SPECS §7.7 / §7.8.
+    # -- Deferred: RO6 (A/B swap, multi-boot pexpect) + RO7 (boot benchmark) -
+    # Intentionally out of scope here; see TEST-SPECS sec. 7.7 / sec. 7.8.
 
     print("RESULT_ALL_OVERLAY_CHECKS=yes")
   '';

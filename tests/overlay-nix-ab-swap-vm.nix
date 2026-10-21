@@ -1,4 +1,4 @@
-# overlay-nix-ab-swap-vm — O9 (TEST-SPECS §5.10): overlay-nix across an A/B
+# overlay-nix-ab-swap-vm — O9 (TEST-SPECS sec. 5.10): overlay-nix across an A/B
 # slot swap, on the shipped world A (the image carries the lower store DB —
 # the lower-store-db change). A faithful 2-boot run against REAL appliance
 # images.
@@ -128,10 +128,10 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    # ── Boot the v1 appliance image as a driver-created machine (OVMF → ESP
+    # -- Boot the v1 appliance image as a driver-created machine (OVMF → ESP
     #    fallback → systemd-boot → UKI). snapshot=on: the store image is never
     #    mutated; writes (upper layer, slot B, ESP) live in a COW overlay that
-    #    survives the in-test guest reboot. ──────────────────────────────────
+    #    survives the in-test guest reboot. ----------------------------------
     def create_ab_machine(**kwargs):
         start_command = [
             "${pkgs.qemu_test}/bin/qemu-kvm",
@@ -166,7 +166,7 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("nix --version", timeout=300)
     print("OK: v1 appliance booted, overlay-nix up")
 
-    # ── Shipped lower DB: a lower-valid path is never copied into the upper ──
+    # -- Shipped lower DB: a lower-valid path is never copied into the upper --
     # gptfdisk sits in v1's toplevel closure → the shipped dump registered it
     # at boot. Realizing it is a no-op for the upper layer (delta semantics);
     # standard tooling resolves its validity out of the box.
@@ -175,14 +175,14 @@ pkgs.testers.runNixOSTest {
     appliance.fail("test -d /var/lib/nix-overlay/upper/${gptfdiskBasename}")
     print("OK: delta pin — lower-valid gptfdisk realized without an upper copy")
 
-    # ── Install a tool into the overlay upper (from the deployer cache) ──────
+    # -- Install a tool into the overlay upper (from the deployer cache) ------
     appliance.succeed("nix-store --realize ${vimPath}", timeout=600)
     out = appliance.succeed("${vimPath}/bin/vim --version")
     assert "VIM" in out, f"vim did not run on v1 ({out!r})"
     appliance.succeed("test -d /var/lib/nix-overlay/upper/${vimBasename}")
     print("OK: vim realized into the upper layer on v1")
 
-    # ── Stage v2 + sysupdate → slot B ────────────────────────────────────────
+    # -- Stage v2 + sysupdate → slot B ----------------------------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/"
@@ -194,7 +194,7 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: sysupdate wrote v2 to slot B + ESP")
 
-    # ── Reboot → systemd-boot picks the highest-version UKI (abtest_2) ───────
+    # -- Reboot → systemd-boot picks the highest-version UKI (abtest_2) -------
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")
     version = appliance.succeed("cat /etc/image-version").strip()
@@ -208,7 +208,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: booted v2, overlay remounted over the new lower")
 
-    # ── Default policy ("wipe"): the upper did NOT survive the swap ──────────
+    # -- Default policy ("wipe"): the upper did NOT survive the swap ----------
     # The pre-update hook cleared the upper + the store DB state before the
     # slot write; the boot loader re-seeded the DB from v2's shipped dump.
     appliance.fail("test -d /var/lib/nix-overlay/upper/${vimBasename}")
@@ -218,12 +218,12 @@ pkgs.testers.runNixOSTest {
     assert marker == "2", f"lower DB marker {marker!r}, expected '2' (v2 dump loaded)"
     print("OK: wipe policy — upper cleared, vim's DB entry gone, DB re-seeded from v2")
 
-    # ── v2 lower paths visible AND valid through the merged store ────────────
+    # -- v2 lower paths visible AND valid through the merged store ------------
     appliance.succeed("test -d /nix/store/${helloBasename}")
     appliance.succeed("nix path-info ${helloPath}")
     print("OK: v2 marker (hello) visible and valid in the merged /nix/store")
 
-    # ── The merged store is functional post-swap: vim realizes again ──────────
+    # -- The merged store is functional post-swap: vim realizes again ----------
     appliance.succeed("nix-store --realize ${vimPath}", timeout=600)
     out = appliance.succeed("${vimPath}/bin/vim --version")
     assert "VIM" in out, f"vim did not run on v2 ({out!r})"

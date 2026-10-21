@@ -123,7 +123,38 @@ pkgs.testers.runNixOSTest {
 
     appliance = create_runner_machine(name="appliance")
     appliance.start(allow_reboot=True)
-    appliance.wait_for_unit("multi-user.target")
+    # The first boot's multi-user.target includes the runner container, whose
+    # boot includes the clone seed (`nix-daemon-storage`: a full `nix copy
+    # --all` of the appliance closure into /srv/nix, Nice=19, inside nested
+    # QEMU). On real hardware this takes minutes; under QEMU the per-path
+    # sqlite/fsync overhead makes it take much longer, so poll with progress
+    # dumps (the seed's journal lives inside the container, invisible on the
+    # host console) instead of a blind wait. Post-swap boots are fast (the
+    # clone is additive, only the delta re-copies).
+    import time
+    deadline = time.time() + 14400
+    while True:
+        try:
+            jobs = appliance.succeed("systemctl list-jobs --no-legend | head -5 || true")
+            seed = appliance.succeed(
+                "nixos-container run runner -- sh -c '"
+                "systemctl is-active nix-daemon-storage; "
+                "echo ---journal; "
+                "journalctl -u nix-daemon-storage -n 15 --no-pager 2>&1 | tail -15; "
+                "echo ---scratch; "
+                "ls /run/nix-clone-state/db 2>&1 | head -3; "
+                "exit 0'",
+                timeout=90,
+            )
+            print(f"SEEDPOLL active={seed.strip().splitlines()[:20]} jobs={jobs.strip()[:200]}", flush=True)
+            if "multi-user.target" not in jobs:
+                break
+        except Exception as e:
+            print(f"SEEDPOLL transient: {e}", flush=True)
+        if time.time() > deadline:
+            raise Exception("appliance multi-user.target not reached within 14400s")
+        time.sleep(120)
+    appliance.wait_for_unit("multi-user.target", timeout=600)
     assert appliance.succeed("cat /etc/image-version").strip() == "1"
     # Bless v1 (boot-complete) so its remaining tries cannot outrank v2 later.
     appliance.wait_until_succeeds(
@@ -131,7 +162,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: v1 appliance booted and blessed")
 
-    # ── The runner container comes up on the appliance ──────────────────────
+    # -- The runner container comes up on the appliance ----------------------
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet container@runner.service", timeout=600
     )
@@ -141,7 +172,7 @@ pkgs.testers.runNixOSTest {
     )
     print("OK: runner container + custom daemon up on the appliance")
 
-    # ── A CI build through the relocated store works pre-swap ───────────────
+    # -- A CI build through the relocated store works pre-swap ---------------
     try:
         proof_v1 = build_proof()
     except Exception:
@@ -154,7 +185,7 @@ pkgs.testers.runNixOSTest {
         raise
     print(f"OK: pre-swap build through the relocated store: {proof_v1}")
 
-    # ── Stage v2 SIGNED → sysupdate → slot B → reboot ───────────────────────
+    # -- Stage v2 SIGNED → sysupdate → slot B → reboot -----------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
@@ -170,7 +201,7 @@ pkgs.testers.runNixOSTest {
     print("OK: signed v2 staged and written to slot B + ESP")
 
     appliance.reboot()
-    appliance.wait_for_unit("multi-user.target")
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
     assert appliance.succeed("cat /etc/image-version").strip() == "2"
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet container@runner.service", timeout=600
@@ -178,7 +209,7 @@ pkgs.testers.runNixOSTest {
     print("OK: v2 booted; runner container up post-swap")
   '' + (
     if storeMode == "clone" then ''
-      # ── clone: the re-clone after the swap is additive ────────────────────
+      # -- clone: the re-clone after the swap is additive --------------------
       appliance.wait_until_succeeds(
         "nixos-container run runner -- systemctl is-active nix-daemon-custom",
         timeout=900
@@ -190,7 +221,7 @@ pkgs.testers.runNixOSTest {
       crun("ls -d /srv/nix/store/${helloBasename} >/dev/null")
       print("OK: clone is additive — old build output kept, new lower content arrived")
     '' else ''
-      # ── overlay: remount over the new lower, upper intact ─────────────────
+      # -- overlay: remount over the new lower, upper intact -----------------
       appliance.wait_until_succeeds(
         "nixos-container run runner -- systemctl is-active nix-daemon-overlay-mount",
         timeout=600
@@ -206,7 +237,7 @@ pkgs.testers.runNixOSTest {
       print("OK: overlay coherent post-swap — upper intact, new lower visible")
     ''
   ) + ''
-    # ── A CI build works post-swap (both modes) ─────────────────────────────
+    # -- A CI build works post-swap (both modes) -----------------------------
     proof_v2 = build_proof()
     print(f"OK: post-swap build through the relocated store: {proof_v2}")
 

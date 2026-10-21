@@ -63,6 +63,13 @@ Working rules (enforced by convention + `openspec/config.yaml`):
    don't duplicate the information. Only reflect necessary info for
    each document.
 5. Before expanding the doc: try not to bloat it and restructure if necessary. 
+6. **Docs are written for public-repo readers.** The repository is public:
+   a reader has no access to the debugging session, review thread or
+   agent conversation in which a problem was found. Never describe only
+   the solution of a problem whose statement lives elsewhere — each
+   `doc/*` section must carry its full scenario explicitly: what breaks,
+   on which surface, with what symptom, and only then how it is solved.
+   A pointer to a spec/issue may follow, never replace, that statement.
 
 Docs structure invariant: every fact lives in exactly ONE file; everything
 else links to it. README = overview/map; user_guide = functional;

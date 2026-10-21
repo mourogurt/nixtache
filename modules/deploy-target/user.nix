@@ -19,7 +19,7 @@
 # The account is a SYSTEM user (`isSystemUser`, uid < 1000): it must never
 # show up in graphical login screens (SDDM/Plasma list normal users only).
 # The SSH session is gated by `nixtache-ssh-gate` (deployUser.sshGate):
-# an authorized_keys `restrict,command=…` prefix that whitelists exactly the
+# an authorized_keys `restrict,command=...` prefix that whitelists exactly the
 # deploy protocol's remote commands — see the gate script below.
 #
 # `autoProvision = true`: module creates the user + gated key + group
@@ -54,7 +54,7 @@ let
       exec ${pkgs.runtimeShell} -c "$cmd"
     }
 
-    # connectivity probe: `ssh … true`
+    # connectivity probe: `ssh ... true`
     if [ "$cmd" = "true" ]; then allow; fi
 
     # read-only free-space query (the deploy action's pre-copy disk check).
@@ -62,12 +62,12 @@ let
     # redirection or chaining falls through to the standard rejection below.
     if [ "$cmd" = "df -B1 --output=avail /nix/store" ]; then allow; fi
 
-    # `nix copy --to ssh://` serves the store: `nix-store --serve [--write] …`
+    # `nix copy --to ssh://` serves the store: `nix-store --serve [--write] ...`
     case "$cmd" in
       "nix-store --serve"*) allow ;;
     esac
 
-    # live apply trigger (action: echo '$P' > pointer && systemctl start …).
+    # live apply trigger (action: echo '$P' > pointer && systemctl start ...).
     # The regex lives in a variable — [[ =~ ]] parsing of inline escaped
     # metacharacters is brittle across bash versions.
     trigger_re="^echo '/nix/store/[^']+' > /var/lib/nixtache/pending-system && systemctl start nixtache-apply\\.service$"
