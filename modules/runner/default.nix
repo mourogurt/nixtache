@@ -90,7 +90,7 @@ in
       type = types.package;
       default = pkgs.forgejo-runner;
       defaultText = lib.literalExpression "pkgs.forgejo-runner";
-      description = "forgejo-runner package used by all instances (`services.gitea-actions-runner.package`). Set to `pkgs.gitea-actions-runner` for a Gitea server.";
+      description = "forgejo-runner package used by all instances (`services.forgejo-runner.package`). Set to `pkgs.gitea-actions-runner` for a Gitea server.";
     };
 
     hostPackages = mkOption {
@@ -252,7 +252,6 @@ in
                 ];
                 trusted-users = [
                   "root"
-                  "gitea-runner"
                   "@users"
                 ];
                 system-features = system_features;

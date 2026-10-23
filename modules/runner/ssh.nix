@@ -3,7 +3,7 @@
 # `flakeSshCreds` gates private-flake-input fetch (`nix flake check` /
 # `nix flake metadata`), `updateSshCreds` gates the update-flake workflow
 # (push + commit signing). Each bundle, when set, is bind-mounted into the
-# container and exposed to every `gitea-runner-*` service via a purpose-specific
+# container and exposed to every `forgejo-runner-*` service via a purpose-specific
 # systemd `LoadCredential` (`flake_ssh_*` / `update_ssh_*`); the `ssh-setup`
 # composite action picks the right pair via its `creds` input.
 #
@@ -103,7 +103,7 @@ in
       config = { ... }: {
         systemd.services = mapAttrs'
           (iname: _:
-            nameValuePair "gitea-runner-${iname}" (mkIf anySsh {
+            nameValuePair "forgejo-runner-${iname}" (mkIf anySsh {
               # SSH credentials are loaded per purpose (flake / update), each
               # only when its bundle is configured. ssh-setup selects via its
               # `creds` input → $CREDENTIALS_DIRECTORY/<creds>_ssh_*.

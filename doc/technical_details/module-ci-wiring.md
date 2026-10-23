@@ -20,7 +20,7 @@ not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
 Mechanics, file by file:
 
 - `modules/runner/instances.nix` aggregates all env keys into each
-  `gitea-runner-<name>` service's `settings.runner.envs` (including the
+  `forgejo-runner-<name>` service's `settings.runner.envs` (including the
   `_extraRunnerEnvs` internal aggregator that `deploy.nix` and `ab.nix` feed).
 - `modules/runner/ssh.nix` bind-mounts the flake/update key pairs into the
   container at `/var/secrets/runner/{flake,update}_ssh_key[.pub]` and wires

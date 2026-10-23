@@ -13,8 +13,8 @@
 #              + nix-serve, `after/requires = nix-daemon-custom.service`;
 #   - "/"    → reuse the container's system nix-daemon (no custom services);
 #   - ""     → the mandatory-path assertion fires;
-#   - multi  → one `gitea-runner-<name>` per instance, each relocated-store
-#              wired, with its own token mount + name/labels;
+#   - multi  → one `forgejo-runner-<name>` per instance, each relocated-store
+#              wired, with its own token mount + uuid/labels;
 #   - ssh    → optional SSH key pair: absent = no LoadCredential / key mounts;
 #              present = LoadCredential + mounts wired; half-set = assertion.
 #   - gitUser → cfg.gitUser is exported to every job as NIXTACHE_GIT_USER via
@@ -36,26 +36,42 @@ let
   # repository deliberately stores no secrets, not even encrypted ones.
   dummySecret = /dev/null;
 
-  # Minimal host + module config shared by every scenario. One `default`
-  # instance, real token, cache key, and NO SSH keys (build-only / test — no
-  # push-back). Only `store.path` (and the `extra` module) varies.
-  # stateVersion follows nixpkgs' own test convention (lib.trivial.release) so
-  # the test exercises the current release, not a pinned old one.
+  # Registration-uuid-shaped placeholder shared by scenarios. The module
+  # forwards `uuid` verbatim into the connection map (it is an identifier,
+  # not a credential) and never reads it.
+  dummyUuid = "00000000-0000-0000-0000-000000000000";
+
+  # Settings shared by every scenario (one `default` instance, cache key, NO
+  # SSH keys — build-only / test, no push-back). `baseModule` adds the
+  # required uuid; `noUuidModule` leaves it out for the failing-eval scenario.
+  # enableSandbox is NOT set here — each scenario that asserts on sandbox
+  # state sets it explicitly (tests must not rely on the nixtache default).
+  # sshPrivateKey / sshPublicKey intentionally omitted (optional).
+  commonRunner = {
+    enable = true;
+    forgejoUrl = "http://localhost:3000";
+    cache = {
+      enable = true;
+      domain = "bincache.test";
+      port = 5000;
+    };
+    secrets.cachePrivateKey = dummySecret;
+  };
+
+  # Minimal host + module config shared by every scenario. Only `store.path`
+  # (and the `extra` module) varies. stateVersion follows nixpkgs' own test
+  # convention (lib.trivial.release) so the test exercises the current
+  # release, not a pinned old one.
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
-    services.nixtache.runner = {
-      enable = true;
-      forgejoUrl = "http://localhost:3000";
-      cache = {
-        enable = true;
-        domain = "bincache.test";
-        port = 5000;
-      };
+    services.nixtache.runner = commonRunner // {
+      instances.default = { uuid = dummyUuid; tokenFile = dummySecret; };
+    };
+  };
+  noUuidModule = { lib, ... }: {
+    system.stateVersion = lib.trivial.release;
+    services.nixtache.runner = commonRunner // {
       instances.default.tokenFile = dummySecret;
-      secrets.cachePrivateKey = dummySecret;
-      # enableSandbox is NOT set here — each scenario that asserts on sandbox
-      # state sets it explicitly (tests must not rely on the nixtache default).
-      # sshPrivateKey / sshPublicKey intentionally omitted (optional).
     };
   };
 
@@ -74,8 +90,9 @@ self.nixosModules.runner
   servicesOf = host: (containerCfg host).systemd.services;
   socketsOf = host: (containerCfg host).systemd.sockets;
   bindMountsOf = host: host.config.containers."runner".bindMounts;
-  instancesOf = host: (containerCfg host).services.gitea-actions-runner.instances;
-  loadCred = svc: svc."gitea-runner-default".serviceConfig.LoadCredential or [ ];
+  instancesOf = host: (containerCfg host).services.forgejo-runner.instances;
+  loadCred = svc: svc."forgejo-runner-default".serviceConfig.LoadCredential or [ ];
+  hasCredPrefix = prefix: creds: lib.any (c: lib.hasPrefix prefix c) creds;
   has = set: name: set ? ${name};
 
   # --- scenario A: relocated store, SSH off -------------------------------
@@ -90,20 +107,24 @@ self.nixosModules.runner
       hasStorage = has svcSrv "nix-daemon-storage";
       hasSocket = has (socketsOf hostSrv) "nix-daemon-custom";
       daemonBindPaths = svcSrv."nix-daemon-custom".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
-      giteaBindPaths = svcSrv."gitea-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
-      giteaRequires = lib.elem "nix-daemon-custom.service" (svcSrv."gitea-runner-default".requires or [ ]);
-      giteaAfter = lib.elem "nix-daemon-custom.service" (svcSrv."gitea-runner-default".after or [ ]);
+      forgejoBindPaths = svcSrv."forgejo-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+      forgejoRequires = lib.elem "nix-daemon-custom.service" (svcSrv."forgejo-runner-default".requires or [ ]);
+      forgejoAfter = lib.elem "nix-daemon-custom.service" (svcSrv."forgejo-runner-default".after or [ ]);
       nixServeBindPaths = svcSrv."nix-serve".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
       # clone on a nix-enabled container: storage seeds through the system daemon
       storageRequiresSystemDaemon = lib.elem "nix-daemon.service" (svcSrv."nix-daemon-storage".requires or [ ]);
       storageDaemonEnv = lib.elem "NIX_REMOTE=daemon" (svcSrv."nix-daemon-storage".serviceConfig.Environment or [ ]);
       socketPath = (socketsOf hostSrv)."nix-daemon-custom".listenStreams == [ "/srv/nix/var/nix/daemon-socket/socket" ];
       srvMountPoint = (bindMountsOf hostSrv)."srv-nix".mountPoint == "/srv";
-      # per-instance token mount present, SSH mounts / LoadCredential absent
+      # per-instance token mount present, SSH mounts / SSH LoadCredentials
+      # absent (the token's own upstream LoadCredential IS present even here
+      # — asserted separately by scenarioRegistration)
       tokenMount = (bindMountsOf hostSrv)."runner-token-default".mountPoint == "/var/secrets/runner/default/token";
       noFlakeSshMount = !(has (bindMountsOf hostSrv) "flake-ssh-private-key");
       noUpdateSshMount = !(has (bindMountsOf hostSrv) "update-ssh-private-key");
-      noLoadCredential = loadCred svcSrv == [ ];
+      noSshLoadCredential =
+        !(hasCredPrefix "flake_ssh_" (loadCred svcSrv)
+          || hasCredPrefix "update_ssh_" (loadCred svcSrv));
       # enableSandbox=false (explicit in baseModule) → no CAP_SYS_ADMIN granted
       # (the container stays unprivileged; sandbox is off). The sandbox-ON path
       # is covered by scenarioSandboxOn.
@@ -120,8 +141,8 @@ self.nixosModules.runner
       noCustomDaemon = !(has svcRoot "nix-daemon-custom");
       noStorage = !(has svcRoot "nix-daemon-storage");
       noSocket = !(has (socketsOf hostRoot) "nix-daemon-custom");
-      noGiteaBindPaths = (svcRoot."gitea-runner-default".serviceConfig.BindPaths or [ ]) == [ ];
-      noGiteaDep = !(lib.elem "nix-daemon-custom.service" (svcRoot."gitea-runner-default".after or [ ]));
+      noForgejoBindPaths = (svcRoot."forgejo-runner-default".serviceConfig.BindPaths or [ ]) == [ ];
+      noForgejoDep = !(lib.elem "nix-daemon-custom.service" (svcRoot."forgejo-runner-default".after or [ ]));
       noSrvMount = !(has (bindMountsOf hostRoot) "srv-nix");
     };
   };
@@ -134,28 +155,90 @@ self.nixosModules.runner
     checks = { refused = !tryEmpty.success; };
   };
 
+  # --- scenario: registration wiring (uuid + token pair model) -------------
+  # The default instance lands in the in-container `services.forgejo-runner`
+  # map with connection `default` (shared url + per-instance uuid), the bare
+  # token read from the read-only bind mount via the upstream secrets
+  # templating (token_url → LoadCredential on the runner service), and the
+  # container nix daemon trusting the instance's dynamic service user
+  # (`forgejo-runner-<name>` — NSS-visible name of the DynamicUser unit; the
+  # removed static `gitea-runner` account must not appear).
+  instSrv = (instancesOf hostSrv)."default";
+  connSrv = instSrv.settings.server.connections.default;
+  scenarioRegistration = {
+    name = "registration: connection url+uuid, bare-token bind mount → token_url/LoadCredential, trusted service user";
+    checks = {
+      connUrl = connSrv.url == "http://localhost:3000";
+      connUuid = connSrv.uuid == dummyUuid;
+      tokenUrl = instSrv.secrets.server.connections.default.token_url == "/var/secrets/runner/default/token";
+      tokenMountHostPath = (bindMountsOf hostSrv)."runner-token-default".hostPath == toString dummySecret;
+      tokenMountRO = (bindMountsOf hostSrv)."runner-token-default".isReadOnly == true;
+      tokenCred = lib.elem "server__connections__default__token_url:/var/secrets/runner/default/token" (loadCred svcSrv);
+      labelsLocation = instSrv.settings.runner.labels == [ "nixos:host" ];
+      trustedUser = lib.elem "forgejo-runner-default" (containerCfg hostSrv).nix.settings.trusted-users;
+      noGiteaTrusted = !(lib.elem "gitea-runner" (containerCfg hostSrv).nix.settings.trusted-users);
+    };
+  };
+
+  # --- failing-eval scenarios: the removed/added instance options ----------
+  # `name` no longer exists (runners don't self-report their name — it is
+  # fixed when the registration is created in Forgejo); `uuid` is required
+  # (each instance is its own registration). Both must fail evaluation; the
+  # module system turns the errors into throws that tryEval catches.
+  tryNamed = builtins.tryEval (mkHost "/srv" {
+    services.nixtache.runner.instances.default.name = "whatever";
+  }).config.system.build.toplevel.outPath;
+  hostNoUuid = nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [
+      self.nixosModules.runner
+      noUuidModule
+      { services.nixtache.runner.store.path = "/srv"; }
+    ];
+  };
+  tryNoUuid = builtins.tryEval hostNoUuid.config.system.build.toplevel.outPath;
+  scenarioInstanceOptionSurface = {
+    name = "instance option surface: setting `name` fails eval; absent `uuid` fails eval";
+    checks = {
+      nameRefused = !tryNamed.success;
+      uuidRequired = !tryNoUuid.success;
+    };
+  };
+
   # --- scenario D: multiple instances share the relocated store -----------
   hostMulti = mkHost "/srv" {
     services.nixtache.runner.instances = {
       default.tokenFile = dummySecret;
-      test = { labels = [ "test:host" ]; tokenFile = dummySecret; };
+      test = {
+        uuid = "11111111-1111-1111-1111-111111111111";
+        labels = [ "test:host" ];
+        tokenFile = dummySecret;
+      };
     };
   };
   svcMulti = servicesOf hostMulti;
+  instMulti = instancesOf hostMulti;
   scenarioMulti = {
-    name = "instances.<name>: one gitea-runner-<name> per instance, each wired, distinct token/name/labels";
+    name = "instances.<name>: one forgejo-runner-<name> per instance, each wired, distinct uuid/token/labels";
     checks = {
-      hasGiteaDefault = has svcMulti "gitea-runner-default";
-      hasGiteaTest = has svcMulti "gitea-runner-test";
-      defaultBindPaths = svcMulti."gitea-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
-      testBindPaths = svcMulti."gitea-runner-test".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
-      defaultLabels = (instancesOf hostMulti)."default".labels == [ "nixos:host" ];
-      testLabels = (instancesOf hostMulti)."test".labels == [ "test:host" ];
-      defaultName = (instancesOf hostMulti)."default".name == "default";
-      testName = (instancesOf hostMulti)."test".name == "test";
-      # distinct per-instance token mounts
+      hasForgejoDefault = has svcMulti "forgejo-runner-default";
+      hasForgejoTest = has svcMulti "forgejo-runner-test";
+      defaultBindPaths = svcMulti."forgejo-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+      testBindPaths = svcMulti."forgejo-runner-test".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+      defaultLabels = instMulti."default".settings.runner.labels == [ "nixos:host" ];
+      testLabels = instMulti."test".settings.runner.labels == [ "test:host" ];
+      # each instance is its own registration: own uuid in its own connection
+      defaultUuid = instMulti."default".settings.server.connections.default.uuid == dummyUuid;
+      testUuid = instMulti."test".settings.server.connections.default.uuid == "11111111-1111-1111-1111-111111111111";
+      testUrl = instMulti."test".settings.server.connections.default.url == "http://localhost:3000";
+      # ...and its own read-only token bind mount
       defaultTokenMount = (bindMountsOf hostMulti)."runner-token-default".mountPoint == "/var/secrets/runner/default/token";
       testTokenMount = (bindMountsOf hostMulti)."runner-token-test".mountPoint == "/var/secrets/runner/test/token";
+      testTokenUrl = instMulti."test".secrets.server.connections.default.token_url == "/var/secrets/runner/test/token";
+      # the container nix daemon trusts each instance's dynamic service user
+      trustedDefault = lib.elem "forgejo-runner-default" (containerCfg hostMulti).nix.settings.trusted-users;
+      trustedTest = lib.elem "forgejo-runner-test" (containerCfg hostMulti).nix.settings.trusted-users;
+      noGiteaTrusted = !(lib.elem "gitea-runner" (containerCfg hostMulti).nix.settings.trusted-users);
     };
   };
 
@@ -176,7 +259,9 @@ self.nixosModules.runner
   scenarioSsh = {
     name = "flakeSshCreds + updateSshCreds → both LoadCredentials + mounts wired";
     checks = {
-      loadCredential = loadCred svcSsh == [
+      # subset check: the service also carries the upstream token
+      # LoadCredential (asserted by scenarioRegistration)
+      loadCredential = lib.all (c: lib.elem c (loadCred svcSsh)) [
         "flake_ssh_private:/var/secrets/runner/flake_ssh_key"
         "flake_ssh_public:/var/secrets/runner/flake_ssh_key.pub"
         "update_ssh_private:/var/secrets/runner/update_ssh_key"
@@ -513,7 +598,7 @@ self.nixosModules.runner
   # ab.enable=true wires the central staging store: bind-mount into the
   # container, nginx location on the cache vhost, runner-host/staging envs, the
   # retain-GC timer+service, gnupg in the container, and (when a signing key is
-  # supplied) a LoadCredential on every gitea-runner service.
+  # supplied) a LoadCredential on every forgejo-runner service.
   hostAb = mkHost "/srv" {
     services.nixtache.runner.deploy.ab = {
       enable = true;
@@ -545,8 +630,7 @@ self.nixosModules.runner
       gnupgInContainer = lib.any (p: lib.hasInfix "gnupg" (p.name or ""))
         (containerCfg hostAb).environment.systemPackages;
       # GPG signing key exposed via LoadCredential on the runner service
-      hasSigningCred = lib.hasPrefix "sysupdate_signing_key:"
-        (lib.concatStringsSep "," (loadCred (servicesOf hostAb)));
+      hasSigningCred = hasCredPrefix "sysupdate_signing_key:" (loadCred (servicesOf hostAb));
     };
   };
 
@@ -730,6 +814,8 @@ self.nixosModules.runner
     scenarioSrv
     scenarioRoot
     scenarioEmpty
+    scenarioRegistration
+    scenarioInstanceOptionSurface
     scenarioMulti
     scenarioSsh
     scenarioFlakeOnly

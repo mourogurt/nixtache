@@ -12,7 +12,7 @@
 #   2. bind-mounts each target's private key into the container at a fixed path
 #      `/var/secrets/runner/deploy/<name>/id_ed25519` (and, when `sshPublicKey`
 #      is set, the matching `.pub`) and exposes them to every
-#      `gitea-runner-*` service via `LoadCredential` (`deploy_ssh_<name>` /
+#      `forgejo-runner-*` service via `LoadCredential` (`deploy_ssh_<name>` /
 #      `deploy_ssh_<name>.pub`), mirroring the `flake_ssh_*` / `update_ssh_*`
 #      pattern in ssh.nix.
 #
@@ -39,7 +39,7 @@ let
   targetsWithKey = filterAttrs (_: t: t.sshPrivateKey != null) cfg.targets;
   targetsWithPubKey = filterAttrs (_: t: t.sshPublicKey != null) cfg.targets;
 
-  # LoadCredential entries — same set on every gitea-runner-<name> service.
+  # LoadCredential entries — same set on every forgejo-runner-<name> service.
   deployLoadCreds =
     (mapAttrsToList
       (name: _: "deploy_ssh_${name}:/var/secrets/runner/deploy/${name}/id_ed25519")
@@ -113,7 +113,7 @@ in
 
       config = { ... }: {
         systemd.services = mapAttrs' (iname: _:
-          nameValuePair "gitea-runner-${iname}" {
+          nameValuePair "forgejo-runner-${iname}" {
             serviceConfig.LoadCredential = mkIf (deployLoadCreds != [ ]) deployLoadCreds;
           }
         ) enabledInstances;

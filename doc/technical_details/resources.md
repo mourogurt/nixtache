@@ -56,7 +56,7 @@ the tree top to bottom — each step is cheap and decisive:
    `journalctl -u forgejo` for a restart at the failure time, the job's
    duration against `timeout-minutes` (reusable workflows set 4320–4600;
    a workflow without it inherits the platform default), and
-   `journalctl -m --machine <name> -u gitea-runner-<inst>` for cancellation
+   `journalctl -m --machine <name> -u forgejo-runner-<inst>` for cancellation
    lines.
 
 Steps 1–3 all leave *some* trace (counters, kernel log, oomd journal). Step 4

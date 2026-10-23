@@ -107,7 +107,7 @@ scenarioSrv = {
   name = "store.path=\"/srv\" relocates the store; SSH off → no key wiring";
   checks = {
     hasCustomDaemon  = has svcSrv "nix-daemon-custom";
-    giteaBindPaths   = svcSrv."gitea-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
+    forgejoBindPaths = svcSrv."forgejo-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
     noLoadCredential = loadCred svcSrv == [ ];
     hasSandboxCap    = lib.elem "CAP_SYS_ADMIN" hostSrv.config.containers."runner".additionalCapabilities;
   };

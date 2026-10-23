@@ -48,7 +48,10 @@ declarations and feed the resulting paths in:
       sshPublicKey  = config.sops.secrets.forgejo-public-key.path;
     };
     bot = { name = "fbot"; email = "fbot@localhost"; };
-    instances.default.tokenFile = config.sops.secrets.runner-token-default.path;
+    instances.default = {                         # one Forgejo registration per instance: uuid + bare token
+      uuid      = "c9e50be9-a7c3-4aee-ba35-624c4ff8c519";
+      tokenFile = config.sops.secrets.runner-token-default.path;
+    };
     cache = { enable = true; domain = "bincache.example.com"; port = 5000; };
     store.path      = "/srv";       # base dir; store lives at <path>/nix. "/" = system nix-daemon
     store.hostBackup = "/srv/bincache";
@@ -63,19 +66,85 @@ etc. — the module is backend-agnostic by design.
 
 ### Module contract notes
 
-- The registration token is **per-instance** (`instances.<name>.tokenFile`),
-  not global; each instance needs its own token file.
+- Each instance is its **own Forgejo registration**: a uuid + token pair
+  (`instances.<name>.uuid` + `instances.<name>.tokenFile`), obtained from
+  Forgejo when the registration is created — runners no longer self-register
+  and no longer self-report their name (there is no `instances.<name>.name`
+  option). See "Registering runner instances" below.
 - Resource limits (`memoryMax`, `memoryHigh`, `memorySwapMax`, `cpuWeight`,
   `ioWeight`, `timeoutStartSec`), runner package, host packages, timeouts,
   log level, sandboxing, known hosts — all options with sensible defaults.
   The full always-up-to-date reference is generated from the module source:
   `nix build .#optionsMarkdown` inside this repo, or the `nixtache-options`
   CI artifact.
-- Multi-instance: one `gitea-runner-<name>` service per `instances.<name>`
-  attribute (`instances.test = { labels = [ "nixos:test" ]; tokenFile = …; }`).
+- Multi-instance: one `forgejo-runner-<name>` service per `instances.<name>`
+  attribute (`instances.test = { uuid = …; labels = [ "nixos:test" ]; tokenFile = …; }`).
 - How these values reach CI jobs (`runner.envs`, `LoadCredential`) is
   documented in
   [`doc/technical_details/module-ci-wiring.md`](../technical_details/module-ci-wiring.md).
+
+### Registering runner instances
+
+Since nixpkgs 26.11 the module wires the upstream `services.forgejo-runner`
+module, whose registration model replaced the old self-registration
+(`TOKEN=...` environment file): a runner no longer registers itself — it
+authenticates with a **uuid + token pair** that is created in Forgejo
+beforehand. Each `instances.<name>` is one registration, with its own uuid
+and its own token. The runner **name** is fixed in Forgejo when the
+registration is created; it is not (and cannot be) configured on the module
+side.
+
+The token file holds the **bare token** — just the token string, no
+`TOKEN=` prefix, no environment-file syntax. The uuid is not a secret (the
+generated runner config carries it verbatim, in the world-readable Nix
+store), so keep it in the plain configuration; only the token goes through
+your secret backend (sops/agenix/vault/…), as with every other `*File`
+option.
+
+Requirements (canonical):
+[`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
+
+#### New registration
+
+1. In Forgejo, create a runner registration in the scope the runner should
+   serve (per project/repository or per organisation) — see Forgejo's
+   [runner registration docs](https://forgejo.org/docs/latest/admin/actions/registration/).
+   Forgejo shows the registration's **uuid** and **token**.
+2. Put the uuid into `services.nixtache.runner.instances.<name>.uuid`
+   (plain config) and the token — bare, nothing else — into the secret file
+   behind `instances.<name>.tokenFile`.
+3. Deploy; the `forgejo-runner-<name>` service starts picking up jobs.
+
+Requires a Forgejo instance that supports the uuid + token registration
+model (i.e. offers the registration UI/API above). If yours predates it,
+upgrade Forgejo first.
+
+#### Migrating from the old self-registration model
+
+If you ran a pre-26.11 runner: the old module's options are gone, so before
+the first deploy of the updated module each instance needs its uuid + token
+pair in hand. The pair of an already-registered runner can be recovered
+from its old state instead of re-registering:
+
+1. While the old container still runs, read the runner's `.runner` file —
+   inside the container, at `/var/lib/gitea-runner/<name>/.runner`:
+
+   ```bash
+   sudo machinectl shell <containerName> /bin/cat /var/lib/gitea-runner/<name>/.runner
+   ```
+
+   It is JSON; take the `uuid` and `token` values.
+2. Set `instances.<name>.uuid` to the uuid; rewrite the instance's secret
+   file to contain **just the token** (strip the old `TOKEN=` prefix and
+   any other lines); remove any `instances.<name>.name` assignment (the
+   option no longer exists and now fails evaluation).
+3. Deploy and verify the `forgejo-runner-<name>` services pick up jobs.
+
+The old in-container state directory `/var/lib/gitea-runner/` stays unused
+after the cutover and can be removed by hand; the module does not touch it.
+Rolling back means rolling nixpkgs back too (the old module no longer
+exists there) — in practice: don't migrate the configuration until the
+uuid + token pair is in hand.
 
 ### Sizing the container
 

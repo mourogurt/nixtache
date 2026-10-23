@@ -31,21 +31,28 @@ in
   };
 
   # A single runner instance. All instances share the container's relocated
-  # nix store, SSH/bot keys, cache and Forgejo URL; they differ by `name`,
-  # `labels` and `tokenFile` (one registration token per instance) so Forgejo
-  # can route jobs to a specific runner (e.g. a "test" runner on a distinct
-  # label with its own token).
-  instanceType = types.submodule ({ name, ... }: {
+  # nix store, SSH/bot keys, cache and Forgejo URL; they differ by `uuid`,
+  # `labels` and `tokenFile` — each instance is its own Forgejo registration
+  # (its own uuid + token pair), so Forgejo can route jobs to a specific
+  # runner (e.g. a "test" runner on a distinct label with its own pair).
+  # The runner NAME is fixed when the registration is created in Forgejo and
+  # is not configured here: runners no longer self-report their name.
+  instanceType = types.submodule {
     options = {
       enable = mkOption {
         type = types.bool;
         default = true;
         description = "Whether to enable this runner instance.";
       };
-      name = mkOption {
+      uuid = mkOption {
         type = types.str;
-        default = name;
-        description = "Runner name as registered in Forgejo (defaults to the instance attribute name).";
+        example = "c9e50be9-a7c3-4aee-ba35-624c4ff8c519";
+        description = ''
+          UUID of THIS instance's Forgejo runner registration. Runners no
+          longer self-register: the uuid + token pair is obtained from Forgejo
+          when the registration is created (one pair per instance). Not a
+          secret — the generated runner config carries it verbatim.
+        '';
       };
       labels = mkOption {
         type = types.listOf types.str;
@@ -55,14 +62,15 @@ in
       tokenFile = mkOption {
         type = types.path;
         description = ''
-          Environment file (a systemd `EnvironmentFile`) containing the
-          `TOKEN` variable used to register THIS instance. One token per
-          instance — Forgejo issues a registration token per runner.
+          File containing the bare runner token of THIS instance's Forgejo
+          registration — just the token, no `TOKEN=` prefix, no
+          environment-file syntax (the pair to `uuid`, obtained from Forgejo
+          when the registration is created). One token per instance.
           Supplied by the consumer (sops / vault / systemd / ...).
         '';
       };
     };
-  });
+  };
 
   # SSH credentials for a single purpose: a user (server RUN_USER) + key pair.
   # Two independent bundles exist — one for fetching private flake inputs

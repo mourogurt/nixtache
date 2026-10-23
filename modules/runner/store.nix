@@ -4,7 +4,7 @@
 # relocated-store machinery: when `store.path != "/"` the store lives at
 # `<path>/nix` and a custom `nix-daemon` + storage oneshot + socket run inside
 # the container, with a `BindPaths` bind onto /nix injected into every
-# `gitea-runner-*` service and `nix-serve`. When `store.path == "/"` the
+# `forgejo-runner-*` service and `nix-serve`. When `store.path == "/"` the
 # container reuses its system nix-daemon and this module contributes nothing.
 #
 # `store.mode` selects how the relocated store is populated:
@@ -24,7 +24,7 @@ with lib;
 let
   cfg = config.services.nixtache.runner;
 
-  # Enabled runner instances — each `gitea-runner-<name>` service gets the
+  # Enabled runner instances — each `forgejo-runner-<name>` service gets the
   # relocated-store BindPaths + custom-daemon dependency when customStore.
   enabledInstances = filterAttrs (_: i: i.enable) cfg.instances;
 
@@ -231,11 +231,11 @@ in
       };
 
       systemd.services = mkMerge [
-        # One `gitea-runner-<name>` service per enabled instance gets the
+        # One `forgejo-runner-<name>` service per enabled instance gets the
         # relocated-store BindPaths + a hard dep on the custom daemon.
         (mapAttrs'
           (iname: _:
-            nameValuePair "gitea-runner-${iname}" (mkIf customStore {
+            nameValuePair "forgejo-runner-${iname}" (mkIf customStore {
               after = [ "nix-daemon-custom.service" ];
               requires = [ "nix-daemon-custom.service" ];
               serviceConfig.BindPaths = [ bindPath ];

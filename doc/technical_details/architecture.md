@@ -50,7 +50,7 @@ concatenates all definitions into the inner `eval-config` modules list).
 | `ssh.nix` | `flakeSshCreds` / `updateSshCreds`: key bindMounts + per-service `LoadCredential`. |
 | `sandbox.nix` | `enableSandbox` / `additionalCapabilities` (sole owner of container caps), forced `nix.settings.sandbox`. |
 | `known-hosts.nix` | `gitHost` / `extraKnownHosts`, in-container `services.openssh.knownHosts`. |
-| `instances.nix` | `bot.*` + `instances.<name>`, `gitea-actions-runner` map, all `runner.envs`. |
+| `instances.nix` | `bot.*` + `instances.<name>`, `forgejo-runner` map, all `runner.envs`. |
 | `deploy.nix` | `deploy.targets.<name>` map → job env `NIXTACHE_DEPLOY_TARGETS` + per-target key bind-mounts / `LoadCredential` (`deploy_ssh_<name>[.pub]`). |
 | `ab.nix` | Runner-side A/B staging (`deploy.ab.*`): central staging dir + HTTPS distribution via the cache vhost, GPG manifest signing, retain-GC. |
 

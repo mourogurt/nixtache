@@ -1,10 +1,11 @@
 # Runner instances + bot identity + per-job env aggregation.
 #
-# Owns `instances.<name>` (one `gitea-runner-<name>` per attr, each with its
-# own registration token) and `bot.{name,email}` (the commit identity for
-# CI-generated commits). Builds the in-container `services.gitea-actions-runner`
-# map and aggregates the per-job `runner.envs` from values declared in other
-# sub-modules:
+# Owns `instances.<name>` (one `forgejo-runner-<name>` service per attr, each
+# its own Forgejo registration — a uuid + token pair obtained from Forgejo
+# when the registration is created; runners no longer self-register) and
+# `bot.{name,email}` (the commit identity for CI-generated commits). Builds
+# the in-container `services.forgejo-runner` map and aggregates the per-job
+# `runner.envs` from values declared in other sub-modules:
 #
 #   - ssh.nix        → NIXTACHE_FLAKE_GIT_USER / NIXTACHE_UPDATE_GIT_USER
 #   - bot (here)     → NIXTACHE_BOT_NAME / NIXTACHE_BOT_EMAIL
@@ -68,21 +69,23 @@ in
       };
     };
 
-    # Runner instances. Each registers as a separate runner on `forgejoUrl`
-    # with its own name/labels/tokenFile; all share the container's store,
-    # (optional) SSH/bot keys, cache and nix settings. Add a second instance
-    # (e.g. `test`) to get a dedicated runner for CI experiments routed by label.
+    # Runner instances. Each is its own Forgejo registration (`uuid` +
+    # `tokenFile` with the bare runner token) with its own labels; all share
+    # the container's store, (optional) SSH/bot keys, cache and nix settings.
+    # Add a second instance (e.g. `test`) to get a dedicated runner for CI
+    # experiments routed by label. The runner name is fixed in Forgejo when
+    # the registration is created — not configured here.
     instances = mkOption {
       type = types.attrsOf typesT.instanceType;
       description = ''
         Runner instances to start inside the container. Each becomes a
-        `gitea-runner-<name>` service and needs its own `tokenFile`
-        (a Forgejo registration token). Example:
+        `forgejo-runner-<name>` service and needs its own Forgejo registration
+        (`uuid` + `tokenFile` with the bare runner token). Example:
 
         ```
         instances = {
-          default = { tokenFile = config.sops.secrets.runner-token-default.path; };
-          test    = { labels = [ "nixos:test" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
+          default = { uuid = "c9e50be9-..."; tokenFile = config.sops.secrets.runner-token-default.path; };
+          test    = { uuid = "1c3a3b5b-..."; labels = [ "nixos:test" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
         };
         ```
       '';
@@ -91,7 +94,7 @@ in
 
   config = mkIf cfg.enable {
     # One container literal: per-instance token mounts + the
-    # `services.gitea-actions-runner` map. Single use of the dynamic key
+    # `services.forgejo-runner` map. Single use of the dynamic key
     # `${cfg.containerName}` (Nix forbids two path-assignments that share a
     # dynamic prefix inside the same literal).
     containers.${cfg.containerName} = {
@@ -99,24 +102,43 @@ in
         (iname: i:
           nameValuePair "runner-token-${iname}" {
             mountPoint = "/var/secrets/runner/${iname}/token";
-            hostPath = i.tokenFile;
+            # `toString`: bindMounts.hostPath is string-typed; tokenFile may be
+            # a path literal (tests) or a string (real sops/agenix paths).
+            # Coerce robustly — identity for strings.
+            hostPath = toString i.tokenFile;
             isReadOnly = true;
           })
         enabledInstances);
 
       config = { lib, ... }: {
-      services.gitea-actions-runner = {
+      # forgejo-runner-<name> is a DynamicUser unit whose user is NSS-visible
+      # under the unit's own name (nss-systemd). Dynamic users are NOT in the
+      # `users` group, so the base config's `@users` entry does not cover
+      # them — list each instance's user explicitly, or host-mode jobs lose
+      # trusted-client status (no substituters, no `nix copy --to` for direct
+      # deploy).
+      nix.settings.trusted-users = mapAttrsToList
+        (iname: _: "forgejo-runner-${iname}")
+        enabledInstances;
+
+      services.forgejo-runner = {
         package = cfg.package;
         # One instance per enabled entry; all share forgejoUrl, host packages,
-        # timeouts and log level. Each gets its own token mount + registration.
+        # timeouts and log level. Each instance is its own registration:
+        # connection `default` carries the shared URL + the per-instance uuid,
+        # and the bare runner token is read at service start from the
+        # read-only bind mount via the upstream module's secrets templating
+        # (token_url → systemd LoadCredential). The runner name is fixed in
+        # Forgejo at registration time and is not configured here.
         instances = mapAttrs (iname: i: {
           enable = true;
-          name = i.name;
-          url = cfg.forgejoUrl;
-          tokenFile = "/var/secrets/runner/${iname}/token";
-          labels = i.labels;
           settings = {
+            server.connections.default = {
+              url = cfg.forgejoUrl;
+              uuid = i.uuid;
+            };
             runner = {
+              labels = i.labels;
               timeout = cfg.runnerTimeout;
               shutdown_timeout = cfg.runnerTimeout;
               # Export SSH users + bot identity to every job step (act_runner
@@ -138,6 +160,8 @@ in
               job_level = cfg.logLevel;
             };
           };
+          secrets.server.connections.default.token_url =
+            "/var/secrets/runner/${iname}/token";
           hostPackages = cfg.hostPackages;
         }) enabledInstances;
       };

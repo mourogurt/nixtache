@@ -160,11 +160,11 @@ in
         # gpg is needed by the deploy action to sign SHA256SUMS at stage time.
         environment.systemPackages = [ pkgs.gnupg ];
 
-        # Expose the signing key to every gitea-runner-* service (same pattern
+        # Expose the signing key to every forgejo-runner-* service (same pattern
         # as the deploy keys in deploy.nix). The action imports it into a
         # throwaway GNUPGHOME, signs, and discards.
         systemd.services = mapAttrs' (iname: _:
-          nameValuePair "gitea-runner-${iname}" {
+          nameValuePair "forgejo-runner-${iname}" {
             serviceConfig.LoadCredential = mkIf (cfg.signingKeyFile != null) [
               "sysupdate_signing_key:${toString cfg.signingKeyFile}"
             ];
