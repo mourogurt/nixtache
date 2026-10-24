@@ -65,7 +65,7 @@ pkgs.testers.runNixOSTest {
           domain = "localhost";
           port = 5000;
         };
-        instances.default.tokenFile = toString /dev/null;
+        instances.default = { uuid = "00000000-0000-4000-8000-000000000000"; tokenFile = toString /dev/null; };
         secrets.cachePrivateKey = toString /dev/null;
         # Relocated store: lives at /srv/nix (bind from host /srv/bincache).
         store.path = "/srv";

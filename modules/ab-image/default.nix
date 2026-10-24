@@ -439,6 +439,7 @@ in
     };
 
     image.repart = {
+      enable = true;
       name = cfg.imageId;
       split = true;
       # "max disk" mode: build the image at a fixed total size; root then fills

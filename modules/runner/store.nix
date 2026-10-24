@@ -373,7 +373,7 @@ in
                   #     /nix/store/.links (see ab-image).
                   ${lib.getExe' pkgs.coreutils "mkdir"} -p /run/nix-clone-state
                   ${lib.getExe' pkgs.coreutils "cp"} -a /nix/var/nix/db /run/nix-clone-state/db
-                  ${lib.getExe' pkgs.coreutils "echo"} "clone seed: scratch DB holds $(${lib.getExe' pkgs.nix "nix-store"} --store 'local?root=/&state=/run/nix-clone-state&read-only=true' --extra-experimental-features read-only-local-store -q --valid-paths | ${lib.getExe' pkgs.coreutils "wc"} -l) valid paths"
+                  ${lib.getExe' pkgs.coreutils "echo"} "clone seed: scratch DB holds $(${lib.getExe' pkgs.nix "nix"} --extra-experimental-features 'nix-command read-only-local-store' path-info --all --store 'local?root=/&state=/run/nix-clone-state&read-only=true' | ${lib.getExe' pkgs.coreutils "wc"} -l) valid paths"
                 ''}
                 ${lib.getExe' pkgs.coreutils "echo"} "Starting nix copy loop as root..."
                 # tee: progress (and any recurring failure) lands in the unit

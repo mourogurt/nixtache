@@ -81,7 +81,7 @@ let
       enable = true;
       forgejoUrl = "http://localhost:3000";
       cache.enable = false;
-      instances.default.tokenFile = toString /dev/null;
+      instances.default = { uuid = "00000000-0000-4000-8000-000000000000"; tokenFile = toString /dev/null; };
       secrets.cachePrivateKey = toString /dev/null;
       store.path = "/srv";
       enableSandbox = false;
