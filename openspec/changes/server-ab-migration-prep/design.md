@@ -43,8 +43,11 @@ Current coverage boundaries established by the audit (see proposal.md):
 **Non-Goals:**
 
 - No provisioning of root/ESP: `ab-provision` stays store-slots-only.
-- No module redesign planned; fixes land only if a new suite exposes a real
-  bug, as tasks in this change with the specs kept in sync.
+- No overlay-lifecycle redesign here: no-op/rejected wipes, trigger-side
+  preupdate removal, reconcile timing and tmpfs stale-DB handling belong to
+  `wipe-on-cutover`.
+- No runner-store lifecycle policy beyond proving the existing clone/overlay
+  swap contracts.
 - The consumer-side server walkthrough (nixos-configuration) is a separate
   change in that repo; here we land the generic contract it follows.
 - The post-switch in-test pull flakiness of `ab-ota-migrate-vm` is not
@@ -115,15 +118,11 @@ performs once per machine.
 
 ### D3 — R4 un-skip as `tests/runner-store-swap-vm` with clone/overlay variants
 
-**STATUS: blocked by the `lower-store-db` change.** Implementing the suite
-on a real appliance surfaced a deeper prerequisite than the R4 skip note
-recorded: the lower (slot) store ships no nix DB at all, so the runner
-container's store is broken in BOTH modes (clone seeds by enumerating the
-host DB → empty; overlay's `lower-store=daemon` self-references when no
-system daemon can exist). The fix is to ship a build-time lower-store DB in
-the appliance image — scoped as its own change (`lower-store-db`); this
-group resumes after it. Already landed here: the host-side nspawn bind-path
-guarantee (`modules/runner/store.nix` tmpfiles), pinned by tests/runner.nix.
+The `lower-store-db` work supplies the prerequisite validity records for both
+runner modes. The remaining work here is verification and documentation:
+finish the real-appliance suite, prove both modes in the full matrix, and keep
+the host-side nspawn bind-path guarantee (`modules/runner/store.nix` tmpfiles)
+pinned by `tests/runner.nix`.
 
 A real-appliance suite in the `overlay-nix-ab-swap-vm` style: `mkAppliance`
 embedding the runner container closure, boot v1, run a trivial CI build
@@ -133,13 +132,18 @@ build works post-swap) and `"overlay"` (assert the merged view is coherent).
 
 ### D4 — Data-pool suite doubles as the OverlayFS-on-ZFS pin
 
-New `tests/ab-data-pool-vm.nix`: appliance with a second virtio disk carrying
-a ZFS pool (mirroring `srv-root`): import on v1, write state + run a mock
-service reading it, swap to v2, assert pool imports and state reads;
-rollback leg asserts v1 still imports the pool (no `zpool upgrade` — version
-drift between slots must not wedge the data). A second leg puts the
-overlay-nix `upperDir`/`workDir` on the pool and asserts the merged store
-works pre/post swap.
+`tests/ab-data-pool-vm.nix` uses an appliance with a second virtio disk
+carrying a ZFS pool (mirroring `srv-root`): import on v1, write state and run a
+mock service reading it; swap to v2 and assert pool imports and state reads;
+rollback asserts v1 still imports the pool without `zpool upgrade`. These
+assertions are independent of the overlay upper policy.
+
+The overlay leg puts `upperDir`/`workDir` on the pool and explicitly selects
+`upperOnUpdate = "reconcile"` with a substituter retaining the old closure.
+It asserts mount ordering and a repaired, working upper after the swap. A
+separate control uses the default `"wipe"` policy and expects upper content to
+be cleared, so the suite cannot accidentally turn a policy violation into a
+false persistence proof.
 
 Research basis for expecting the leg green (openzfs/zfs#8648 → #9414):
 OverlayFS needs `d_type`, `renameat2` whiteout/exchange flags and no
@@ -160,13 +164,10 @@ without the evidence.
 ### D5 — Replay leg folds into the existing reconcile variant, not a new suite
 
 `overlay-nix-ota-invalid-vm` gains a pre-swap `nix profile install` of the
-mock tool (needs a profile-installable package — a trivial flake-less
-`nix profile install --file` expression or a profile built from a store path;
-chosen at implementation to stay hermetic and RAM-cheap, per the suite's
-existing rationale for preferring `realize`). The reconcile variant then
-asserts the recorded profile target is replayed post-swap. The
-`none`/`wipe` variants gain the corresponding negative assertions (profile
-broken after swap / profile gone after wipe).
+mock tool (a hermetic, RAM-cheap profile-installable package). The reconcile
+variant asserts the recorded profile target is replayed post-swap; the wipe
+variant asserts the profile is gone after the lifecycle action. Trigger and
+cutover semantics themselves are owned by `wipe-on-cutover`.
 
 ### D6 — Documentation lands inline in `ota.md`, two-phase flip included
 
@@ -178,7 +179,87 @@ without `ab-image` so the live system keeps nix/switch and provisions slots;
 phase 2: import `ab-image` so CI builds the sysupdate-package), and the
 staging-window note (between a staged image and the gated apply, an
 unrelated reboot cuts over — calver UKIs outrank legacy entries by version
-sort). `testing.md` gains the new suite rows. README map unchanged.
+sort). Phase 1 explicitly enables `deploy-target.ab` and boot counting, then
+starts `nixtache-ab-provision.service` or reboots before phase 2. `testing.md`
+gains the new suite rows. README map unchanged.
+
+### D7 — Slot sizes are absolute at evaluation time
+
+`ab-image.storeSize` and `deploy-target.ab.partitions.slotSize` use the same
+absolute-size grammar and reject `%` during evaluation. The image build always
+uses the configured value directly: the `hasSuffix "%" → "2G"` fallback and
+the assertion bypass for percentages are deleted. The provision script keeps
+only its absolute-size-to-bytes path; co-imported modules must agree on the
+same absolute size.
+
+This is intentionally breaking for percentage configurations. The upgrade note
+tells consumers to choose an explicit size from their capacity plan. Absolute
+sizes restore deterministic partition layouts and make the build/runtime
+equality assertion meaningful; actual free space remains a runtime check, but
+its required byte count is known.
+
+Remove the percentage-only coverage and fixtures rather than preserving the
+old behavior: `ab-ota-e2e-percent`, the S4 leg in `ab-provision-vm`, their
+matrix entries and percent-specific branches in `ab-ota-e2e.nix`. Replace them
+with pure-eval rejection and absolute-mismatch assertions, and remove percent
+examples from maintained docs and suite inventories.
+
+### D8 — Auto-update acts on completed sysupdate results
+
+Change the A/B poll to `systemctl start --wait systemd-sysupdate.service`
+before reading the journal and setting `installed` or the deferred-reboot
+marker. Keep the idle-gated runner-host path unchanged.
+
+For `start < end`, the reboot-window predicate is `now >= start && now < end`;
+for `start >= end`, it is `now >= start || now < end`. Cover the exact start,
+exact end, before/after, cross-midnight and persistent-catch-up cases with a
+cheap scripted test using a controlled clock and a recorded reboot stub, not
+only string-presence assertions.
+
+### D9 — Post-rollback recovery preserves the running slot
+
+Do not prescribe bare `systemd-sysupdate vacuum` for a fully installed
+boot-failed version: vacuum handles partial instances and does not select the
+failed complete version for the operator. Add an explicit recovery path that
+enumerates the installed/running versions, refuses ambiguous or running-slot
+deletion, removes only the operator-selected failed version, and restores a
+valid inactive-slot state. Prefer a sysupdate-supported removal operation if
+the pinned version provides one; otherwise own the small cleanup script and
+its partition/ESP handling in `deploy-target`.
+
+Extend `ab-ota-rollback-vm` beyond the current stable-rollback assertion:
+recover, stage a fixed higher version, and prove the next update writes only
+the inactive slot and boots it. Document the same procedure in `ota.md`; the
+current hazard warning remains until that procedure is implemented.
+
+### D10 — Test inventories describe executable current contracts
+
+Update `ab-contract` to the two-value `upperOnUpdate` enum and current
+lower-DB/overlay behavior, remove graceful-degradation/missing-module branches,
+then register it in `checks` and the self-CI report loop. Update the data-pool
+suite according to D4 so it distinguishes pool persistence from upper policy.
+Test headers and comments describe current behavior rather than expected-red
+history.
+
+CA-dependent and KVM suites run in the existing CI runners; local verification
+for this change uses static OpenSpec validation and cheap non-CA checks so it
+does not duplicate CI's content-addressed world rebuild or consume local disk.
+
+### D11 — Host retain-GC uses the same credential contract as CI
+
+The current host `nixtache-ab-gc.service` reads `signingKeyFile` directly even
+though runner jobs receive `sysupdate_signing_key` through `LoadCredential`.
+Give the host unit its own conditional `LoadCredential` entry and replace the
+script's embedded source path with
+`$CREDENTIALS_DIRECTORY/sysupdate_signing_key`. Keep GPG import and detached
+signature verification behavior unchanged; `signingKeyFile = null` still
+provisions no credential and removes stale signatures.
+
+A configured but unreadable source now fails credential setup before GC runs
+rather than silently leaving an unsigned/stale manifest. Pure-eval assertions
+pin both host and container credential wiring and the absence of the original
+path from the GC script; `ab-staging-vm` proves the generated signature still
+verifies. `module-ci-wiring.md` documents the host and job consumers together.
 
 ## Risks / Trade-offs
 
@@ -201,13 +282,16 @@ sort). `testing.md` gains the new suite rows. README map unchanged.
 
 ## Migration Plan
 
-Additive tests + docs only; no consumer action required. Consumers already
-on the OTA route are unaffected; consumers planning route 2 gain the
-contract documentation.
+Most changes are additive fixes, tests and docs. Consumers using percentage
+`storeSize`/`slotSize` values must replace them with an explicit absolute size
+before upgrading; evaluation rejects the old values with that instruction.
+Consumers using absolute sizes keep their layout. The OTA guide gains the
+percentage-removal note and the tested post-rollback recovery procedure once
+D9 lands.
 
 ## Open Questions
 
-(none — both audit unknowns resolved: the UKI `root=fstab` mechanism makes
-the `fileSystems` override leg viable (D1 Leg C), and OverlayFS-on-ZFS is
-supported upstream since OpenZFS 2.2 while the pinned nixpkgs ships 2.3/2.4,
-so D4 pins empirically what research already expects (D4).)
+- D9 implementation detail: confirm whether the pinned systemd-sysupdate
+  exposes a safe complete-instance removal operation. If it does not, use the
+  module-owned cleanup script described there; the safety contract and VM
+  scenario do not depend on that choice.

@@ -48,9 +48,8 @@ consumer-overridden `fileSystems` devices baked into the image's initrd).
   `default`/`preferred` written by NixOS's systemd-boot installer), and the
   machine reboots
 - **THEN** the pre-migration entry boots — the staged UKI is not selected;
-  cutover requires the documented one-time arming step (pointing the
-  `loader.conf` default at the image's UKI pattern) before or with the first
-  apply
+  cutover requires the documented one-time arming step (removing the
+  live-era `default`/`preferred` lines) before or with the first apply
 
 #### Scenario: Once armed, the newest image is selected
 
@@ -63,6 +62,36 @@ consumer-overridden `fileSystems` devices baked into the image's initrd).
   without blessing, the sorted-first good entry (the previous blessed UKI,
   else the legacy generation) boots instead — subsequent updates flow
   without further ESP edits
+
+### Requirement: A failed new boot rolls back to the previous slot
+
+When a new image exhausts its boot attempts before boot-completion, the
+bootloader MUST fall back to the previous blessed entry and MUST NOT select
+the failed image again automatically. Because update-instance selection is
+version-driven, recovery from rollback MUST remove the failed version while
+preserving the running oldest slot before another update (see the OTA guide).
+
+#### Scenario: Broken image exhausts its tries
+
+- **WHEN** an update installs an image whose boot never reaches
+  boot-complete.target and the boot-counting tries are exhausted
+- **THEN** the machine boots the previous blessed entry (the running
+  system is the pre-update version), and the failed entry carries no
+  remaining tries
+
+#### Scenario: Rollback leaves a stable, update-aware machine
+
+- **WHEN** the rollback described above happens
+- **THEN** the previous version's slot content is intact, the machine is
+  stable on it, and the update machinery remains functional (update
+  listing works; the timer is active)
+
+#### Scenario: Recovery permits a safe subsequent update
+
+- **WHEN** the failed version is removed while preserving the running oldest
+  slot and a newer fixed image is staged
+- **THEN** the next update writes only an inactive slot and never overwrites
+  the running slot, after which the fixed image can boot and be blessed
 
 ## ADDED Requirements
 
@@ -93,7 +122,61 @@ OverlayFS uppers (ZFS ≥ 2.2).
 #### Scenario: Overlay upper on the pool
 
 - **WHEN** an overlay-nix upper layer is placed on a dataset of such a pool
-  (ZFS ≥ 2.2)
+  (ZFS ≥ 2.2) with `upperOnUpdate = "reconcile"` and a substituter retaining
+  the old closure
 - **THEN** the merged store mounts after the pool import, runtime installs
-  work before the swap, and after the swap the overlay remounts over the
-  new lower with the upper layer intact
+  work before the swap, and after the swap the overlay remounts over the new
+  lower and reconciles the preserved upper back to a working state
+
+### Requirement: Slot sizes are absolute and deterministic
+
+`services.nixtache.ab-image.storeSize` and
+`services.nixtache.deploy-target.ab.partitions.slotSize` MUST accept only
+absolute sizes, so one configuration produces the same slot sizes on every
+machine. Percentage values MUST fail evaluation with an actionable message;
+the image build MUST NOT substitute a fallback size. When both modules are
+enabled, their absolute sizes MUST match.
+
+#### Scenario: Percentage slot size is rejected
+
+- **WHEN** either size option is set to a percentage such as `"25%"`
+- **THEN** evaluation fails and asks for an explicit absolute size instead of
+  resolving it against whichever disk happens to be attached
+
+#### Scenario: Co-imported image and provision sizes agree
+
+- **WHEN** both modules are enabled with different explicit absolute sizes
+- **THEN** evaluation fails with a size-mismatch error; equal absolute values
+  produce identical image and provision sizes
+
+#### Scenario: Low-space remedy uses the deterministic size
+
+- **WHEN** provisioning lacks space for two absolute-size slots
+- **THEN** the error includes reducing `slotSize` among the remedies alongside
+  freeing space, adding a disk and manual provisioning
+
+### Requirement: Timer-driven OTA observes completed installs and correct reboot windows
+
+The A/B auto-update poll MUST wait for `systemd-sysupdate.service` to finish
+before deciding whether an image installed. Reboot markers and reboot actions
+MUST be based on that completed result. A non-cross-midnight reboot window is
+start-inclusive and end-exclusive; a cross-midnight window wraps over midnight,
+including for persistent timer catch-up.
+
+#### Scenario: Reboot decision waits for installation
+
+- **WHEN** sysupdate is still writing an image while the poll starts it
+- **THEN** the poll waits for completion before setting `installed` or a pending
+  reboot marker, and a no-op result does not trigger either one
+
+#### Scenario: Non-midnight window bounds
+
+- **WHEN** a reboot is pending for a `02:00`–`05:00` window
+- **THEN** times before 02:00 and at/after 05:00 do not reboot, while 02:00 and
+  times inside the window do
+
+#### Scenario: Cross-midnight window bounds
+
+- **WHEN** a reboot is pending for a `23:00`–`02:00` window
+- **THEN** 23:00 through 23:59 and 00:00 through 01:59 are inside the window,
+  while 02:00 and later daytime times are outside

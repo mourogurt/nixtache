@@ -33,3 +33,30 @@ store database on an appliance (whose host has nix disabled).
 - **THEN** the container's store services come up without a host nix-daemon
   unit and without bind-mounts of the host store database/socket that would
   break the container's custom daemon
+
+### Requirement: A/B signing key is consumed through credentials
+
+When `runner.deploy.ab.signingKeyFile` is configured, both the in-container
+runner services and the host `nixtache-ab-gc.service` SHALL receive the key as
+`sysupdate_signing_key` through systemd `LoadCredential`. Their scripts SHALL
+read it from `$CREDENTIALS_DIRECTORY`, not from the original host path.
+
+#### Scenario: Host retain-GC signs through its credential
+
+- **WHEN** the host retain-GC regenerates a staging manifest with a signing key
+  configured
+- **THEN** the unit has `LoadCredential = sysupdate_signing_key:<signingKeyFile>`
+  and GPG imports `$CREDENTIALS_DIRECTORY/sysupdate_signing_key`, producing a
+  verifiable signature without reading the original path in the script
+
+#### Scenario: Deploy action uses the same credential contract
+
+- **WHEN** a deploy job signs a staging manifest
+- **THEN** its runner service exposes the same credential name and the action
+  imports it from its job credentials directory
+
+#### Scenario: No signing key leaves no credential
+
+- **WHEN** `signingKeyFile = null`
+- **THEN** neither service receives the signing credential and retain-GC removes
+  stale detached signatures rather than presenting them as current

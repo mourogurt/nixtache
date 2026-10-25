@@ -4,30 +4,28 @@
 
 ### Requirement: Upper lifecycle across OTA updates is configurable
 
-The module MUST offer an explicit lifecycle policy for the upper layer
-across OTA updates (option `upperOnUpdate`): `"none"` (no lifecycle action),
-`"wipe"`, and `"reconcile"`. Lifecycle actions MUST run at cutover — the
-first boot into a slot whose image version differs from the version recorded
-on the persistent root — and MUST NOT run on the update trigger: update
-attempts that install nothing (rejected or tampered manifests, no newer
-staged version, timer polls) and plain reboots on the same slot MUST leave
-the upper layer and its database entries untouched.
+The module MUST offer `upperOnUpdate = "wipe"` (default) or `"reconcile"`.
+Lifecycle actions MUST run at cutover — the first boot into a slot whose
+image version differs from the lifecycle marker — and MUST NOT run on the
+update trigger. Rejected/absent updates and same-version persistent-upper
+reboots leave the upper untouched. An absent marker records a baseline
+without wiping existing installs.
 
-#### Scenario: Default policy preserves current behaviour
+#### Scenario: Default policy wipes the upper layer
 
-- **WHEN** the option is not set and an OTA swap happens
-- **THEN** no lifecycle action runs: upper-layer content and database
-  entries are carried across the swap unchanged (the coherence hazard above
-  remains the operator's concern)
+- **WHEN** the option is not set and the machine boots into a slot whose image
+  version differs from the lifecycle marker
+- **THEN** the default `"wipe"` policy clears the upper layer and its state
+  before the lower DB is reseeded and the overlay mounts
 
 #### Scenario: Wipe clears the upper layer at update cutover
 
 - **WHEN** `upperOnUpdate = "wipe"` and the machine boots into a slot whose
   image version differs from the recorded one
 - **THEN** the upper layer, its work dir and the overlay store state are
-  cleared early in that boot (before the overlay mounts and the nix daemon
-  starts), and the overlay comes up over the new lower with a functional
-  merged store (new lower paths visible, nix usable, no stale upper content)
+  cleared before the lower-DB loader reseeds the current slot and before the
+  overlay mounts; the merged store comes up functional with no stale upper
+  content
 
 #### Scenario: A rejected or absent update does not wipe
 
@@ -39,20 +37,19 @@ the upper layer and its database entries untouched.
   links remain exactly as they were, and the machine keeps running the
   current slot
 
-#### Scenario: A plain reboot keeps the upper
+#### Scenario: A plain reboot keeps a persistent upper
 
-- **WHEN** `upperOnUpdate = "wipe"` and the machine reboots without a slot
-  swap (same image version)
-- **THEN** the lifecycle action does not run and upper-layer content
-  persists as on any reboot
+- **WHEN** `upperOnUpdate = "wipe"`, the upper is on persistent storage, and
+  the machine reboots without a slot swap (same image version)
+- **THEN** the lifecycle action does not run and upper-layer content persists
 
 #### Scenario: Rollback boot re-applies the policy
 
 - **WHEN** the machine rolls back to the previously blessed slot after a
   cutover already ran the lifecycle action
-- **THEN** the rollback boot detects the version mismatch again: wipe is a
-  no-op on the already-clean upper; reconcile re-heals against the
-  now-current (older) lower
+- **THEN** the rollback boot detects the version mismatch again: wipe clears
+  any upper content accumulated since the previous cutover, while reconcile
+  re-heals against the now-current (older) lower
 
 #### Scenario: Reconcile heals dangling references from the substituter
 
@@ -71,8 +68,9 @@ the upper layer and its database entries untouched.
   re-fetched (substituter unreachable or lacks the path)
 - **THEN** the reconcile unit completes the boot sequence unaffected and
   reports the unrepaired paths (failing status with a journal record naming
-  them), the version marker is not written (the pass retries on the next
-  boot or a manual restart), and no unrelated upper content is deleted
+  them), the lifecycle marker is not written (the pass retries on the next
+  boot or a manual restart), the lower-DB marker cannot consume that retry,
+  and no unrelated upper content is deleted
 
 #### Scenario: Recorded installables are replayed after the swap
 
@@ -81,3 +79,11 @@ the upper layer and its database entries untouched.
   whose entire closure was invalidated by the swap
 - **THEN** the reconcile pass re-installs the recorded installables after
   the repair step, so the recorded user-facing tools are runnable again
+
+#### Scenario: Tmpfs upper reboots without stale validity records
+
+- **WHEN** the upper resides on tmpfs and the machine reboots, with or without
+  an image-version change
+- **THEN** stale upper-owned Nix state is removed before the lower-DB loader
+  reseeds the running slot's records, the overlay mounts clean, and no stale
+  validity record remains for files lost with the tmpfs upper
