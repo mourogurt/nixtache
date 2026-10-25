@@ -75,8 +75,15 @@ in
       # every `nix build` / `nix flake check` fails with "this system does not
       # support the kernel namespaces that are required for sandboxing". Any
       # consumer-supplied additionalCapabilities are merged on top.
+      #
+      # CAP_IPC_LOCK is granted unconditionally: nspawn drops it by default,
+      # and package test suites that lock secure memory (libgcrypt's
+      # t-secmem/t-sexp, gnupg's secmem) then fail with a bare "General
+      # error" from mlock(2). A CI runner building the world will hit these;
+      # the capability only lifts RLIMIT_MEMLOCK, it widens no other
+      # privilege, and the container remains the isolation boundary.
       additionalCapabilities =
-        cfg.additionalCapabilities ++ optional cfg.enableSandbox "CAP_SYS_ADMIN";
+        cfg.additionalCapabilities ++ optional cfg.enableSandbox "CAP_SYS_ADMIN" ++ [ "CAP_IPC_LOCK" ];
 
       config = { config, lib, pkgs, ... }:
         {

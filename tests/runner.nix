@@ -129,6 +129,10 @@ self.nixosModules.runner
       # (the container stays unprivileged; sandbox is off). The sandbox-ON path
       # is covered by scenarioSandboxOn.
       noSandboxCap = !(lib.elem "CAP_SYS_ADMIN" hostSrv.config.containers."runner".additionalCapabilities);
+      # CAP_IPC_LOCK is granted even with sandbox off: builds run either way,
+      # and secmem-locking test suites (libgcrypt t-secmem/t-sexp, gnupg)
+      # fail on mlock(2) EPERM without it (nspawn drops it by default).
+      hasIpcLock = lib.elem "CAP_IPC_LOCK" hostSrv.config.containers."runner".additionalCapabilities;
     };
   };
 
