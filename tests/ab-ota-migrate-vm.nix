@@ -24,10 +24,8 @@ let
   # The OTA payload: a real appliance image (version 2 > the provisioned
   # baseline label nix-store_1, so sysupdate targets the _empty slot).
   # Signature verification is deliberately OFF here: this suite pins the
-  # MIGRATION mechanics (provision, idempotency, first install, fallback),
-  # while the Verify=yes surface belongs to ab-ota-verify-vm — and pulling
-  # a signed manifest is currently broken pre-existing on this nixpkgs
-  # (see the known-red note in doc/technical_details/testing.md).
+  # migration mechanics (provision, idempotency, first install, fallback),
+  # while the Verify=yes surface belongs to ab-ota-verify-vm.
   v2Appliance = fixture.mkAppliance {
     version = "2";
     signVerify = false;

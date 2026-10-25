@@ -99,15 +99,11 @@ nothing was installed rather than failing.
 
 ### Requirement: A failed new boot rolls back to the previous slot
 
-When a freshly installed image fails to reach a healthy boot (its UKI
-exhausts the configured boot attempts without reaching boot-completion),
-the bootloader MUST fall back to the previously blessed boot entry, and the
-failed image MUST NOT be selected again automatically (its tries counter
-reaches zero). Known limitation, documented for operators: update-instance
-selection is version-driven, so after a rollback the RUNNING slot is the
-oldest instance and a straight higher-version update would target it —
-recovery from a rolled-back state requires removing the failed instances
-first (see the OTA guide).
+When a new image exhausts its boot attempts before boot-completion, the
+bootloader MUST fall back to the previous blessed entry and MUST NOT select
+the failed image again automatically. Because update-instance selection is
+version-driven, recovery from rollback MUST remove the failed version while
+preserving the running oldest slot before another update (see the OTA guide).
 
 #### Scenario: Broken image exhausts its tries
 

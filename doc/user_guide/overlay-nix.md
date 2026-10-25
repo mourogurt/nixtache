@@ -41,18 +41,12 @@ upstream-intended overlay design ("world A"):
   only in the OLD lower genuinely break (missing interpreter/library) and
   their DB entries dangle — `upperOnUpdate` below exists exactly for this.
 
-(History: nixtache appliances once ran without a shipped DB — realize
-downloaded full closures and the upper survived swaps only by accident of
-closure completeness. The test suites of that era built world A by hand
-(seeding the DB in the fixture); since the image ships the DB they pin the
-shipped reality instead, with no manual seeding.)
-
 ## Upper-layer persistence
 
 | `upperDir` on | Plain reboot | OTA swap (default `"wipe"`) |
 |---|---|---|
 | persistent root FS | installs survive | upper cleared by the policy; `"reconcile"` heals + replays instead |
-| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same policy behaviour (pinned by `ab-data-pool-vm`) |
+| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same policy behaviour |
 | tmpfs | installs wiped (by design) | nothing to preserve — overlay remounts clean |
 
 The upper layer may live on a ZFS dataset (e.g. a data pool with more space
@@ -83,17 +77,17 @@ An update replaces the lower store; pick a policy for the upper layer:
   pass retries on the next boot (or a manual
   `systemctl start nixtache-overlay-reconcile`).
 
-  `reconcile` requires a substituter that still serves the OLD references —
-  keep the runner cache retaining previous closures (the staging GC already
-  keeps the last two sysupdate packages; extend retention if you rely on
-  repair).
+  `reconcile` requires a substituter that still serves the OLD references.
+  `services.nixtache.runner.deploy.ab.retain` keeps five staged image versions
+  by default, but that is separate from NAR retention: configure the binary
+  cache and its store GC to retain the old closures needed for repair.
 
 There is no carry-over value: with the shipped lower DB a carried upper
-deterministically dangles after a swap. `"none"` was removed — a
-configuration that sets it explicitly fails evaluation with the enum naming
-the two valid values; a configuration that never set the option moves to
-`"wipe"` (its upper is cleared at the next update). To keep ad-hoc installs
-across updates, choose `"reconcile"` with a substituter configured.
+deterministically dangles after a swap. **Upgrade note:** a configuration that
+still sets `"none"` fails evaluation with the enum naming the two valid
+values; a configuration that never set the option uses `"wipe"` (its upper is
+cleared at the next update). To keep ad-hoc installs across updates, choose
+`"reconcile"` with a substituter configured.
 
 ## Garbage collection
 

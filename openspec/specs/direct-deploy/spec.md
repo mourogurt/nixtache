@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Дельта-требования к direct-deploy (карта целей → action/workflow → apply-юнит → ab-image/OTA → auto-update): багфиксы контракта, обнаруженные аудитом спек `doc/archive/specs/0001-direct-deploy.md` и `doc/archive/specs/direct-deploy/*` против кода, и доводка поведения до заявленных спек 01–09.
+Требования к direct-deploy: карта целей → action/workflow → live apply или ab-image/OTA → auto-update. Охватывает dry-activation, rollback, защиту от нехватки дискового пространства и изоляцию ошибок отдельных целей.
 
 ## Requirements
 
 ### Requirement: Полная сериализация карты целей в env
 
-Runner-модуль MUST сериализовать в `NIXTACHE_DEPLOY_TARGETS` все поля, которые читает action `deploy-target`: помимо `{name, host, sshUser, sshPort, method, system, tags, timeout, hasKey}` — также `enable` и `extraOptions`. Отсутствие ключа в JSON MUST интерпретироваться action'ом как значение по умолчанию, а не как «выключено»: фильтр `enable` срабатывает только при явном `"enable": false`.
+Runner-модуль MUST сериализовать в `NIXTACHE_DEPLOY_TARGETS` поля `{name, enable, host, sshUser, sshPort, method, system, tags, timeout, extraOptions, minFreeBytes, hasKey}`, не раскрывая пути к секретам. Отсутствие ключа в JSON MUST интерпретироваться action'ом как значение по умолчанию, а не как «выключено»: фильтр `enable` срабатывает только при явном `"enable": false`.
 
 #### Scenario: Таргет с enable=true деплоится через env, сгенерированный модулем
 
@@ -36,7 +36,7 @@ Runner-модуль MUST сериализовать в `NIXTACHE_DEPLOY_TARGETS`
 
 ### Requirement: Удалённые ab-таргеты перезагружаются после обновления
 
-Для таргетов, деплоемых по `method = "ab-image"` через SSH (не local-self), конфигурация `systemd.sysupdate` MUST устанавливать `RebootEnable = yes` на transfer'ах; для local-self (деплоер на самом хосте) — `RebootEnable = no` (cutover по idle-gating, без самоубийства джобы).
+Для таргетов, деплоемых по `method = "ab-image"` через SSH (не local-self), action MUST дождаться завершения `systemd-sysupdate.service` (`systemctl start --wait`) и затем запустить `systemd-sysupdate-reboot.service`. Первая unit выполняет только fetch/install, вторая перезагружает машину лишь при уже установленной более новой версии. Для local-self та же последовательность запускается через idle-gated `nixtache-ab-apply`, чтобы не прервать CI-джобу.
 
 #### Scenario: Удалённый таргет активирует новый слот
 
@@ -54,11 +54,11 @@ Runner-модуль MUST сериализовать в `NIXTACHE_DEPLOY_TARGETS`
 
 ### Requirement: Флаг gating-юнита поглощается только при успехе
 
-`nixtache-ab-apply.service` MUST удалять флаг-файл `ab-pending` только после успешного `systemctl start systemd-sysupdate.service`. При падении старта sysupdate флаг MUST оставаться, чтобы следующее срабатывание path-юнита повторило попытку.
+`nixtache-ab-apply.service` MUST удалять флаг-файл `ab-pending` только после успешного `systemctl start --wait systemd-sysupdate.service`. При падении sysupdate флаг MUST оставаться, чтобы следующее срабатывание path-юнита повторило попытку.
 
 #### Scenario: Неудачный старт sysupdate не теряет сигнал
 
-- **WHEN** gating-юнит не смог запустить `systemd-sysupdate.service` (например, юнит замаскирован)
+- **WHEN** gating-юнит не смог выполнить `systemctl start --wait systemd-sysupdate.service` (например, юнит замаскирован или sysupdate завершился ошибкой)
 - **THEN** `ab-pending` сохраняется и попытка повторяется при следующем срабатывании path-триггера
 
 ### Requirement: Конфликт размеров слотов останавливает обновления
@@ -90,16 +90,16 @@ Action `deploy-target` MUST ограничивать build+copy+активаци
 
 ### Requirement: Предупреждение о выключенном boot counting
 
-Приёмный модуль `deploy-target` MUST выдавать eval-предупреждение, когда `criticalUnits` непуст, а `boot.loader.systemd-boot.bootCounting.enable` не включён (Tier-0 без bootCounting не даёт отката generation).
+На systemd-boot-таргетах приёмный модуль `deploy-target` MUST выдавать eval-предупреждение, когда `criticalUnits` непуст, а `boot.loader.systemd-boot.bootCounting.enable` не включён (Tier-0 без bootCounting не даёт отката generation).
 
 #### Scenario: Конфиг с probe-юнитами без bootCounting предупреждает
 
-- **WHEN** таргет задаёт `criticalUnits = [ ... ]` и не включает bootCounting
+- **WHEN** systemd-boot-таргет задаёт `criticalUnits = [ ... ]` и не включает bootCounting
 - **THEN** при eval конфигурации выводится предупреждение, связывающее оба факта
 
 ### Requirement: Ассерты auto-update для OTA-таргетов
 
-Модуль `auto-update` MUST ассертить (спека 09 §7): A4 — при OTA-пути (`method = "auto"` с ab-таргетом, либо явный `method = "ab-image"`) конфигурация таргета содержит разрешаемый источник образов (`deploy-target.ab-image.enable` или `deploy-target.ab.partitions.source`); A8 — при явном `method = "ab-image"` на таргете отсутствует и ab-image, и ab-provision, и `systemd.sysupdate` — eval падает с понятным сообщением.
+Модуль `auto-update` MUST ассертировать источник и наличие OTA-окружения: при OTA-пути (`method = "auto"` с ab-таргетом либо явный `method = "ab-image"`) источник MUST быть разрешим через `services.nixtache.ab-image.enable`, `deploy-target.ab.partitions` с заданным `source` или consumer-owned sysupdate transfer с `Source.Path`. При явном `method = "ab-image"` без ab-image, ab-provision и `systemd.sysupdate` eval MUST завершаться с понятным сообщением.
 
 #### Scenario: Явный ab-image без OTA-модулей падает на eval
 
@@ -108,7 +108,7 @@ Action `deploy-target` MUST ограничивать build+copy+активаци
 
 #### Scenario: ab-путь без источника образов падает на eval
 
-- **WHEN** auto-update выбран ab-путь (auto-детект или явно), но ни `ab-image.enable`, ни `ab.partitions.source` не определены
+- **WHEN** auto-update выбран ab-путь, но `ab-image.enable` и `ab.partitions.source` не заданы и ни один consumer-owned sysupdate transfer не содержит `Source.Path`
 - **THEN** eval завершается ошибкой с сообщением о неразрешимом источнике образов
 
 ### Requirement: Сериализация deploy-воркфлоу
@@ -122,7 +122,7 @@ Action `deploy-target` MUST ограничивать build+copy+активаци
 
 ### Requirement: Dry-activate выполняется root-юнитом
 
-Режим `dry-activate` (PR-предпросмотр, дифф без мутации) MUST реализовываться той же V2-механикой, что и `switch`, — без `nixos-rebuild` и без sudo: action копирует closure (`nix copy --to`), пишет pointer в `/var/lib/nixtache/pending-dry` и триггерит polkit'ом root-юнит `nixtache-apply-dry.service`, который выполняет `<closure>/bin/switch-to-configuration dry-activate` и удаляет pointer. На цели MUST происходить ровно ноль мутаций: профиль системы, pointer-файлы активации и `/run/current-system` не изменяются.
+Режим `dry-activate` MUST копировать closure, записывать `/var/lib/nixtache/pending-dry` и запускать через polkit root-юнит `nixtache-apply-dry.service`, который выполняет `switch-to-configuration dry-activate` и удаляет pointer — без `nixos-rebuild` и sudo. Профиль системы, `pending-system` и `/run/current-system` MUST NOT изменяться.
 
 #### Scenario: PR-ран показывает дифф и не мутирует цель
 
@@ -141,25 +141,12 @@ Action `deploy-target` MUST ограничивать build+copy+активаци
 
 ### Requirement: Pre-copy target disk-space check
 
-The live deploy path SHALL query the target's free space on the store
-filesystem through the deploy SSH channel and refuse the deployment before
-any closure data is pushed when the target cannot hold it. The check is
-two-stage, driven by the per-target preset
-`services.nixtache.runner.deploy.targets.<name>.minFreeBytes` (default
-5 GiB, serialized into `NIXTACHE_DEPLOY_TARGETS`):
-
-1. **Pre-build**: free space below the preset fails the target immediately
-   (no build, no copy).
-2. **Post-build**: the deployment need is estimated as the narSize sum of
-   the closure paths missing on the target × 1.1 + preset (conservative
-   fallback when the remote store inventory fails: full closure size × 1.1
-   + preset); free space below the need fails the target before `nix copy`.
-
-A preset of `0` SHALL disable the pre-copy check entirely (no free-space
-query is issued). Refusals SHALL be actionable errors naming the target,
-available space, and required space — and SHALL NOT trigger
-`nixtache-apply.service`. Per-target failures SHALL NOT abort the loop over
-the remaining targets; the job SHALL fail at the end if any target errored.
+The live deploy path SHALL check store free space through the deploy SSH
+channel before building and again before copying, using the per-target
+`minFreeBytes` preset (default 5 GiB; `0` disables the check). It SHALL refuse
+an undersized target before `nix copy` with an actionable error and without
+triggering apply. Other targets SHALL continue; the job SHALL fail at the end
+if any target errored.
 
 #### Scenario: Nearly-full target fails before the build
 
@@ -169,8 +156,9 @@ the remaining targets; the job SHALL fail at the end if any target errored.
 
 #### Scenario: Full-disk target fails before the copy
 
-- **WHEN** the deploy action targets a machine whose store filesystem has
-  less free space than the deployment requires
+- **WHEN** free space is below the post-build estimate: narSize of missing
+  closure paths × 1.1 + preset (falling back to the full closure size when
+  the remote inventory query fails)
 - **THEN** the target's deploy step exits with a disk-space error naming
   target, available and required bytes; no `nix copy` of the closure runs
   and `nixtache-apply.service` is not triggered
@@ -179,7 +167,7 @@ the remaining targets; the job SHALL fail at the end if any target errored.
 
 - **WHEN** the target's free space is sufficient for the deployment
 - **THEN** the pre-copy check passes without side effects and the deploy
-  continues (copy, pointer, apply trigger) as before
+  continues through copy, pointer handoff and the apply trigger
 
 #### Scenario: One bad target does not starve the matrix
 
@@ -232,8 +220,8 @@ value of `0` SHALL disable the guard.
 #### Scenario: Guard is inert on a healthy target
 
 - **WHEN** free space is at or above `minFreeBytes`
-- **THEN** activation proceeds (profile set, switch, criticalUnits probe)
-  exactly as before the guard existed
+- **THEN** activation proceeds through profile set, switch and the
+  criticalUnits probe without a disk-space refusal
 
 #### Scenario: Guard disabled
 

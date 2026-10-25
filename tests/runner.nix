@@ -852,11 +852,10 @@ self.nixosModules.runner
   };
 
   # --- scenario: daemon lifecycle + nix-serve scheduling --------------------
-  # KillMode=mixed: per-connection daemon workers must not outlive the unit
-  # (KillMode=process leaked them — chronic "remains running" records).
-  # nix-serve gets a mild CPU/IO edge over the (default-scheduled) CI units.
+  # Daemon workers must not outlive their unit; nix-serve gets a mild CPU/IO
+  # edge over the default-scheduled CI units.
   scenarioCacheBackendLifecycle = {
-    name = "nix-daemon-custom KillMode=mixed (no leaked workers); nix-serve scheduling edge";
+    name = "nix-daemon-custom workers stop with the unit; nix-serve scheduling edge";
     checks = {
       daemonKillMode = svcSrv."nix-daemon-custom".serviceConfig.KillMode == "mixed";
       nixServeNice = svcSrv."nix-serve".serviceConfig.Nice == -5;

@@ -29,9 +29,9 @@ hashes are. Three consumer surfaces break on such a store:
   cannot know that most of that closure already ships in the image, so it
   downloads everything into the upper layer (no delta installs).
 
-The fix: the image build ships the closure's validity records (path,
-narHash, narSize, deriver, references per store path) as a dump on the ESP,
-and a boot-time loader seeds `/nix/var/nix/db` from it. The rest of this
+The image therefore ships the closure's validity records (path, narHash,
+narSize, deriver, references per store path) as a dump on the ESP, and a
+boot-time loader seeds `/nix/var/nix/db` from it. The rest of this
 document covers the internals: how the dump is generated, how the store is
 imaged, and why the runtime workarounds exist.
 
@@ -40,15 +40,13 @@ imaged, and why the runtime workarounds exist.
 The dump (`modules/ab-image/lower-store-db.nix`) is the toplevel closure's
 REGISTERED validity records: `pkgs.closureInfo`'s `registration` output
 (path, base16 narHash, narSize, deriver, references per path), one
-derivation per toplevel. Trusting the daemon's DB records is justified
-exactly one way — the evaluation is content-addressed, which the module
-asserts (`nixpkgs.config.contentAddressedByDefault`; see below). An interim
-implementation re-hashed every path's shipped bytes in python
-(`nix-store --dump` per path); it was retired when the fleet moved to CA
-(see git history) — two failure modes motivated it, and CA resolves only
-the first:
+derivation per toplevel. Trusting the daemon's DB records requires a
+content-addressed evaluation, which the module asserts
+(`nixpkgs.config.contentAddressedByDefault`; see below). Content addressing
+resolves the record/content divergence below, while faithful imaging handles
+the independent symlink constraint:
 
-1. **Per-host realisations (resolved by CA).** An input-addressed store path
+1. **Per-host realisations (why CA is required).** An input-addressed store path
    legitimately has *different realisations* on different hosts
    (substitution churn, older realisations accumulated in a long-lived CI
    store). The daemon's DB records what *that* host believes; `repart
@@ -60,16 +58,15 @@ the first:
    the content hash — a build computes content→path, substitution verifies
    content against the narinfo — so the DB cannot lie about content.
 
-2. **repart resolves top-level symlink copy sources (imaging behaviour —
-   fixed by faithful imaging, works for any store).** The image builder
+2. **repart resolves top-level symlink copy sources (why faithful imaging is
+   required for any store).** The image builder
    (systemd-repart, pinned 261.x) populates a partition from `CopyFiles=`
    lines, and it opens every copy source through path resolution that
    follows symlinks: a source that IS a symlink to a directory ships as
    that directory's content. nixpkgs' `image.repart` `storePaths` option
    emits one `CopyFiles=` line per closure path — so a closure path that is
    itself a symlink shipped as its target's content, contradicting its
-   database record. The original incident (the runner's clone seed dying in
-   an infinite retry on the real appliance):
+   database record. The resulting clone-seed failure has this form:
 
    ```
    error: hash mismatch importing path '/nix/store/…-nix-2.34.8-man';
@@ -164,9 +161,8 @@ The three workarounds, each mapped to the behaviour that forces it:
   feature skips the remount attempt, and the `.links` entry shipped in the
   image satisfies the directory init.
 
-These were re-verified against nix master in October 2026 — the
-unconditional directory creation is still there, so none of the
-workarounds can be dropped yet; re-check on every nix bump.
+Nix's unconditional directory creation makes all three workarounds necessary;
+re-check these constraints when changing Nix versions.
 
 ## Alternatives considered
 

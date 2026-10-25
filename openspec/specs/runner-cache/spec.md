@@ -31,7 +31,7 @@ proxy-pass behaviour.
 
 - **WHEN** the consumer disables the caching layer via the module option
 - **THEN** the cache virtual host contains no `proxy_cache` directives and
-  proxies every request to nix-serve as before
+  proxies every request to nix-serve
 
 ### Requirement: Stale-serving across backend failure
 
@@ -49,7 +49,7 @@ nix-serve upstream is down or failing (connection refused/reset, timeout,
 
 - **WHEN** a client requests a NAR that has never been cached while the
   upstream is down
-- **THEN** the request fails as before (the edge cache cannot invent content)
+- **THEN** the request fails (the edge cache cannot invent content)
 
 ### Requirement: Negative-answer freshness for narinfo
 

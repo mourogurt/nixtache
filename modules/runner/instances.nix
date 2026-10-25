@@ -78,14 +78,14 @@ in
     instances = mkOption {
       type = types.attrsOf typesT.instanceType;
       description = ''
-        Runner instances to start inside the container. Each becomes a
-        `forgejo-runner-<name>` service and needs its own Forgejo registration
-        (`uuid` + `tokenFile` with the bare runner token). Example:
+        Runner instances to start inside the container. Each enabled instance
+        becomes a `forgejo-runner-<name>` service and needs its own Forgejo
+        registration (`uuid` + `tokenFile` with the bare runner token). Example:
 
         ```
         instances = {
           default = { uuid = "c9e50be9-..."; tokenFile = config.sops.secrets.runner-token-default.path; };
-          test    = { uuid = "1c3a3b5b-..."; labels = [ "nixos:test" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
+          test    = { uuid = "1c3a3b5b-..."; labels = [ "test:host" ]; tokenFile = config.sops.secrets.runner-token-test.path; };
         };
         ```
       '';

@@ -2,19 +2,18 @@
 
 ## Purpose
 
-Documenting the implemented surface of the nixtache flake: user-facing docs
-(README/AGENTS), the generated option reference, CI reports, and keeping
-this spec corpus in sync with the code.
+Documenting the implemented surface of the nixtache flake: the README
+overview, consumer guide, contributor documentation and contract, generated
+option reference, CI reports, and this spec corpus.
 
 ## Requirements
 
 ### Requirement: Generated option reference covers all modules
 
 `packages.optionsMarkdown`/`optionsJSON`/`optionsHTML` MUST be generated
-from an eval that includes ALL nixtache modules (the whole
-`services.nixtache.*` prefix: runner, deploy-target, ab-image, auto-update —
-options of overlay-nix/store outside the prefix are pinned explicitly), in
-strict mode (a missing description fails the docs build).
+from an eval that includes ALL nixtache modules under `services.nixtache.*`:
+runner, deploy-target, ab-image, overlay-nix, auto-update and secrets. Strict
+mode MUST make a missing description fail the docs build.
 
 #### Scenario: The reference contains deploy-target options
 
@@ -26,28 +25,22 @@ strict mode (a missing description fails the docs build).
 ### Requirement: CI log shows every test suite
 
 `ci.yml` MUST print the reports (ok/FAIL tables) of every `checks.<system>`
-suite that `nix flake check` builds — not only runner; file headers MUST NOT
-claim "intentionally red" / "the module does not exist" for modules that have
-already landed.
+suite that `nix flake check` builds — not only runner. Test headers MUST
+describe current behavior and MUST NOT claim intentional failure or missing
+modules for implemented functionality.
 
 #### Scenario: Each suite's report is visible in the log
 
 - **WHEN** the CI job finishes
-- **THEN** the log contains separate report blocks for the runner,
-  deploy-target, ab-image, ab-existing, ab-contract, auto-update and mkDocs
-  suites
+- **THEN** the log contains a separate report block for every suite registered
+  in `checks.<system>`
 
 ### Requirement: Consumer migration plan
 
-The repository MUST NOT maintain a standalone migration document. Current
-upgrade guidance lives inline in the user guide where the feature is
-documented: the `system.autoUpgrade` → auto-update walkthrough in the
-auto-update guide, the protocol-drift rollout order (module first, then
-action, with the `sshGate = "restrict"` transition hatch) in the deploy
-guide. Historical BREAKING-change records (the `finalize-direct-deploy`
-table and its upgrade order) are frozen history and MUST live under
-`doc/archive/`. No live document may link to a `migration.md` that no
-longer exists.
+The repository MUST NOT maintain a standalone migration document. Actionable
+upgrade guidance MUST live inline in the relevant user-guide pages; historical
+BREAKING-change records MUST remain under `doc/archive/`. Live documents and
+runtime messages MUST NOT link to the retired `doc/user_guide/migration.md`.
 
 #### Scenario: A consumer can upgrade by following the document
 
@@ -68,22 +61,13 @@ longer exists.
 
 ### Requirement: Three-layer documentation structure
 
-Repository documentation MUST consist of three layers with distinct
-audiences: `README.md` (overview entry point), `doc/user_guide/`
-(consumer-facing functional docs: onboarding, direct deploy, OTA (A/B
-updates), the overlay store, auto-update, secrets, docs generation) and
-`doc/technical_details/` (contributor-facing technical docs: module
-layout, sandbox internals, module→CI wiring, testing, reusable-workflow
-mechanics). The canonical requirement corpus is `openspec/specs/`
-(capabilities); it is not a doc layer. Invariant: every fact MUST live in
-exactly one file; every other location links to it instead of copying it.
-`doc/user_guide/` and `doc/technical_details/` MUST link to the relevant
-openspec specs (`openspec/specs/<capability>/spec.md`); archived legacy
-specs (`doc/archive/`) MAY be linked additionally as historical context.
-Repository-infrastructure constraints (sha1) MUST NOT be duplicated in
-project docs — their canonical home is outside the repository (the
-workspace AGENTS). The README repository map MUST link every module to its
-user-guide page (no linkless module rows).
+Documentation MUST use three layers: README overview, consumer
+`doc/user_guide/`, and contributor `doc/technical_details/`. `openspec/specs/`
+is the canonical requirement corpus, not a doc layer. Every fact MUST have one
+canonical file; other locations link instead of copying. Feature docs MUST
+link relevant specs, archives are historical supplements only, and the README
+map MUST link every module. Workspace-infrastructure constraints MUST NOT be
+duplicated here.
 
 #### Scenario: Reader reaches a detail in two hops
 
@@ -106,7 +90,7 @@ user-guide page (no linkless module rows).
   overlay store
 - **THEN** dedicated `doc/user_guide/ota.md` and
   `doc/user_guide/overlay-nix.md` pages exist, the README module map links
-  to them, and both link the `ab-ota` / `overlay-nix` openspec
+  to them, and both link the `ab-ota` and `overlay-nix` openspec
   capabilities as their canonical requirements
 
 ### Requirement: README is an overview entry point
@@ -186,13 +170,10 @@ never reads secret files at evaluation time. This makes the README claim
 
 ### Requirement: Documentation is written in English
 
-All documentation, specs and change artifacts of this repository MUST be
-written in English: README, `doc/**`, AGENTS.md, openspec specs and change
-artifacts. Russian is acceptable only in frozen historical material — the
-archived legacy corpus under `doc/archive/` — and, until a dedicated
-translation sweep, in the not-yet-translated openspec specs
-(`direct-deploy`, `deploy-user`). The rule MUST be recorded in AGENTS.md
-and in `openspec/config.yaml` (`context` + per-artifact `rules`).
+Maintained documentation, specs and change artifacts MUST be written in
+English. Russian is allowed only in frozen `doc/archive/` material and the
+not-yet-translated `direct-deploy` / `deploy-user` specs. The rule MUST be
+recorded in AGENTS.md and `openspec/config.yaml`.
 
 #### Scenario: New docs are English
 
@@ -206,19 +187,11 @@ and in `openspec/config.yaml` (`context` + per-artifact `rules`).
 
 ### Requirement: AGENTS.md is a contributor contract reflecting reality
 
-AGENTS.md MUST reflect the current state: the complete list of
-modules/workflows/actions, the correct `enableSandbox = false` default in
-every mention, the sandbox-probe/SANDBOX_OK description, and no claims like
-"deploy is not implemented" / "checks = runner only". Internal
-contradictions (a sandbox default in a table vs a snippet) are not
-acceptable. AGENTS.md MUST be a contributor contract, not consumer
-documentation: consumer content and contract examples duplicating
-`doc/user_guide/` are not allowed (links instead of copies); historical or
-superseded sketches are not allowed (their place is `doc/archive/drafts/`).
-AGENTS.md MUST contain an openspec section describing how specs and changes
-are organized in this repository, and MUST state the rules "mandatory
-documentation task in every change", "self-documenting code comments" and
-"documentation is written in English".
+AGENTS.md MUST be a current contributor contract: list modules, link the
+README workflow/action inventories, state `enableSandbox = false` and the
+`SANDBOX_OK` probe, and describe the OpenSpec layout and rules for documentation
+tasks, self-contained comments, English and current-behavior docs. Stale status,
+consumer-guide duplication and superseded sketches MUST NOT appear there.
 
 #### Scenario: AGENTS.md contains no stale facts
 
@@ -233,18 +206,15 @@ documentation task in every change", "self-documenting code comments" and
 #### Scenario: AGENTS.md has an openspec section
 
 - **WHEN** a contributor opens AGENTS.md
-- **THEN** they find the openspec layout for this repo (canonical specs, changes, archive), the statement that `openspec/specs/` is the canonical requirement corpus replacing the archived `doc/archive/` legacy, and the three rules: documentation task per change, self-documenting comments, English as the working language
+- **THEN** they find the openspec layout for this repo (canonical specs, changes, archive), the statement that `openspec/specs/` is the canonical requirement corpus replacing the archived `doc/archive/` legacy, and the rules for documentation tasks on functional changes, self-documenting comments, English, and current-behavior documentation
 
 ### Requirement: Canonical spec corpus lives in openspec
 
-`openspec/specs/` is the canonical, maintained requirement corpus: its
-capabilities reflect the implemented behaviour of the flake, and changes to
-functional surfaces update them through openspec changes. The legacy spec
-corpus and the drafts are historical: they MUST live
-under `doc/archive/{specs,drafts}/` (frozen content, not kept in sync) with
-an explicit freeze note pointing to `openspec/specs/`. The unimplemented
-drafts 0002 (transitive cache) and 0003 (smart GC) keep their
-"not implemented, awaiting decision" status notes in the archive.
+`openspec/specs/` MUST be the canonical, maintained requirement corpus;
+functional changes update it through OpenSpec changes. Legacy specs and drafts
+MUST remain frozen under `doc/archive/{specs,drafts}/`, with a freeze note
+pointing to the canonical corpus. Unimplemented drafts 0002 and 0003 MUST keep
+their "not implemented, awaiting decision" status notes.
 
 #### Scenario: Capability inventory reflects reality
 

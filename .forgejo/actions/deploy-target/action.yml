@@ -99,7 +99,7 @@ runs:
             avail=$(ssh $ssh_opts "$user@$host" "df -B1 --output=avail /nix/store" 2>/dev/null | tail -n1 | tr -d ' ')
             case "$avail" in
               ""|*[!0-9]*)
-                echo "::warning::$cfg: target $host rejected the free-space query — its gate predates this action (protocol drift). Skipped. Transition hatch: set services.nixtache.deploy-target.deployUser.sshGate = \"restrict\" on the target until both sides carry the new protocol (see doc/user_guide/migration.md)."
+                echo "::warning::$cfg: target $host rejected the free-space query — its gate predates this action (protocol drift). Skipped. Transition hatch: set services.nixtache.deploy-target.deployUser.sshGate = \"restrict\" on the target until both sides carry the new protocol (see doc/user_guide/deploy.md#protocol-drift-rollout-order in nixtache)."
                 return 2 ;;
             esac
             if [ "$avail" -lt "$preset" ]; then
@@ -219,7 +219,7 @@ runs:
           img=$(nix build --no-link --print-out-paths ${SANDBOX_FLAG:-} .#nixosConfigurations.$cfg.config.system.build.sysupdate-package 2>&1)
           img=$(grep -E '^/nix/store/' <<<"$img" | tail -n1)
           if [ -z "$img" ] || [ ! -d "$img" ]; then
-            echo "::error::$cfg: sysupdate-package build failed (no store path, or the config has no system.build.sysupdate-package — wire the consumer A/B prep, see doc/archive/specs/direct-deploy/06-ab-image.md)"; return 1
+            echo "::error::$cfg: sysupdate-package build failed (no store path, or the config has no system.build.sysupdate-package — wire the consumer A/B prep, see doc/user_guide/ota.md in nixtache)"; return 1
           fi
 
           echo "→ $cfg: staging image files into $stage (version $version)"

@@ -108,21 +108,27 @@ migration contract: [`ab-ota-migrate-vm`](../technical_details/testing.md)
 migrated disk).
 
 ```nix
-services.nixtache.deploy-target.ab.partitions = {
+services.nixtache.deploy-target.ab = {
   enable = true;
-  autoInit = true;
-  slotSize = "2G";                      # absolute, or "10%" of the disk
-  imageId = "myhost";
-  source = "https://runner.example.com/ab-stage/myhost/";
-  slot_a = { type = "partition"; storage = "/dev/nvme0n1"; };  # labels default
-  slot_b = { type = "partition"; storage = "/dev/nvme0n1"; };
-  publicKeyFile = ./keys/ab-pubring.pgp;   # → Transfer.Verify=yes
+  partitions = {
+    enable = true;
+    autoInit = true;
+    slotSize = "2G";                      # absolute, or "10%" of the disk
+    imageId = "myhost";
+    source = "https://runner.example.com/ab-stage/myhost/";
+    slot_a = { type = "partition"; storage = "/dev/nvme0n1"; };  # labels default
+    slot_b = { type = "partition"; storage = "/dev/nvme0n1"; };
+    publicKeyFile = ./keys/ab-pubring.pgp;   # → Transfer.Verify=yes
+  };
 };
+boot.loader.systemd-boot.bootCounting.enable = true;
 ```
 
 `onSizeMismatch` governs existing slots of the wrong size: `"error"` stops
-updates (sysupdate masked) until you fix `slotSize` and unmask;
-`"wipe"` recreates both slots.
+updates (sysupdate masked) until you fix `slotSize` and unmask. `"wipe"`
+recreates both slots only when no `protectedLabels` entry is present (the
+default protects `root`, `esp` and `boot`). It destroys the active slot too,
+so a new image must be deployed before rebooting.
 
 #### The migrated-disk contract
 
@@ -148,7 +154,10 @@ sticks):
 
    If the identifiers don't match, the OTA boot times out waiting for the
    root device, boot counting exhausts the new entry, and the machine boots
-   the live generation again — safe, but the update never lands.
+   the live generation again — safe, but the update never lands. After fixing
+   the identifiers, re-arm the exhausted UKI: its boot counter is encoded in
+   the filename, so rename the `+0-*` entry back to `+3.efi` when
+   `ukiTries = 3` (or the corresponding suffix for a different setting).
 
 2. **Arming the boot selection.** NixOS's systemd-boot installer pins
    `default nixos-*` in `loader/loader.conf` on the ESP (plus `preferred`
@@ -168,13 +177,15 @@ sticks):
    with both enabled.
 
 Do the flip in two phases: first deploy the config with
-`deploy-target.ab.partitions` but WITHOUT `ab-image` (the running system
-keeps nix/`switch` and provisions the slots), then import `ab-image` so CI
-builds the sysupdate-package. Importing `ab-image` in phase 1 would strip
-the live system of nix and `switch-to-configuration` before the first OTA
-boot. The deploy-map entry flips to `method = "ab-image"` with phase 2 —
-a live deploy against an already-booted appliance fails loudly (no nix, no
-switch), so keep the map entry on `"live"` until the cutover is armed.
+`deploy-target.ab.enable` and `deploy-target.ab.partitions` but WITHOUT
+`ab-image` (the running system keeps nix/`switch`). After that live switch,
+start `nixtache-ab-provision.service` explicitly or reboot so the new wanted
+unit runs, and verify both slots exist. Then import `ab-image` so CI builds
+the sysupdate-package. Importing `ab-image` in phase 1 would strip the live
+system of nix and `switch-to-configuration` before the first OTA boot. The
+deploy-map entry flips to `method = "ab-image"` with phase 2 — a live deploy
+against an already-booted appliance fails loudly (no nix, no switch), so keep
+the map entry on `"live"` until the cutover is armed.
 
 ### 3. The runner host itself → gated self-update
 
@@ -194,8 +205,12 @@ services.nixtache.runner.deploy.targets.myhost = {
   sshPrivateKey = config.sops.secrets.deploy-myhost.path;
   method = "ab-image";
 };
-services.nixtache.runner.deploy.ab.signingKeyFile =
-  config.sops.secrets.ab-signing-key.path;   # matches the target's pubring
+services.nixtache.runner.cache.enable = true;  # staging reuses the cache vhost
+services.nixtache.runner.deploy.ab = {
+  enable = true;
+  runnerHost = "bincache.example.com";
+  signingKeyFile = config.sops.secrets.ab-signing-key.path;  # matches the target's pubring
+};
 ```
 
 The workflow wrapper is the same thin `uses:` as the live path
@@ -208,7 +223,7 @@ write; the runner host cutover is idle-gated.
 | scenario | behaviour |
 |---|---|
 | healthy update | inactive slot written → reboot → boot counting blesses |
-| new boot broken | tries exhaust (default 3) → previous blessed entry boots; the machine stays stable and update-aware (Tier-0). ⚠ from a rolled-back state the running slot is the OLDEST instance — a straight higher-version update targets it (version-driven selection); remove the failed instances (`systemd-sysupdate vacuum`) before updating |
+| new boot broken | tries exhaust (default 3) → previous blessed entry boots; the machine stays stable and update-aware (Tier-0). ⚠ From a rolled-back state the running slot is the OLDEST instance, so a straight higher-version update can target it (version-driven selection). Remove the failed version while preserving the running slot before updating; `systemd-sysupdate vacuum` removes partial instances but does not selectively identify a fully installed boot-failed version |
 | same version staged | no-op: nothing written, trigger green |
 | interrupted update | the active slot is never the write target; the half-written slot never boots; re-install is refused until `systemd-sysupdate vacuum` removes the partial instance, then the next update rewrites the slot |
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |

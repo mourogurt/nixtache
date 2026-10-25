@@ -3,7 +3,8 @@
 How the runner container's resource limits work and how to diagnose a killed
 CI build. Source of truth: `modules/runner/default.nix`. Consumer-facing
 sizing guidance lives in [`doc/user_guide/quickstart.md`](../user_guide/quickstart.md);
-this page owns the internals and the debugging decision tree.
+this page owns the internals and the debugging decision tree. Requirements:
+[`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
 
 ## Where the limits live
 
@@ -29,36 +30,35 @@ payload is charged to the unit's own cgroup:
 Unset knobs emit **no directive** — host-wide systemd policy
 (`DefaultCPUWeight`, admin drop-ins) is not shadowed by the module.
 
-## Who killed the build: signal 9 decision tree
+## Who killed the build: signal 9 evidence tree
 
-`builder failed due to signal 9` means *something* SIGKILLed the builder. Work
-the tree top to bottom — each step is cheap and decisive:
+`builder failed due to signal 9` means *something* SIGKILLed the builder. No
+single check is decisive; correlate evidence around the failure time:
 
-1. **Container cgroup OOM** (build hit `memoryMax`):
-   `cat /sys/fs/cgroup/machine.slice/container@<name>.service/memory.events` —
-   non-zero `oom_kill` or `max` is a yes. `memory.peak` shows how far it got.
-   Counters reset when the container restarts.
-2. **Global kernel OOM** (host exhausted): kernel messages NEVER contain the
-   substring "oom" — search
-   `journalctl -k | grep -iE "out of memory|killed process"`.
-   `dmesg` is a wrapping ring buffer; the journal is authoritative.
-3. **systemd-oomd** — userspace killer, leaves nothing in dmesg. NixOS runs it
-   by default, but it acts only on slices with `ManagedOOMMemoryPressure=kill`
-   (`systemctl show <slice> -p ManagedOOMMemoryPressure`; default: none). It
-   exists **both on the host and inside the container** (the container is a
-   full NixOS): check `journalctl -u systemd-oomd` on the host and
-   `journalctl -m --machine <name> -u systemd-oomd` for the container.
-4. **CI-side cancellation** — the least obvious and, with clean logs, the most
-   likely. A Forgejo server restart (e.g. host auto-update switching
-   generations at night) or a job timeout makes the runner SIGTERM the job;
-   Nix's SIGTERM handler kills its builder with SIGKILL, so the *client*
-   lives long enough to print "builder failed due to signal 9". Check
-   `journalctl -u forgejo` for a restart at the failure time, the job's
-   duration against `timeout-minutes` (reusable workflows set 4320–4600;
-   a workflow without it inherits the platform default), and
+1. **Memory pressure and cgroup OOM.** Inspect
+   `/sys/fs/cgroup/machine.slice/container@<name>.service/memory.events` and
+   `memory.peak`. A delta in `max` records attempts to exceed the limit, not
+   necessarily a kill; a delta in `oom_kill` records a killed process but can
+   result from either a memcg or global OOM. The counters are cumulative and
+   reset when the container restarts.
+2. **Global kernel OOM.** Search
+   `journalctl -k | grep -iE "oom|out of memory|killed process"` and correlate
+   the killed process and cgroup with the failed build. `dmesg` is a wrapping
+   ring buffer; the persistent journal covers a longer interval when enabled.
+3. **systemd-oomd.** This userspace killer does not normally leave a kernel
+   OOM message. Inspect both `ManagedOOMMemoryPressure` and `ManagedOOMSwap`
+   on the unit, its slice and relevant ancestors; `kill` enables monitoring,
+   while descendants with `auto` can be candidates beneath a monitored
+   ancestor. Check `journalctl -u systemd-oomd` on the host and
+   `journalctl -m --machine <name> -u systemd-oomd` inside the container.
+4. **CI-side cancellation.** A Forgejo server restart or job timeout can make
+   the runner terminate the job; Nix's SIGTERM handler then kills its builder
+   with SIGKILL, so the client can still print "builder failed due to signal
+   9". Check `journalctl -u forgejo`, the job duration against
+   `timeout-minutes`, and
    `journalctl -m --machine <name> -u forgejo-runner-<inst>` for cancellation
-   lines.
+   records around the failure.
 
-Steps 1–3 all leave *some* trace (counters, kernel log, oomd journal). Step 4
-leaves none on the host — a signal 9 with everything clean is a cancellation,
-not a memory problem.
+Missing resource evidence makes cancellation a candidate, not a certainty:
+counters may have reset, logs may have rotated, and different killers leave
+different evidence.

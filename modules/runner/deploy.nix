@@ -63,7 +63,7 @@ in
       `LoadCredential`. Targets with `sshPrivateKey = null` or `enable = false`
       are skipped by the action (optionality by construction).
 
-      See `doc/archive/specs/direct-deploy/01-map-contract.md`.
+      See `doc/user_guide/deploy.md`.
     '';
   };
 

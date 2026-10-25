@@ -22,7 +22,8 @@ services.nixtache.runner.deploy.targets.desktop = {
   sshPrivateKey = config.sops.secrets.deploy-desktop-key.path;
   sshPublicKey  = config.sops.secrets.deploy-desktop-key-pub.path;
   method = "live";                                      # "live" (default) | "ab-image"
-  # sshUser = "nixos-deploy"; sshPort = 22; timeout = 240; tags = [ ... ]; extraOptions = "...";
+  # sshUser = "nixos-deploy"; sshPort = 22; timeout = 240; tags = [ ... ];
+  # extraOptions = [ "--no-substitute-on-target" ];
   # minFreeBytes = 5 * 1024**3;                          # pre-copy disk preset; 0 disables the check
 };
 ```
@@ -35,6 +36,13 @@ jobs via `LoadCredential` (`deploy_ssh_<name>[.pub]`).
 
 ```yaml
 # your .forgejo/workflows/deploy.yml
+name: Deploy
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
 jobs:
   deploy:
     uses: nixops/nixtache/.forgejo/workflows/deploy.yml@main
@@ -61,11 +69,12 @@ services.nixtache.deploy-target = {
 };
 ```
 
-The module provisions a root-owned `nixtache-apply.service` (set profile →
+The module provisions root-owned `nixtache-apply.service` (set profile →
 `switch-to-configuration` → probe `criticalUnits` → re-activate the previous
-closure on failure), polkit rules authorizing the deploy user to **start**
-that one unit, the `nixtache-deploy` group owning the pointer dir, and a
-Tier-0 health check gated on `boot-complete.target`.
+closure on failure) and `nixtache-apply-dry.service`, polkit rules authorizing
+the deploy user to **start** those two units, the `nixtache-deploy` group
+owning the pointer dir, and a Tier-0 health check gated on
+`boot-complete.target`.
 
 ### Disk-space guard
 
@@ -144,8 +153,9 @@ HOME") and
   the apply trigger, the A/B triggers and the read-only free-space query
   (`df -B1 --output=avail /nix/store`, exact match); everything else is
   rejected.
-- It may **start** `nixtache-apply.service` (polkit, start-only) and write
-  the pointer file (`nixtache-deploy` group). No sudo/doas/run0 anywhere.
+- It may **start** `nixtache-apply.service` and
+  `nixtache-apply-dry.service` (polkit, start-only) and write the pointer
+  files (`nixtache-deploy` group). No sudo/doas/run0 anywhere.
 - It is added to `nix.settings.trusted-users` **unconditionally**: `nix copy
   --to ssh://…` pushes locally-built unsigned closures, which the daemon only
   imports for trusted users (nix.conf(5)) — a protocol requirement of the

@@ -80,16 +80,15 @@ the merged view is detected by the store verification command.
 ### Requirement: Upper lifecycle across OTA updates is configurable
 
 The module MUST offer an explicit lifecycle policy for the upper layer
-across OTA updates (option `upperOnUpdate`, working name): `"none"` (the
-default — no lifecycle action, preserving current behaviour), `"wipe"`, and
-`"reconcile"`.
+across OTA updates through `upperOnUpdate`: `"wipe"` (the default) or
+`"reconcile"`. Other values MUST be rejected at evaluation time.
 
-#### Scenario: Default policy preserves current behaviour
+#### Scenario: Default policy wipes the upper layer
 
-- **WHEN** the option is not set and an OTA swap happens
-- **THEN** no lifecycle action runs: upper-layer content and database
-  entries are carried across the swap unchanged (the coherence hazard above
-  remains the operator's concern)
+- **WHEN** the option is not set and an OTA update is triggered
+- **THEN** the upper layer and its database entries are cleared before the
+  inactive slot is written, and the overlay starts over the new lower without
+  stale upper content
 
 #### Scenario: Wipe clears the upper layer at update cutover
 

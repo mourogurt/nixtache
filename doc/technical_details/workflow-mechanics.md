@@ -29,25 +29,25 @@ caller) and `<name>-1` (the actual work). Expected, not a bug.
 
 Jobs that touch git over SSH pass `ssh-setup` a runtime-derived host list
 instead of a hardcoded hostname: the **push host** from
-`NIXTACHE_GIT_SSH_HOST` (fallback for runners not yet rebuilt with that
-env: the bare `GITHUB_SERVER_URL` hostname — an HTTP endpoint, its port
-stripped) plus every `ssh://`/`git+ssh://` host in the checked-out
-`flake.lock` (`locked.url` entries; `git+`/`ssh://` scheme and `user@`
-stripped, `:port` kept), deduplicated. `flake.lock` is the authoritative
-record of the hosts nix will contact — including aliases of the same git
-server — and ssh offers the loaded keys only to hosts with a `Host` block.
-`ssh-setup` writes one `Host` block per listed host; the update-key guard
-and the push always target the push host (the first entry). Consumers must
-list every contacted hostname in `gitHost.hostNames` for known_hosts (see
-[module-ci-wiring.md](module-ci-wiring.md)).
+`NIXTACHE_GIT_SSH_HOST` (falling back to the bare `GITHUB_SERVER_URL`
+hostname when that env is unavailable — an HTTP endpoint, its port stripped)
+plus every `ssh://`/`git+ssh://` host in the checked-out `flake.lock`
+(`locked.url` entries; `git+`/`ssh://` scheme and `user@` stripped, `:port`
+kept), deduplicated. `flake.lock` is the authoritative record of the hosts nix
+will contact — including aliases of the same git server — and ssh offers the
+loaded keys only to hosts with a `Host` block. `ssh-setup` writes one `Host`
+block per listed host; the update-key guard and the push always target the
+push host (the first entry). Every contacted hostname must have a matching key
+in the effective known-hosts configuration (`gitHost` or `extraKnownHosts`;
+see [module-ci-wiring.md](module-ci-wiring.md)).
 
 ## Inventory
 
 | Workflow | Purpose | Notable mechanics |
 |---|---|---|
-| `nix-check.yml` | flake validation + rebuild all `nixosConfigurations` + devShells | `ssh-setup` (creds: `flake`) with the [derived host list](#ssh-host-derivation) for private inputs; `sandbox-probe` before builds |
-| `deploy.yml` | direct deploy to targets | `concurrency: deploy-<ref>`, never auto-cancelled; mode derived from the branch inside the action (PR → dry-activate, main → switch); pre-copy disk-space gate on every target + workspace-pinned `UserKnownHostsFile` (no HOME dependency) — canonical requirements: [`openspec/specs/direct-deploy/spec.md`](../../openspec/specs/direct-deploy/spec.md) |
-| `docs.yml` | build + upload doc artifacts | `inputs.attributes` (default `docs`), `inputs.artifact-name`; `sandbox-probe` before `generate-docs` |
+| `nix-check.yml` | flake validation + rebuild all `nixosConfigurations` + `x86_64-linux` devShells | `ssh-setup` (creds: `flake`) with the [derived host list](#ssh-host-derivation) for private inputs; `sandbox-probe` before builds |
+| `deploy.yml` | direct deploy to targets | `concurrency: deploy-<ref>`, never auto-cancelled; mode derived from the branch inside the action (PR → dry-activate, main → switch); pre-copy disk-space gate on `live` targets with nonzero `minFreeBytes` + workspace-pinned `UserKnownHostsFile` (no HOME dependency) — canonical requirements: [`openspec/specs/direct-deploy/spec.md`](../../openspec/specs/direct-deploy/spec.md) |
+| `docs.yml` | build + upload doc artifacts | `workflow_call` inputs `attributes` (default `docs`) and `artifact-name`; manual dispatch exposes only `attributes`; `sandbox-probe` before `generate-docs` |
 | `update-flake.yml` | `nix flake update --commit-lock-file`, validate, push signed bot commit | guard step self-disables when `NIXTACHE_UPDATE_GIT_USER` is absent (`updateSshCreds = null`), otherwise probes the update key with `git ls-remote` before the pipeline (semantics: [module-ci-wiring.md](module-ci-wiring.md)); `ssh-setup` wires both `flake` and `update` bundles into one SSH config with the [derived host list](#ssh-host-derivation); the update step greps its log for fetch errors nix downgrades to warnings and fails on them; `sandbox-probe` before builds (same `SANDBOX_OK` self-heal as `nix-check.yml`); `flake update` + `flake check` output teed into `artifacts/` (`flake-update.log`, `flake-check.log`) for the always-run upload; **the `schedule` trigger must live in the caller's wrapper** — a schedule here would update nixtache's own flake, not the caller's — canonical requirements: [`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md) |
 | `ci.yml` (self-CI, not reusable) | validate nixtache itself | runs on the dedicated `test` runner label; `sandbox-probe` first, before the `flake-validation` build; prints every `checks.*` suite report; generates the `nixtache-options` artifact |
 | `vmtests.yml` (self-CI, not reusable) | run the KVM-only `vmTests` inventory | manual dispatch (full/smoke) + nightly-smoke/weekly-full schedules on the `kvm` label; `sandbox-probe` once per matrix job, the suite `nix build` applies the `SANDBOX_OK`-derived flag (see [sandboxing.md](sandboxing.md)); runner prerequisites: [testing.md](testing.md) |

@@ -402,7 +402,7 @@ in
         This is the runtime counterpart to `modules/ab-image` (build-time): the
         image is built with `image.repart`, but `systemd-sysupdate` on the
         target can only WRITE an already-existing slot — it cannot CREATE one.
-        See doc/archive/specs/direct-deploy/08-ab-provisioning.md.
+        See `doc/user_guide/ota.md`.
       '';
     };
 
@@ -567,15 +567,15 @@ in
   };
 
   config = mkIf (cfg.enable && ab.enable && partitions.enable) {
-    # `systemd-sysupdate update --reboot` (the remote A/B trigger) reads
-    # IMAGE_VERSION from os-release to assess the booted version; a host
+    # The remote A/B update/reboot sequence reads IMAGE_VERSION from
+    # os-release to assess the booted version; a host
     # without it makes that trigger exit 1 silently. nixpkgs defaults the
     # version to "0" — warn so the omission is visible at eval time.
     warnings = lib.optionals (config.system.image.version == "0") [
       ''
         services.nixtache.deploy-target.ab.partitions: system.image.version
-        is unset — the remote reboot trigger (`systemd-sysupdate update
-        --reboot`) reads IMAGE_VERSION from os-release and fails without it.
+        is unset — the remote update/reboot sequence reads IMAGE_VERSION from
+        os-release and fails without it.
         Set system.image.version (and system.image.id) on this host.
       ''
     ];

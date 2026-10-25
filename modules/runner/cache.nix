@@ -54,14 +54,13 @@ in
           description = ''
             Whether the nginx virtual host caches nix-serve responses.
             NARs are immutable, so the edge cache absorbs backend restarts
-            (deploy switches) and slow on-the-fly dumps under IO pressure:
-            concurrent fetches of the same NAR are coalesced into one
-            upstream request, and previously cached content is served stale
-            when the upstream errors or times out. Disable to restore plain
-            proxying. The zone lives at `/var/cache/nginx/nixtache-bincache`
-            (fixed by the nixpkgs nginx module) — the host root filesystem,
-            deliberately not the cache store's disk, so hot NAR reads stop
-            hitting the (possibly slow, HDD-backed) store.
+            and slow on-the-fly dumps under IO pressure: request coalescing
+            reduces duplicate upstream fetches, and content still resident in
+            the cache can be served stale when the upstream errors or times
+            out. Disable to restore plain proxying. The zone lives at
+            `/var/cache/nginx/nixtache-bincache` (fixed by the nixpkgs nginx
+            module) on the host root filesystem rather than the cache store's
+            disk.
           '';
         };
 
@@ -70,19 +69,18 @@ in
           default = "10g";
           description = ''
             Maximum size of the nginx cache zone (`max_size`). The zone
-            holds only hot NARs, not the whole store; entries not accessed
-            within the narinfo TTL horizon are evicted by `inactive`.
+            holds only hot responses, not the whole store; entries unused for
+            30 days are evicted by `inactive`, and capacity pressure can evict
+            them earlier.
           '';
         };
       };
     };
 
     # --- Secrets (path-based, supplied by the consumer) -------------------
-    # NOTE: the registration token is per-instance (`instances.<name>.tokenFile`),
-    # not global. SSH creds live in `flakeSshCreds` / `updateSshCreds` (ssh.nix).
-    # The consumer may instead populate these via a nixtache secrets provider
-    # (modules/secrets.nix); the path-based options here remain the stable
-    # direct contract.
+    # The registration token is per-instance (`instances.<name>.tokenFile`);
+    # SSH creds live in `flakeSshCreds` / `updateSshCreds` (ssh.nix). Secret
+    # paths are supplied directly by the consumer's chosen backend.
     secrets = {
       cachePrivateKey = mkOption {
         type = types.path;
@@ -150,8 +148,8 @@ in
       }
 
       (mkIf cfg.cache.nginxCache.enable {
-        # NARs are immutable: long TTL, one upstream dump-path per NAR no
-        # matter how many machines update concurrently (proxy_cache_lock).
+        # NARs are immutable: use a long TTL and coalesce concurrent cache
+        # misses to reduce duplicate upstream dump-path requests.
         virtualHosts.${cfg.cache.domain}.locations."/nar/" = {
           proxyPass = "http://localhost:${toString cfg.cache.port}";
           extraConfig = ''

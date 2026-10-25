@@ -1,7 +1,7 @@
 # Build sandboxing
 
 Why the runner's Nix sandbox is off by default, what `enableSandbox = true`
-actually does, and how CI self-heals either way. Source of truth:
+does, and how CI decides whether builds need `--no-sandbox`. Source of truth:
 `modules/runner/sandbox.nix` and
 [`.forgejo/actions/sandbox-probe`](../../.forgejo/actions/sandbox-probe/action.yml);
 requirements: [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md)
@@ -32,11 +32,14 @@ property, not a capability gate.
 
 | option | default | effect |
 |---|---|---|
-| `enableSandbox` | `false` | unprivileged container, `nix.settings.sandbox = false`. Working CI out of the box; the container itself is the isolation boundary. |
-| `enableSandbox` | `true` (opt-in) | grants `CAP_SYS_ADMIN`, forces `nix.settings.sandbox = true`, applies the daemon `/proc` remount fix (see below). Applies only after a host rebuild AND a container restart (see "Deploy chicken-and-egg"). |
+| `enableSandbox` | `false` | no `CAP_SYS_ADMIN`; `nix.settings.sandbox = false`. Working CI out of the box; the container itself is the isolation boundary. |
+| `enableSandbox` | `true` (opt-in) | grants `CAP_SYS_ADMIN`, forces `nix.settings.sandbox = true`, and applies the daemon `/proc` remount described below. Requires a new container process. |
 | `additionalCapabilities` | `[]` | extra caps merged on top (e.g. `CAP_NET_ADMIN` for tunnel setup). `sandbox.nix` is the sole owner of the container's capability list — it doesn't auto-merge across modules. |
 
-## The `/proc` remount fix (`enableSandbox = true`)
+`CAP_IPC_LOCK` is always granted, independently of these options, for package
+tests that use `mlock`.
+
+## The `/proc` remount (`enableSandbox = true`)
 
 Each nix daemon's `ExecStart` is wrapped: the daemon's own exec chain runs
 `unshare -m`, mounts a fresh procfs over `/proc`, then `exec`s the real
@@ -50,43 +53,37 @@ relocated-store `nix-daemon-custom` (wrapped in `store.nix`, where its
 The remount MUST live in the daemon's exec chain: systemd clones the mount
 namespace **separately for every `Exec*` command** of a unit, so an
 `ExecStartPre` mount vanishes with its own process and never reaches the
-daemon — the earlier `PrivateMounts`+`ExecStartPre` form of this fix was a
-no-op for exactly that reason (the `ExecStartPre` reported success while the
-daemon kept seeing the masked `/proc`). Ref:
+daemon. Ref:
 [NixOS/nixpkgs#405256](https://github.com/NixOS/nixpkgs/issues/405256).
 
 ## CI side: runtime probe, not config
 
-Whether builds actually run sandboxed is detected per job by the
-`sandbox-probe` action: it builds a tiny unique-name derivation (nothing
-caches it, so it always builds locally, using the caller's own pinned
-nixpkgs) and exports `SANDBOX_OK=1` (sandbox usable) or `SANDBOX_OK=0` (fall
-back) to the job env. The probe derivation's build command must create
-`$out` (`mkdir -p $out`) — a bare `true` fails with "builder failed to
-produce output path" on every runner, making the probe report a false
-negative. Every build action (`flake-validation`,
-`rebuild-configurations`, `rebuild-devshells`, `generate-docs`,
-`deploy-target`) reads `SANDBOX_OK` and appends `--no-sandbox` when it is
-≠ 1, and so do the inline build steps of nixtache's own CI (`ci.yml`'s
-module-test loop, `vmtests.yml`'s suite build) — a runner whose sandbox is
-broken (or not yet rebuilt with the fix) self-heals to `--no-sandbox`
-instead of failing. Accordingly, every workflow nixtache ships — the
-reusable `nix-check.yml`, `update-flake.yml`, `deploy.yml`, `docs.yml` and
-the self-CI `ci.yml`, `vmtests.yml` — runs `sandbox-probe` before its first
-build step. The ordering (and the vmtests flag wiring) is pinned by the
-`checks.*.ci-workflow-drift` suite, which parses the real workflow YAMLs at
-build time.
+The `sandbox-probe` action attempts a small `runCommand` realization using the
+caller's pinned nixpkgs. It exports `SANDBOX_OK=1` when that build succeeds
+without an explicit `--no-sandbox`, and `SANDBOX_OK=0` otherwise. The probe
+does not inspect `nix.settings.sandbox`: a successful build with sandboxing
+disabled also produces `1`. Its fixed output name also means an existing or
+substituted output can satisfy the build without executing the builder.
 
-The module still exports a static `HAS_SANDBOX_CAP` env (mirrors
-`enableSandbox` 1:1), but nothing consumes it — it is legacy; do not wire new
-code to it. `SANDBOX_OK` from `sandbox-probe` is the operative flag.
+The probe derivation's build command must create `$out` (`mkdir -p $out`) — a
+bare `true` fails with "builder failed to produce output path" on every
+runner, making the probe report a false negative. Every build action
+(`flake-validation`, `rebuild-configurations`, `rebuild-devshells`,
+`generate-docs`, `deploy-target`) reads `SANDBOX_OK` and appends
+`--no-sandbox` when it is ≠ 1, and so do the inline build steps of nixtache's
+own CI (`ci.yml`'s module-test loop and `vmtests.yml`'s suite build). Every
+workflow nixtache ships — the reusable `nix-check.yml`, `update-flake.yml`,
+`deploy.yml`, `docs.yml` and the self-CI `ci.yml`, `vmtests.yml` — runs
+`sandbox-probe` before its first build step. The ordering and vmtests flag
+wiring are pinned by `checks.*.ci-workflow-drift`.
 
-## Deploy chicken-and-egg
+The module also exports `HAS_SANDBOX_CAP`, mirroring `enableSandbox`; build
+steps use the runtime `SANDBOX_OK` flag instead.
 
-The default `false` trades build-level isolation for reliability. Flipping
-`enableSandbox` / caps applies only after the host is rebuilt with the
-updated module **and the container is restarted** (a plain
-`nixos-rebuild switch` on the host does not restart `container@<name>` —
-restart it explicitly while no CI job is running), so a first-time rollout
-needs one manual rebuild + restart on the server (or an `ab-image` deploy).
-The runtime probe means CI stays green on both sides of that switch.
+## Applying capability changes
+
+Changing `enableSandbox` or capabilities requires a rebuilt host definition
+and a new container process. By default, a `nixos-rebuild switch` that changes
+the container definition restarts it. If the consumer disables automatic
+container restarts, restart `container@<name>` explicitly while no CI job is
+running.

@@ -6,9 +6,9 @@ direct-deploy pipeline (CI → your machines), and the reusable Forgejo
 workflows + composite actions that build, validate and document consumer
 flakes. Any project can consume it **without forking**.
 
-nixtache stores **no secrets** and hardcodes **no** hosts/domains — all of
-that is supplied by the consumer via module options. Start with the
-[quickstart](doc/user_guide/quickstart.md).
+nixtache stores **no secrets** and hardcodes no consumer-specific Forgejo,
+cache or deploy endpoints — those are supplied via module options. Start with
+the [quickstart](doc/user_guide/quickstart.md).
 
 ## Repository map
 
@@ -20,14 +20,14 @@ that is supplied by the consumer via module options. Start with the
 | [`deploy-target`](doc/user_guide/deploy.md) | `services.nixtache.deploy-target`: the receiving side of direct deploy — root `nixtache-apply.service` (low-disk guard → activate → probe `criticalUnits` → rollback), polkit start-only rules, gated deploy user, Tier-0 health check. Import on every deploy target. |
 | [`ab-image`](doc/user_guide/ota.md) | `services.nixtache.ab-image`: build-time A/B appliance image config (repart slots, UKI, sysupdate transfers, boot counting, GPG verify, the slot's lower store DB dump + boot-time loader) — the OTA route. |
 | [`overlay-nix`](doc/user_guide/overlay-nix.md) | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` so image-based targets can install packages at runtime — delta installs against the shipped lower store DB and an upper-layer lifecycle across OTA updates (`"wipe"` default / `"reconcile"`). |
-| [`auto-update`](doc/user_guide/auto-update.md) | `services.nixtache.auto-update`: unified auto-update channel replacing `system.autoUpgrade` — flake and A/B paths, one timer, reboot policy. |
+| [`auto-update`](doc/user_guide/auto-update.md) | `services.nixtache.auto-update`: unified auto-update channel replacing `system.autoUpgrade` — flake and A/B paths, one poll timer plus a deferred-reboot timer in window mode. |
 | [`secrets`](doc/user_guide/secrets.md) | `services.nixtache.secrets`: secrets-provider abstraction (`vars` + extensible `providers`). |
 
 ### Reusable workflows (`.forgejo/workflows/`) and actions
 
 | Workflow | Purpose |
 |---|---|
-| `nix-check.yml` | validate the caller flake + rebuild all its `nixosConfigurations` and devShells |
+| `nix-check.yml` | validate the caller flake + rebuild all its `nixosConfigurations` and `x86_64-linux` devShells |
 | `deploy.yml` | direct deploy of the caller's configurations to their targets |
 | `docs.yml` | build + upload the caller's generated documentation |
 | `update-flake.yml` | scheduled flake-input bump with an SSH-signed bot commit |
@@ -45,12 +45,12 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
   devShell listings): [`doc/user_guide/docs-generation.md`](doc/user_guide/docs-generation.md).
 - `packages.<system>.optionsMarkdown` / `.optionsJSON` / `.optionsHTML`
   (`.default` = `optionsMarkdown`) — this flake's own option reference,
-  generated from all nixtache modules via `nixosOptionsDoc`. Built into the
-  `nixtache-options` CI artifact.
+  generated from all nixtache modules via `nixosOptionsDoc`. CI builds Markdown
+  and JSON into the `nixtache-options` artifact; HTML is a separate package.
 - `checks.<system>` — pure-eval test suites (`runner`, `deploy-target`,
   `ab-image`, `overlay-nix`, `mkDocs`, `ab-existing`, `auto-update`,
   `ab-deploy-drift`, `ci-workflow-drift`); built by every `nix flake check`.
-- `vmTests.x86_64-linux` — KVM-only VM suites (27 of them); **not** run by
+- `vmTests.x86_64-linux` — KVM-only VM suites; **not** run by
   `nix flake check` — they run in CI via
   [`vmtests.yml`](.forgejo/workflows/vmtests.yml) on a KVM-capable runner.
   Testing strategy: [`doc/technical_details/testing.md`](doc/technical_details/testing.md).
@@ -61,10 +61,10 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 
 | Layer | Audience | Content |
 |---|---|---|
-| [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, OTA (A/B updates), overlay-nix, auto-update, secrets, docs generation — each linking the relevant openspec specs |
-| [`doc/technical_details/`](doc/technical_details/) | contributors | architecture, module→CI wiring, sandboxing, workflow mechanics, lower-store-db, testing |
+| [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, OTA (A/B updates), overlay-nix, auto-update, secrets, docs generation — linking maintained capability specs where they exist |
+| [`doc/technical_details/`](doc/technical_details/) | contributors | architecture, module→CI wiring, sandboxing, workflow mechanics, resources, binary-cache availability, lower-store-db, testing |
 | [`doc/GLOSSARY.md`](doc/GLOSSARY.md) | everyone | the canonical domain vocabulary (terms, not facts) |
-| [`openspec/specs/`](openspec/specs/) | everyone (requirements) | the canonical, maintained spec corpus (capabilities: `direct-deploy`, `deploy-user`, `docs`) |
+| [`openspec/specs/`](openspec/specs/) | everyone (requirements) | the canonical, maintained capability corpus |
 | [`doc/archive/`](doc/archive/) | archaeologists | frozen legacy spec corpus + drafts (superseded / unimplemented), with a freeze note |
 
 ## Quickstart pointer

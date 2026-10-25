@@ -37,9 +37,8 @@ secrets/               MUST NOT EXIST — this repo stores no secrets
 
 `openspec/specs/` is the **canonical requirement corpus** — the successor of
 the legacy spec corpus, which is frozen under `doc/archive/`.
-Requirements live as capabilities (`deploy-user`, `direct-deploy`, `docs`);
-work happens as changes under `openspec/changes/` (archived ones under
-`changes/archive/`). Useful commands:
+Requirements live as capabilities; work happens as changes under
+`openspec/changes/` (archived ones under `changes/archive/`). Useful commands:
 
 ```bash
 openspec list --specs                    # capability inventory
@@ -59,11 +58,18 @@ Working rules (enforced by convention + `openspec/config.yaml`):
    English (frozen `doc/archive/` content and the not-yet-translated
    `direct-deploy` / `deploy-user` specs are the only exceptions).
 3. **Self-documenting comments** (see below).
-4. Think carefully what comes in each document of `doc/` directory - 
-   don't duplicate the information. Only reflect necessary info for
-   each document.
-5. Before expanding the doc: try not to bloat it and restructure if necessary. 
-6. **Docs are written for public-repo readers.** The repository is public:
+4. **Document current behavior, not development progress.** Maintained docs,
+   option descriptions and canonical specs MUST describe present contracts,
+   invariants and operational risks — not what was fixed, rewritten,
+   re-verified or remains in flight. Commit messages, OpenSpec change
+   artifacts and `doc/archive/` own chronology. Retain a failure scenario
+   only when it explains a current risk, constraint or recovery procedure;
+   never keep a resolved-bug story just to explain a patch. Actionable
+   migration and version-compatibility notes are allowed.
+5. Think carefully what comes in each document of `doc/` directory:
+   don't duplicate information; include only what that document needs.
+6. Before expanding a doc, avoid bloat and restructure where necessary.
+7. **Docs are written for public-repo readers.** The repository is public:
    a reader has no access to the debugging session, review thread or
    agent conversation in which a problem was found. Never describe only
    the solution of a problem whose statement lives elsewhere — each
@@ -149,10 +155,12 @@ nix build .#checks.x86_64-linux.runner && cat ./result
 nix build .#vmTests.x86_64-linux.<suite>
 ```
 
-Runner-side mechanics that surface in CI (sandbox probe, credential wiring,
-reusable-workflow resolution) are documented once in
-`doc/technical_details/` — `sandboxing.md`, `module-ci-wiring.md`,
-`workflow-mechanics.md`.
+Runner sandboxing defaults to `enableSandbox = false`; CI uses the runtime
+`sandbox-probe` / `SANDBOX_OK` result to decide whether to add `--no-sandbox`.
+Runner-side mechanics (sandbox probe, credential wiring, reusable-workflow
+resolution) are documented once in `doc/technical_details/` — `sandboxing.md`,
+`module-ci-wiring.md`, `workflow-mechanics.md`. Workflow and action inventories
+live in the [README repository map](README.md#repository-map).
 
 ## TODO / out of scope
 

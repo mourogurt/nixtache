@@ -71,8 +71,8 @@
         # ── Conformance / contract tests for the landed A/B modules.
         # Pure-eval suites are fast (no KVM); the `*-vm` suites live in
         # `vmTests` below.
-        #   ab-existing  : conformance of the implemented ab-image /
-        #                  deploy-target wiring (image layout, transfers, verify).
+        #   ab-existing  : compression/UKI options, runner staging and store
+        #                  assertions, and deploy-target gating branches.
         ab-existing = import ./tests/ab-existing.nix { inherit nixpkgs self system; appliancePkgs = caPkgsFor system; };
         # Auto-update module pure-eval; its end-to-end VM suite
         # (flake path + ab path) is in `vmTests`.
@@ -90,7 +90,7 @@
 
       # ── KVM-only VM suites (runNixOSTest / QEMU). NOT part of `checks`:
       # `nix flake check` would build them on every CI run — the nspawn CI
-      # runner cannot chew through 15 QEMU suites (kvm sits in its inherited
+      # runner cannot chew through the QEMU suite matrix (kvm sits in its inherited
       # system-features, so nix would dispatch them locally and drown/timeout).
       # `vmTests` is not a checked output: flake check skips it entirely.
       # Run explicitly on a KVM host (e.g. a dev box):
@@ -125,8 +125,8 @@
         # QEMU (KVM) behavioral contracts for the new modules:
         ab-provision-vm = import ./tests/ab-provision-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         overlay-nix-vm = import ./tests/overlay-nix-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
-        # overlay-nix-install-vm: O2/O3 contract — fetch hello from a binary cache
-        # (deployer node running nix-serve-ng) through the local-overlay store →
+        # overlay-nix-install-vm: fetch hello from the deployer's binary cache
+        # through the local-overlay store →
         # runs + lands in the upper layer. Hermetic (no internet).
         overlay-nix-install-vm = import ./tests/overlay-nix-install-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # overlay-nix-ab-swap-vm: O9 — overlay upper survives an A/B slot swap:

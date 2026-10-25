@@ -87,14 +87,15 @@ nix on top).
 _Avoid_: image node, immutable host
 
 **Sysupdate package**:
-The update artifact the runner stages and signs: the split nix-store image
-+ the UKI + a SHA256SUMS manifest consumed by `systemd-sysupdate`.
+The update artifact the runner stages and signs: the split nix-store image,
+UKI, lower store database dump and SHA256SUMS manifest consumed by
+`systemd-sysupdate`.
 _Avoid_: update bundle, ota tarball
 
 **Staging**:
 Serving the sysupdate package from a location the target can pull from
-(local directory or HTTPS); retention of old staged versions is what makes
-overlay repair possible.
+(local directory or HTTP(S)); staged-image retention is independent of the
+binary-cache NAR retention required for overlay repair.
 _Avoid_: upload, publish step
 
 **UKI**:
@@ -110,8 +111,9 @@ previous blessed entry.
 _Avoid_: boot retry, watchdog boot
 
 **Gating**:
-The idle-gate on a runner host: a self-update waits until all runners
-report idle before applying and rebooting, so a CI job is never interrupted.
+The idle-gate on a runner host: by default a self-update waits until all
+runners report idle before applying and rebooting; `forceAfterTimeout` can
+explicitly override that wait.
 _Avoid_: idle lock, maintenance mode
 
 ### Overlay store

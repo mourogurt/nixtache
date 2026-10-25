@@ -317,11 +317,8 @@ in
                     exec -a nix-daemon ${daemonCmd}
                   ''}"
                   else daemonCmd;
-                # mixed: SIGTERM to the main daemon, SIGKILL to any surviving
-                # per-connection workers after TimeoutStopSec. "process" left
-                # those workers running past the unit stop (chronic
-                # "Unit process ... remains running" records), accumulating
-                # orphaned daemons across restarts.
+                # Terminate the main daemon first, then kill any connection
+                # workers still in the unit cgroup when it exits or times out.
                 KillMode = "mixed";
                 BindPaths = [ bindPath ];
                 CPUSchedulingPolicy = nixDaemonCfg.serviceConfig.CPUSchedulingPolicy or null;

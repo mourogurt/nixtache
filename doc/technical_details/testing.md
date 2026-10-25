@@ -1,52 +1,44 @@
 # Testing & coverage
 
 How nixtache is tested, what "coverage" means for a declarative NixOS module
-flake (spoiler: not line-coverage), and the rules every change must follow.
+flake, and the rules every change must follow. Documentation requirements:
+[`openspec/specs/docs/spec.md`](../../openspec/specs/docs/spec.md).
 
-> Implementation of the coverage gate itself is tracked separately — this
-> document fixes the **approach and contract** so the implementation has a
-> target to land against.
+## Testing strategy
 
----
+`checks.<system>` contains fast eval-oriented suites. Each scenario evaluates
+a `nixosSystem` (or calls a lib helper) with specific option values and asserts
+on the resulting `config.*` attributes or on a small derivation's build
+behavior. These checks run in every `nix flake check`.
 
-## Testing strategy: pure-evaluation scenarios
+`vmTests.x86_64-linux` contains the runtime layer: NixOS VM tests that boot
+machines and containers and verify behavior such as daemon startup, OTA slot
+swaps and overlay repairs. These suites require KVM and are built explicitly,
+not by `nix flake check`.
 
-nixtache's tests are **pure-evaluation** — they never boot a VM or container.
-Each scenario evaluates a `nixosSystem` (or calls a lib helper) with specific
-option values and asserts on the resulting `config.*` attributes (services
-present, envs wired, caps granted, mounts/BindPaths, assertions firing) or on
-the produced derivation's behaviour (build succeeds / fails).
-
-Why pure-eval: fast (no VM), deterministic, runs in `nix flake check`, and
-sufficient for a module whose job is to produce NixOS config attrsets. Runtime
-behaviour of the container (does `nix-daemon-custom` actually start?) is out of
-scope here and belongs to NixOS VM tests if ever needed.
-
-### Layout — pure-eval suites (`checks.*`, built by every `nix flake check`)
+### Layout — eval-oriented suites (`checks.*`)
 
 | File | Covers | Wired as |
 |---|---|---|
 | `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH creds, sandbox cap on/off, deploy map wiring, `runner.envs` | `checks.<system>.runner` |
 | `tests/deploy-target.nix` | the target side — apply unit, deploy user, polkit, health check, rollback wiring | `checks.<system>.deploy-target` |
-| `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify | `checks.<system>.ab-image` |
-| `tests/overlay-nix.nix` | the overlay-nix module — `upperOnUpdate` enum (wipe/reconcile), default, hook wiring (runtime swap behaviour lives in vmTests) | `checks.<system>.overlay-nix` |
-| `tests/ab-existing.nix` | conformance of the implemented ab-image / deploy-target wiring (image layout, transfers, verify) | `checks.<system>.ab-existing` |
-| `tests/ab-contract.nix` | wiring + assertion contracts for ab-provision / overlay-nix / runner store modes — unwired from `checks` while the in-flight overlay upper-lifecycle change rewrites those contracts (the suite pins the old defaults and would gate CI red mid-change); re-wire when that change lands | — |
+| `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify, store-tree imaging | `checks.<system>.ab-image` |
+| `tests/overlay-nix.nix` | the overlay-nix module — `upperOnUpdate` enum (wipe/reconcile), default, hook wiring | `checks.<system>.overlay-nix` |
+| `tests/ab-existing.nix` | compression/UKI options, runner A/B staging assertions and retain-GC wiring, `hostBackup`, `deploy-target.ab.forceAfterTimeout`, native-store/A/B assertion | `checks.<system>.ab-existing` |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
 | `tests/ab-deploy-drift.nix` | the deploy action's protocol-drift skip contract (extracted action.yml text vs a fake old SSH gate) | `checks.<system>.ab-deploy-drift` |
-| `tests/ci-workflow-drift.nix` | the workflows' sandbox-probe ordering contract (parses the real `.forgejo/workflows/*.yml`: probe before every build step; vmtests applies the `SANDBOX_OK` flag) | `checks.<system>.ci-workflow-drift` |
-| `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` 2×2 matrix (flag × all-documented) + prefix-filtering | `checks.<system>.mkDocs` |
+| `tests/ci-workflow-drift.nix` | the workflows' sandbox-probe ordering contract and vmtests flag wiring | `checks.<system>.ci-workflow-drift` |
+| `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` flag × documentation-completeness matrix | `checks.<system>.mkDocs` |
 
-(`tests/ab-fixture.nix` and `tests/ab-anywhere-install.nix` are shared
-fixtures/helpers, not suites.)
+`tests/ab-fixture.nix`, `tests/ab-anywhere-install.nix` and
+`tests/ab-ota-vm-lib.nix` are shared fixtures/helpers, not registered suites.
 
-### Layout — KVM-only VM suites (`vmTests.x86_64-linux`, NOT a checked output)
+### Layout — KVM-only VM suites (`vmTests.x86_64-linux`)
 
-`nix flake check` skips `vmTests` entirely: the nspawn CI runner cannot chew
-through QEMU suites, so they carry `requiredSystemFeatures = [ "kvm" ]` and
-run in CI via [`.forgejo/workflows/vmtests.yml`](../../.forgejo/workflows/vmtests.yml)
-on a KVM-capable runner (label `kvm`): `workflow_dispatch` (full matrix or a
-smoke subset) + a weekly-full / nightly-smoke schedule. Full inventory:
+VM suites carry `requiredSystemFeatures = [ "kvm" ]` and run in CI via
+[`.forgejo/workflows/vmtests.yml`](../../.forgejo/workflows/vmtests.yml) on a
+KVM-capable runner (label `kvm`): manual full/smoke dispatch plus weekly-full
+and nightly-smoke schedules. Full inventory:
 
 `ab-deploy`, `ab-ota-e2e`, `ab-ota-e2e-erofs`, `ab-ota-e2e-none`,
 `ab-ota-e2e-percent`, `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
@@ -55,211 +47,164 @@ smoke subset) + a weekly-full / nightly-smoke schedule. Full inventory:
 `-tmpfs` variants), `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
 `ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `ab-ota-migrate-boot-vm` (+
 `-override` variant), `ab-data-pool-vm`, `runner-store-mode-vm`,
-`runner-store-swap-clone-vm`, `runner-store-swap-overlay-vm` (the runner's
-relocated store across a real appliance swap — green since the image ships
-the lower store DB), `ab-runner-compat-vm`, `ab-compression-vm`,
-`ab-staging-vm`, `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
+`runner-store-swap-clone-vm`, `runner-store-swap-overlay-vm`,
+`ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
+`ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
 
 The migrate pair splits the migration contract:
 `ab-ota-migrate-vm` pins the live side (provisioning, idempotency, update
 machinery ready, live closure retained) and deliberately never boots the
-staged image; `ab-ota-migrate-boot-vm` boots a legacy-labeled disk
-(partlabels `ESP`/`nixos`, `default nixos-*` in loader.conf) through the
-first OTA cutover — unarmed staging does not cut over, wrong labels roll
-back safely, relabeled partitions (or mkForce'd `fileSystems`) cut over,
-signed staging throughout (Transfer.Verify=yes).
+staged image; `ab-ota-migrate-boot-vm` boots a legacy-labeled disk through
+the first OTA cutover — unarmed staging does not cut over, wrong labels roll
+back safely, and relabeled partitions or forced `fileSystems` devices cut
+over with signed staging throughout.
 
-Every overlay test names its lower-DB world (see
-[`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): since the
-appliance image ships the lower store DB, the `ota-invalid` and `ab-swap`
-suites run the shipped world A — validity out of the box, delta-only
-installs — with no manual DB-seeding construct anymore, while
-`overlay-nix-install-vm` runs against a host-store lower with its own
-database (a harness world) — results do not transfer between worlds.
-Faithful store imaging (top-level symlink closure paths ship as symlinks)
-is pinned twice: `checks.ab-image` builds the store tree for a tiny
-closure containing a symlink path, and `overlay-nix-vm` boots an appliance
-whose closure carries one and asserts it is a symlink, resolves
-`nix path-info` and its target exists.
+Overlay tests distinguish their lower-DB worlds (see
+[`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): appliance
+suites use the DB shipped in the image, while `overlay-nix-install-vm` uses a
+host-store lower with its own database. Results do not transfer between those
+worlds. Faithful store imaging is pinned by `checks.ab-image` (a store tree
+containing a symlink path) and `overlay-nix-vm` (the symlink survives imaging
+and resolves through `nix path-info`).
 
-Every test file is a function `{ nixpkgs, self, system }:` returning a
-`pkgs.runCommand` derivation. Its builder prints a human-readable report (one
-`ok`/`FAIL` line per check) into `$out` and exits non-zero on any failure — so
-`nix build .#checks.<system>.<suite> && cat ./result` shows the whole matrix.
+### Pure-eval suite and scenario shape
+
+A registered pure-eval suite returns a report derivation whose builder prints
+one `ok`/`FAIL` line per check and exits non-zero on failure. Its arguments
+depend on the suites it evaluates; shared helpers can instead return attrsets,
+and VM suites use the NixOS test runner. Build a report with:
+
+```bash
+nix build .#checks.x86_64-linux.runner && cat ./result
+```
 
 A new pure-eval test file MUST be registered in `flake.nix`; a new VM suite
-goes into `vmTests.x86_64-linux` (never into `checks`):
+goes into `vmTests.x86_64-linux`, never into `checks`:
+
 ```nix
 checks.${system} = {
   runner = import ./tests/runner.nix { inherit nixpkgs self system; };
-  # ...
 };
-vmTests.x86_64-linux.my-suite = import ./tests/my-suite.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+vmTests.x86_64-linux.my-suite = import ./tests/my-suite.nix {
+  inherit nixpkgs self;
+  system = "x86_64-linux";
+};
 ```
 
-### Scenario shape (runner tests)
+Runner scenarios evaluate a host and assert on its configuration:
 
 ```nix
-# Build a host with specific options, then assert on its evaluated config.
-hostSrv = mkHost "/srv" { };
-svcSrv  = hostSrv.config.containers."runner".config.systemd.services;
+hostSrv = mkHost "/srv" { services.nixtache.runner.enableSandbox = false; };
+svcSrv = servicesOf hostSrv;
 scenarioSrv = {
   name = "store.path=\"/srv\" relocates the store; SSH off → no key wiring";
   checks = {
-    hasCustomDaemon  = has svcSrv "nix-daemon-custom";
+    hasCustomDaemon = has svcSrv "nix-daemon-custom";
     forgejoBindPaths = svcSrv."forgejo-runner-default".serviceConfig.BindPaths == [ "/srv/nix:/nix" ];
-    noLoadCredential = loadCred svcSrv == [ ];
-    hasSandboxCap    = lib.elem "CAP_SYS_ADMIN" hostSrv.config.containers."runner".additionalCapabilities;
+    noSshLoadCredential =
+      !(hasCredPrefix "flake_ssh_" (loadCred svcSrv)
+        || hasCredPrefix "update_ssh_" (loadCred svcSrv));
+    noSandboxCap = !(lib.elem "CAP_SYS_ADMIN" hostSrv.config.containers."runner".additionalCapabilities);
+    hasIpcLock = lib.elem "CAP_IPC_LOCK" hostSrv.config.containers."runner".additionalCapabilities;
   };
 };
 ```
-A scenario is `{ name, checks }`; the suite is `scenarios = [ ... ]`; the runCommand
-fails iff any check is false.
+
+A scenario is `{ name, checks }`; the suite aggregates `scenarios = [ ... ]`
+and fails iff any check is false.
 
 ### Build-failure assertions (mkDocs tests)
 
-Pure-eval catches eval-time throws (e.g. failed assertions via `builtins.tryEval`)
-but NOT build-time failures. For cases that must FAIL TO BUILD (e.g.
-`docStrictMode = true` + an undocumented option rejects the `nixosOptionsDoc`
-build), the pattern is:
+Pure eval catches eval-time throws (for example, failed assertions through
+`builtins.tryEval`) but not build-time failures. The `mkDocs` suite handles
+the strict-mode matrix as follows:
 
-- cases that **must build** → referenced as real deps of the test derivation
-  (their `outPath` is interpolated in the builder, forcing Nix to build them;
-  any failure fails the test);
-- the case that **must fail** → only its `.drvPath` is passed in (a string, not
-  a dep, so its build failure does not propagate); the test then verifies the
-  *preconditions* at eval time (the undocumented option exists) and documents
-  the expected build failure. The strict-build mechanism itself is independently
-  exercised by nixtache's own `packages.optionsMarkdown` (strict by default).
-
----
+- cases that must build are interpolated into the test builder, making them
+  real dependencies whose failures fail the test;
+- the strict + undocumented case is not referenced by the builder at all —
+  even a `.drvPath` reference would make `nix flake check` reach the failing
+  options build. The suite verifies its eval-time precondition (an
+  undocumented option exists), while nixtache's own strict
+  `packages.optionsMarkdown` build exercises the rejection mechanism.
 
 ## Rules (also in AGENTS.md)
 
 1. **Every `mkOption` MUST have a `description`.** Enforced in CI:
    `nixosOptionsDoc` for this flake's own `packages.optionsMarkdown`/`JSON`/`HTML`
-   runs with `warningsAreErrors = true`, so an undocumented option BREAKS the
+   runs with `warningsAreErrors = true`, so an undocumented option breaks the
    docs build. (`mkEnableOption` auto-generates one, so it's exempt.) Consumers
    opt into the same strictness via `nixtache.lib.mkDocs { docStrictMode = true; }`.
-
-2. **Every option MUST be covered by a test.** An option without a test is
-   unfinished. When you add an option or change behaviour, add/extend a
-   scenario in `tests/` and run `nix build .#checks.<system>.<suite>`.
-
----
+2. **Every option MUST be covered by a test.** When adding an option or
+   changing behavior, add or extend a scenario in `tests/` and run
+   `nix build .#checks.<system>.<suite>`.
 
 ## What "coverage" means for Nix
 
-Nix is a declarative, pure-functional config language — there is no runtime
-execution path, so **classic line-coverage (`coverage.py` / `gcov` / Istanbul)
-does not apply**. No tool measures "X% of Nix lines executed". Quoting a number
-like "85% line coverage" for a `.nix` module is meaningless.
+Classic line-coverage does not describe a declarative module's behavior. The
+useful measures are:
 
-The meaningful analog for a NixOS module is **option-coverage** + **branch-coverage**:
-
-### Option-coverage
-
-> Fraction of declared `mkOption` paths exercised by at least one test scenario.
-
-- **Declared** = every option under `services.nixtache.runner.*` (and, for
-  `lib/`, every parameter of `mkDocs`), enumerated via
-  `lib.optionAttrSetToDocList <eval>.options`.
-- **Exercised** = some scenario sets the option to a non-default value AND/OR
-  asserts on the resulting `config.*` it influences. Tracked explicitly via a
-  `covers` list per scenario (accurate, needs annotation) or heuristically via
-  grepping option names across the test files (zero-annotation, less precise).
-
-### Branch-coverage
-
-> Each `mkIf` / `mkMerge` branch is taken by at least one scenario.
-
-For nixtache the meaningful branches: `store.path == "/"` vs relocated;
-`enableSandbox` true/false; `flakeSshCreds`/`updateSshCreds` null vs set;
-`instances` single vs multi; `cache.enable` true/false. Most of these are
-already scenario-paired in `tests/runner.nix`.
-
-### Threshold & gate (target, implementation tracked separately)
-
-- A `checks.<system>.coverage` derivation computes
-  `|∪ scenario.covers| / |declared options|`, prints uncovered options, and
-  fails when the ratio is below the threshold.
-- Threshold: start at whatever the current explicit-coverage yields, ratchet up
-  toward ≥ 85% as scenarios gain `covers` annotations. Never lower it.
-- Uncovered options are reported by name so the gap is actionable, not just a
-  failing percentage.
-
-This is an **option-coverage** gate, honestly named — not a line-coverage claim.
-
----
+- **Option coverage:** every consumer-facing option under
+  `services.nixtache.*` (and every `lib.mkDocs` parameter) is set to a
+  non-default value and/or has its resulting configuration asserted.
+- **Branch coverage:** every meaningful configuration branch is exercised.
+  Runner examples include native vs relocated stores, sandbox on/off,
+  optional credential bundles, single vs multiple instances and cache on/off;
+  the sibling modules have their own method, policy and failure branches.
 
 ## Running tests
 
 ```bash
-# Everything (evaluates + builds all checks + packages):
+# Evaluate flake outputs and build all checks:
 nix flake check --show-trace --all-systems
 
 # One pure-eval suite, with the printed report:
 nix build .#checks.x86_64-linux.runner && cat ./result
 nix build .#checks.x86_64-linux.mkDocs && cat ./result
 
-# A KVM VM suite (KVM host only; CI runs them via vmtests.yml):
+# KVM VM suites (CI runs them via vmtests.yml):
 nix build .#vmTests.x86_64-linux.ab-deploy
 nix build .#vmTests.x86_64-linux.overlay-nix-vm
-
-# (future) coverage report:
-nix build .#checks.x86_64-linux.coverage && cat ./result
 ```
 
 ### Provisioning a KVM runner for `vmtests.yml`
 
-The workflow's `kvm`-labelled runner needs two things the default nspawn CI
-runner lacks (the runner module propagates the host's
-`nix.settings.system-features` into job environments, so both are host-side):
+The workflow's `kvm`-labelled runner needs host-side system features and
+access to `/dev/kvm` inside the runner container:
 
 ```nix
-# on the KVM runner host (e.g. a QEMU VM on the zen3 cluster):
 nix.settings.system-features = [ "kvm" "nixos-test" "big-parallel" ];
-# expose /dev/kvm to the runner's nspawn container:
 containers.<runner-name>.bindMounts."/dev/kvm" = {
   hostPath = "/dev/kvm";
   isReadOnly = true;
 };
 ```
 
-`kvm` + `nixos-test` are the `requiredSystemFeatures` the suites declare
-(`runNixOSTest` adds both itself; the pexpect-based suites declare `kvm`).
-Give the runner instance the `kvm` label so `runs-on: kvm` resolves —
-labels come from the module config (no re-registration, a switch is enough):
+`runNixOSTest` adds the `kvm` and `nixos-test` requirements; pexpect-based
+suites declare `kvm` themselves. Give the runner instance the `kvm` label so
+`runs-on: kvm` resolves:
 
 ```nix
-# a dedicated instance keeps heavy VM jobs off the general CI runner
 services.nixtache.runner.instances.kvm = {
-  uuid = "…";          # its own Forgejo registration, like `default`
+  uuid = "…";
   tokenFile = config.sops.secrets.runner-token-kvm.path;
-  labels = [ "kvm:host" ];   # Forgejo name:schema form; :host = run on the host
+  labels = [ "kvm:host" ];
 };
 ```
 
-If the runner is itself a VM, enable nested virtualization
-(`kvm-amd nested=1`, default on modern kernels) — or prefer
-containers-on-bare-metal to skip nesting entirely.
+If the runner is itself a VM, enable nested virtualization or prefer
+containers on bare metal.
 
-In CI (`ci.yml`) `nix flake check` runs on push/PR to `main`, then an
-explicit `nix build` loop prints each `checks.x86_64-linux.<suite>` report
-(runner, deploy-target, ab-image, overlay-nix, mkDocs, ab-existing,
-auto-update, ab-deploy-drift, ci-workflow-drift) to the job
-log, and the `nixtache-options` docs artifact is generated.
-
----
+Self-CI (`ci.yml`) runs on pushes to `main`, all pull requests and manual
+dispatch. It runs `nix flake check`, prints each
+`checks.x86_64-linux.<suite>` report, and generates the `nixtache-options`
+artifact.
 
 ## Adding a new option or test — checklist
 
-1. **Declare** the option with a `description` (mandatory — CI enforces it).
-2. **Add a scenario** in the relevant `tests/*.nix` that sets the option to a
-   non-default value and asserts on the resulting `config.*`. Add the opposite
-   value too if the option has a meaningful off-branch.
-3. **Annotate** the scenario's `covers = [ "services.nixtache.runner.<opt>" ]`
-   (once the coverage gate lands) so the option counts toward coverage.
-4. **Run** `nix build .#checks.<system>.<suite>` and read the report.
-5. If the option belongs to a new area, create a new `tests/<area>.nix` and
-   wire it into `flake.nix` `checks.<system>`.
+1. Declare the option with a `description`.
+2. Add a scenario that sets the option and asserts its resulting `config.*`;
+   add the opposite value too if it has a meaningful off-branch.
+3. Run `nix build .#checks.<system>.<suite>` and read the report.
+4. If the option belongs to a new area, create `tests/<area>.nix` and register
+   it in `flake.nix` under `checks.<system>` (or `vmTests.x86_64-linux` for a
+   KVM suite).

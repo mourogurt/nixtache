@@ -15,10 +15,10 @@
 - **WHEN** на таргете включён SDDM (Plasma) и модуль провижинит deploy-пользователя
 - **THEN** учётная запись отсутствует в списке пользователей экрана входа (системный uid, не normal user)
 
-#### Scenario: SSH-активация по-прежнему работает
+#### Scenario: SSH-активация работает с системной учётной записью
 
 - **WHEN** deployer подключается к таргету по SSH ключом deploy-пользователя
-- **THEN** вход выполняется, команды `nix copy`/записи pointer/`systemctl start nixtache-apply.service` (polkit) доступны как раньше
+- **THEN** вход выполняется, а команды `nix copy`, записи pointer и `systemctl start nixtache-apply.service` (polkit) доступны
 
 #### Scenario: Конфигурация с deploy-user не проходит как normal user
 
@@ -27,12 +27,7 @@
 
 ### Requirement: Минимальные привилегии deploy-пользователя
 
-Deploy-пользователь MUST обладать ровно четырьмя возможностями: SSH-вход по авторизованному ключу, доступ к nix-daemon (дефолтные `allowed-users`), запись в pointer-директорию через группу `nixtache-deploy`, polkit-авторизация на `start nixtache-apply.service` и `start nixtache-apply-dry.service` (+ ab-триггеры при включённом ab). Пользователь MUST NOT входить в `wheel`, не иметь sudo/doas/run0; членство в `trusted-users` — безусловное исключение (протокольное требование serve-write, см. требование о провижининге).
-
-#### Scenario: Опция nixTrust удалена
-
-- **WHEN** потребитель задаёт `services.nixtache.deploy-target.deployUser.nixTrust` в конфигурации после обновления
-- **THEN** eval падает с ошибкой неизвестной опции; доверие больше не управляется опцией — модуль добавляет deploy-пользователя в `nix.settings.trusted-users` безусловно (протокольное требование serve-write)
+Deploy-пользователь MUST быть ограничен SSH-входом по ключу, доступом к nix-daemon, записью pointer через `nixtache-deploy` и start-only polkit для apply/dry (+ A/B-триггеры при ab). Он MUST NOT входить в `wheel` или иметь sudo/doas/run0. Безусловное членство в `trusted-users` необходимо для serve-write.
 
 #### Scenario: Провижиненный пользователь не привилегирован
 
@@ -55,7 +50,7 @@ Deploy-пользователь MUST обладать ровно четырьм�
 
 ### Requirement: SSH-сессия deploy-ключа ограничена гейтом
 
-При `autoProvision = true` модуль MUST оформлять авторизованный ключ деплоя с префиксом `restrict,command=<gate>` в authorized_keys, где gate — генерируемый модулем скрипт, разрешающий ровно команды рабочего протокола деплоя: `nix-store --serve ...` (для `nix copy --to ssh://`), запись pointer + `systemctl start nixtache-apply.service`, запись dry-pointer + `systemctl start nixtache-apply-dry.service`, пробу соединения (`true`) и триггеры `systemctl start systemd-sysupdate.service` / `systemd-sysupdate-reboot.service` (ab-таргеты). Обе pointer-формы MUST проверять валидность store-path (`/nix/store/...`). Любая другая команда, а также pty/X11/agent/port-forwarding MUST отвергаться с понятным сообщением в лог. Модуль MUST предоставлять опцию отката: `restrict`-only (без гейта) для случаев дрейфа протокола.
+При `autoProvision = true` модуль MUST ограничивать deploy-ключ префиксом `restrict,command=<gate>`. Gate MUST принимать только точные валидированные команды протокола из сценариев, включая serve без shell-chaining и pointer-формы с проверкой store-path. Произвольные команды и неутверждённые chaining/redirection, pty/X11/agent/port-forwarding MUST отвергаться с понятным сообщением. Опция `restrict`-only MUST отключать gate для дрейфа протокола.
 
 #### Scenario: Port forwarding запрещён
 
@@ -69,8 +64,8 @@ Deploy-пользователь MUST обладать ровно четырьм�
 
 #### Scenario: Рабочий протокол деплоя проходит без изменений
 
-- **WHEN** action `deploy-target` выполняет probe, `nix copy --to ssh://...`, apply-триггер и dry-триггер на таргете с включённым гейтом
-- **THEN** все операции завершаются успешно — gate прозрачен для протокола деплоя
+- **WHEN** action выполняет probe, `nix copy`, apply/dry-триггеры, remote A/B-команду `systemctl start --wait systemd-sysupdate.service && systemctl start systemd-sysupdate-reboot.service` или local-self сигнал через `ab-pending` + `nixtache-ab-apply.service`
+- **THEN** gate принимает эти точные формы; pointer и dry-pointer допускаются только с валидным `/nix/store/...` путём
 
 #### Scenario: Escape-hatch на restrict-only
 

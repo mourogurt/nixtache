@@ -67,7 +67,7 @@ in
       description = ''
         Host directory holding the central image store. Bind-mounted into the
         container at the same path (CI writes here). Layout:
-        `<stagingPath>/<cfg>/<imageId>_<version>.{nix-store.raw,efi}` +
+        `<stagingPath>/<cfg>/<imageId>_<version>.{nix-store.raw,efi,lower-db}` +
         `SHA256SUMS` (+ `.gpg`). The basename of this path MUST equal the
         basename of `nginx.location` (the vhost `root` maps one onto the other).
       '';
@@ -75,7 +75,7 @@ in
 
     runnerHost = mkOption {
       type = types.str;
-      example = "bincache.zinzaguras.ru";
+      example = "bincache.example.com";
       description = ''
         Reachable address of THIS runner host (the value the deploy action
         compares each target's `host` against to decide local-self vs remote

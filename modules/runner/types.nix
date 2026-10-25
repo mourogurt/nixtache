@@ -158,14 +158,9 @@ in
             `systemd-sysupdate` and reboot. Required for the chicken-and-egg
             runner host (its live-switch would restart the container the job
             runs in) and needs consumer prep (repart/UKI/sysupdate/boot-counting)
-            — see doc/archive/specs/direct-deploy/06-ab-image.md.
+            — see `doc/user_guide/ota.md`.
         '';
       };
-
-      # `transport` was removed in V2: activation is always the root
-      # `nixtache-apply.service` + polkit (no sudo/doas/run0 selection).
-      # `method = "ab-image"` has its own path (sysupdate); `live` always uses
-      # the apply unit.
 
       sshPrivateKey = mkOption {
         type = types.nullOr types.path;
@@ -204,7 +199,7 @@ in
           Target architecture. `null` (default) = derive from
           `nixosConfigurations.<name>.config.nixpkgs.hostPlatform` at deploy
           time. Cross-arch builds rely on `boot.binfmt.emulatedSystems` on the
-          runner host (see doc/archive/specs/direct-deploy/07-cross-arch.md).
+          runner host.
         '';
       };
 

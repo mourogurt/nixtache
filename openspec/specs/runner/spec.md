@@ -79,13 +79,10 @@ keeping the systemd default weight.
 
 ### Requirement: Resource sizing and kill-diagnostics documentation
 
-The technical-details documentation layer SHALL cover runner container
-resource control: sizing the memory budget for a shared host, host swap as
-the buffer that lets large builds survive a tight RAM budget, the relation
-between build parallelism (`nixSettings.cores`) and memory headroom, and a
-decision tree for diagnosing a CI build killed by signal 9 (cgroup event
-counters under `machine.slice`, kernel log search, the host and container
-systemd-oomd layers, and CI-side job cancellation surfacing as signal 9).
+The documentation SHALL explain memory/swap sizing, the
+`nixSettings.cores`-vs-headroom trade-off, and signal-9 diagnostics using
+`machine.slice` cgroup counters, kernel logs, host/container systemd-oomd
+and CI cancellation evidence.
 
 #### Scenario: Consumer sizes the container
 
@@ -113,9 +110,9 @@ SHALL be its own registration (own uuid and own token).
 #### Scenario: Token file holds the bare token
 
 - **WHEN** a consumer prepares an instance's token file
-- **THEN** it contains the bare runner token — no `TOKEN=` prefix, no
-  environment-file syntax: runners no longer self-register, the uuid +
-  token pair is obtained from Forgejo when the registration is created
+- **THEN** it contains the bare runner token — no `TOKEN=` prefix and no
+  environment-file syntax; the uuid + token pair is obtained from Forgejo
+  when the registration is created
 
 #### Scenario: Default instance is fully wired
 
@@ -139,37 +136,34 @@ SHALL be its own registration (own uuid and own token).
 
 `instances.<name>.labels` SHALL land in `settings.runner.labels` of the
 corresponding in-container instance, keeping the default
-`[ "nixos:host" ]`. The module SHALL NOT re-expose a runner-name option:
-runners no longer self-report their name to Forgejo (the name is fixed when
-the registration is created), so `instances.<name>.name` SHALL fail
-evaluation.
+`[ "nixos:host" ]`. The module SHALL NOT expose a runner-name option: the
+name is fixed in Forgejo when the registration is created, so
+`instances.<name>.name` SHALL fail evaluation as an unknown option.
 
-#### Scenario: Labels reach the new settings location
+#### Scenario: Labels reach the instance settings
 
-- **WHEN** an instance sets `labels = [ "nixos:test" ]`
+- **WHEN** an instance sets `labels = [ "test:host" ]`
 - **THEN** the in-container instance's `settings.runner.labels` is
-  `[ "nixos:test" ]`
+  `[ "test:host" ]`
 
 #### Scenario: Runner name is not settable
 
 - **WHEN** a consumer sets `instances.default.name`
-- **THEN** evaluation fails (the option no longer exists)
+- **THEN** evaluation fails with an unknown-option error
 
 ### Requirement: Container nix daemon trusts the runner service users
 
 The in-container `nix.settings.trusted-users` SHALL include
 `forgejo-runner-<name>` — the NSS-visible name of the dynamic user of each
-`forgejo-runner-<name>.service` — for every enabled instance, and SHALL NOT
-reference the removed `gitea-runner` account. Host-mode jobs therefore stay
-trusted nix clients: they may use the configured substituters and copy
-closures out of the store (direct deploy).
+`forgejo-runner-<name>.service` — for every enabled instance. Host-mode jobs
+therefore stay trusted nix clients: they may use the configured substituters
+and copy closures out of the store (direct deploy).
 
 #### Scenario: Trusted users track the instances
 
 - **WHEN** instances `default` and `test` are enabled
 - **THEN** the container's `nix.settings.trusted-users` contains
-  `forgejo-runner-default` and `forgejo-runner-test`, and does not contain
-  `gitea-runner`
+  `forgejo-runner-default` and `forgejo-runner-test` for those registrations
 
 #### Scenario: Trusted users stay correct with no instances beyond default
 

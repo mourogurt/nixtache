@@ -1,12 +1,9 @@
 name: "Sandbox probe"
 description: |
-  Detect at RUNTIME whether the Nix build sandbox works on this runner, and
-  export SANDBOX_OK (1 = sandbox usable, 0 = fall back to --no-sandbox) to
-  GITHUB_ENV. Replaces the static HAS_SANDBOX_CAP flag: no manual rebuild of the
-  server is needed before CI works, and a runner whose sandbox is broken (or not
-  yet rebuilt with the /proc fix) self-heals to --no-sandbox instead of failing.
-  Subsequent build actions (rebuild-configurations, rebuild-devshells,
-  deploy-target) read SANDBOX_OK and append --no-sandbox when it is 0/unset.
+  Probe whether a Nix build succeeds without an explicit --no-sandbox and
+  export SANDBOX_OK (1 = probe succeeded, 0 = fall back to --no-sandbox) to
+  GITHUB_ENV. Subsequent build actions read SANDBOX_OK and append --no-sandbox
+  when it is 0/unset.
 
 runs:
   using: "composite"
@@ -15,13 +12,10 @@ runs:
       shell: bash
       run: |
         set -uo pipefail
-        # A fresh runCommand (unique name → not in any cache → always built
-        # locally) triggers the daemon's sandbox. Uses the CALLER's own pinned
-        # nixpkgs (builtins.getFlake of the checked-out flake) so no extra fetch
-        # and no registry dependency. If the daemon sandbox is off, this builds
-        # without sandboxing (harmless, succeeds). If the sandbox is on but
-        # broken (nspawn /proc-lock without the PrivateMounts+remount fix), the
-        # build fails → SANDBOX_OK=0 → build steps use --no-sandbox.
+        # runCommand uses the CALLER's pinned nixpkgs (builtins.getFlake of the
+        # checked-out flake), so no registry dependency is needed. A successful
+        # realization leaves builds unchanged; a failure makes later build steps
+        # use --no-sandbox. Sandboxing can be disabled and still produce success.
         # The build command MUST create $out — a bare "true" fails with
         # "builder failed to produce output path" on every runner, sandboxed
         # or not, making the probe report a false negative.
@@ -29,10 +23,10 @@ runs:
         if nix build --no-link --impure --expr \
           'let self = builtins.getFlake (toString ./.); in self.inputs.nixpkgs.legacyPackages.${builtins.currentSystem}.runCommand "nixtache-sandbox-probe" {} "mkdir -p $out"' \
           > "$probe_log" 2>&1; then
-          echo "sandbox-probe: sandboxed build OK → sandbox ON for this job."
+          echo "sandbox-probe: build OK; later steps will not add --no-sandbox."
           echo "SANDBOX_OK=1" >> "$GITHUB_ENV"
         else
-          echo "::warning::nix sandbox unavailable on this runner; builds will use --no-sandbox."
+          echo "::warning::sandbox probe build failed; builds will use --no-sandbox."
           echo "  probe output (last 3 lines):"
           tail -3 "$probe_log" | sed 's/^/    /'
           echo "SANDBOX_OK=0" >> "$GITHUB_ENV"

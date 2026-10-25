@@ -46,7 +46,7 @@ in
         authorization to start the ab-image apply units. The consumer MUST
         separately enable `systemd.sysupdate` + `boot.loader.systemd-boot.bootCounting`
         (asserted below) and provide the image/repart/transfer config
-        (see doc/archive/specs/direct-deploy/06-ab-image.md).
+        (see `doc/user_guide/ota.md`).
       '';
     };
 
@@ -120,11 +120,11 @@ in
     assertions = [
       {
         assertion = config.systemd.sysupdate.enable or false;
-        message = "services.nixtache.deploy-target.ab.enable = true requires systemd.sysupdate.enable = true on this target (configure the A/B image transfers — see doc/archive/specs/direct-deploy/06-ab-image.md).";
+        message = "services.nixtache.deploy-target.ab.enable = true requires systemd.sysupdate.enable = true on this target (configure the A/B image transfers — see doc/user_guide/ota.md).";
       }
       {
         assertion = config.boot.loader.systemd-boot.bootCounting.enable or false;
-        message = "services.nixtache.deploy-target.ab.enable = true requires boot.loader.systemd-boot.bootCounting.enable = true on this target (A/B rollback relies on Automatic Boot Assessment — see doc/archive/specs/direct-deploy/06-ab-image.md sec. 5).";
+        message = "services.nixtache.deploy-target.ab.enable = true requires boot.loader.systemd-boot.bootCounting.enable = true on this target (A/B rollback relies on Automatic Boot Assessment — see doc/user_guide/ota.md).";
       }
       {
         assertion = !ab.gating || ab.forgejoApiTokenFile != null;

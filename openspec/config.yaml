@@ -7,6 +7,12 @@ context: |
   doc/archive/ and the not-yet-translated specs (direct-deploy, deploy-user)
   are the only exceptions. The canonical requirement corpus is
   openspec/specs/ (capabilities); doc/archive/ holds frozen legacy specs.
+  Maintained docs, option descriptions and canonical specs describe current
+  behavior, invariants and operational risks, not implementation chronology,
+  resolved-bug stories or work-in-progress status. Chronology belongs in commit
+  messages, change artifacts and doc/archive/. Keep failure scenarios only for
+  current risks, constraints or recovery; migration/version notes are allowed
+  when actionable.
 
 # Per-artifact rules (applied when writing that artifact).
 rules:
@@ -14,8 +20,9 @@ rules:
     - Write in English.
   specs:
     - Write in English.
+    - Specify current contracts and invariants, not implementation chronology or resolved-bug history.
   design:
     - Write in English.
   tasks:
     - Write in English.
-    - Every change touching functional surfaces (modules, workflows, actions, options) must include a task to update README.md and the affected doc/user_guide/ + doc/technical_details/ documents, with links to the relevant openspec specs (openspec/specs/).
+    - Every change touching functional surfaces (modules, workflows, actions, options) must include a task to update README.md when the map/overview changes and the affected doc/user_guide/ + doc/technical_details/ documents, with links to the relevant openspec specs (openspec/specs/).

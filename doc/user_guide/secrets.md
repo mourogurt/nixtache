@@ -1,42 +1,27 @@
 # Secrets
 
-nixtache separates **what a secret is** (a materialised path the modules read)
-from **how it got there** (a provider). The end result is a uniform namespace:
+nixtache separates **what a secret is** (a materialised path a module reads)
+from **how it got there** (a provider). The provider abstraction exposes an
+internal namespace:
 
 ```nix
-services.nixtache.secrets.vars.<name>   # type: path, internal
+services.nixtache.secrets.vars.<name>   # type: path
 ```
 
-Populated by one or more **providers** — and any combination may be active at
-once (e.g. ssh for git+ssh-fetched values + vault for runtime-pulled ones +
-forgejo for workflow-level vars):
+Consumers may populate `vars` manually for references from their own modules.
+`providers.<name>` is an extensible configuration registry; nixtache currently
+ships no concrete provider implementations, so enabling a provider name does
+not materialize secrets or populate `vars`.
 
-```nix
-services.nixtache.secrets.providers = {
-  ssh.enable     = true;   # planned: git+ssh private flake (nixos-private pattern) / SSH key paths
-  forgejo.enable = false;  # planned: Forgejo CI variables (${{ secrets.X }})
-  vault.enable   = false;  # planned: HashiCorp Vault (vault-agent / systemd-vaultd) — intended PRIMARY
-  systemd.enable = false;  # planned: systemd LoadCredential / credentials dir
-};
-```
+The runner consumes secret paths through its direct
+`services.nixtache.runner.*` options. This stable contract is backend-agnostic
+and works with sops, agenix, vault-agent, systemd LoadCredential and similar
+mechanisms; see [`quickstart.md`](quickstart.md). The runner does not read
+`services.nixtache.secrets.vars`.
 
-## Status
+A provider implementation appends to `vars`, allowing multiple providers and
+manual assignments to coexist. Provider contract:
+[`modules/secrets.nix`](../../modules/secrets.nix).
 
-Today the runner module consumes paths via its own
-`services.nixtache.runner.*` options — the stable direct contract:
-path-based, backend-agnostic (works with sops, agenix, vault-agent, systemd
-LoadCredential, …; see [`quickstart.md`](quickstart.md)). The `vars`
-namespace is the target providers write into; future runner wiring will let
-it read from `vars` instead of (or alongside) its direct options. Consumers
-can already populate `vars` manually for cross-module secret references.
-
-Adding a provider is purely additive: it only appends to `vars`, so existing
-providers and direct assignments keep working.
-
-## Notes
-
-- The repository itself stores **no secrets** (encrypted ones included) —
-  everything secret is supplied by the consumer as paths.
-- Provider contract details: [`modules/secrets.nix`](../../modules/secrets.nix).
-- The concrete provider implementations are roadmap work — see AGENTS.md
-  "TODO / out of scope".
+The repository itself stores **no secrets** (encrypted ones included) — all
+secret material is supplied by the consumer.

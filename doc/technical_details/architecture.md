@@ -34,18 +34,17 @@ here.
 
 ### `modules/runner/` — split by responsibility
 
-All contributions merge into one container via `mkMerge`. The public API and
-option surface are identical to the former monolith — consumers and
-`tests/runner.nix` are unchanged. The NixOS `containers.<name>.config` option
-merges every sub-module's contribution into one container evaluation (see
-nixpkgs `nixos/modules/virtualisation/nixos-containers.nix` — its `merge`
-concatenates all definitions into the inner `eval-config` modules list).
+All contributions merge into one container via `mkMerge`. The NixOS
+`containers.<name>.config` option merges every sub-module's contribution into
+one container evaluation (see nixpkgs
+`nixos/modules/virtualisation/nixos-containers.nix` — its `merge` concatenates
+all definitions into the inner `eval-config` modules list).
 
 | File | Owns |
 |---|---|
 | `default.nix` | Orchestrator: imports, container shell, identity options (`enable`, `forgejoUrl`, `containerName`, `package`, limits, `nixSettings`), base nix gc/optimise, host-side `container@<name>` limits. |
 | `types.nix` | Shared option types (`knownHostEntry`, `instanceType`, `sshCredsType`, `deployTargetType`, default GitHub known-hosts). |
-| `store.nix` | Relocated store: `store.{path,mode,hostBackup}`, custom `nix-daemon` + storage oneshot + socket, `BindPaths`. |
+| `store.nix` | Relocated store: `store.{path,mode,hostBackup}`, custom daemon + socket + `BindPaths`; `nix-daemon-storage` in clone mode or `nix-daemon-overlay-mount` in overlay mode. |
 | `cache.nix` | Binary cache: `cache.*`, `secrets.cachePrivateKey`, in-container `nix-serve`, host-side nginx vhost with an edge cache ([availability machinery](binary-cache-availability.md)). |
 | `ssh.nix` | `flakeSshCreds` / `updateSshCreds`: key bindMounts + per-service `LoadCredential`. |
 | `sandbox.nix` | `enableSandbox` / `additionalCapabilities` (sole owner of container caps), forced `nix.settings.sandbox`. |
@@ -61,7 +60,7 @@ concatenates all definitions into the inner `eval-config` modules list).
 | `modules/deploy-target/` | Target side of direct deploy: root `nixtache-apply.service` (activate → probe `criticalUnits` → rollback), polkit start-only rule, `nixtache-deploy` group + pointer dir, deploy-user provisioning with the SSH gate, Tier-0 health check, `ab.*` runtime (gating, partition provisioning). |
 | `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)). |
 | `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`, so appliance targets can install packages at runtime. |
-| `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, shared timer, reboot policy. |
+| `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, poll timer, reboot policy and a deferred-reboot timer in window mode. |
 | `modules/secrets.nix` | Secrets provider abstraction (`vars` + extensible `providers`). |
 
 Requirements (canonical) live in
