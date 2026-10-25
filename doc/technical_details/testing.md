@@ -228,8 +228,19 @@ containers.<runner-name>.bindMounts."/dev/kvm" = {
 
 `kvm` + `nixos-test` are the `requiredSystemFeatures` the suites declare
 (`runNixOSTest` adds both itself; the pexpect-based suites declare `kvm`).
-Register the runner instance with the `kvm` label in Forgejo so the workflow
-resolves it. If the runner is itself a VM, enable nested virtualization
+Give the runner instance the `kvm` label so `runs-on: kvm` resolves —
+labels come from the module config (no re-registration, a switch is enough):
+
+```nix
+# a dedicated instance keeps heavy VM jobs off the general CI runner
+services.nixtache.runner.instances.kvm = {
+  uuid = "…";          # its own Forgejo registration, like `default`
+  tokenFile = config.sops.secrets.runner-token-kvm.path;
+  labels = [ "kvm:host" ];   # Forgejo name:schema form; :host = run on the host
+};
+```
+
+If the runner is itself a VM, enable nested virtualization
 (`kvm-amd nested=1`, default on modern kernels) — or prefer
 containers-on-bare-metal to skip nesting entirely.
 
