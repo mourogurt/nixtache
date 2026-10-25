@@ -141,7 +141,7 @@ pkgs.testers.runNixOSTest {
   nodes.deployer = { pkgs, ... }: {
     services.nix-serve = {
       enable = true;
-      package = pkgs.nix-serve-ng;
+      package = pkgs.nix-serve;
       secretKeyFile = "${cacheKey}/private";
       bindAddress = "0.0.0.0";
       port = 5000;

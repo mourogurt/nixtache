@@ -1,4 +1,4 @@
-# Binary cache: nix-serve-ng inside the container + nginx vhost on the host.
+# Binary cache: nix-serve inside the container + nginx vhost on the host.
 #
 # Owns `cache.{enable,domain,port,package}` and `secrets.cachePrivateKey`.
 # The store-related amendments to `nix-serve` (BindPaths + custom-daemon dep)
@@ -22,7 +22,7 @@ in
       enable = mkOption {
         type = types.bool;
         default = true;
-        description = "Whether to run nix-serve-ng and expose it via nginx.";
+        description = "Whether to run nix-serve and expose it via nginx.";
       };
 
       domain = mkOption {
@@ -34,13 +34,16 @@ in
       port = mkOption {
         type = types.port;
         example = 7125;
-        description = "Local port nix-serve-ng listens on (proxied by nginx).";
+        description = "Local port nix-serve listens on (proxied by nginx).";
       };
 
       package = mkOption {
         type = types.package;
-        default = pkgs.nix-serve-ng;
-        defaultText = lib.literalExpression "pkgs.nix-serve-ng";
+        # nix-serve (Perl, tracks CppNix) serves content-addressed
+        # realisations; nix-serve-ng (the Lix rewrite) does not know CA
+        # derivations, which the relocated-store modes rely on.
+        default = pkgs.nix-serve;
+        defaultText = lib.literalExpression "pkgs.nix-serve";
         description = "nix-serve package to use.";
       };
     };
@@ -54,7 +57,7 @@ in
     secrets = {
       cachePrivateKey = mkOption {
         type = types.path;
-        description = "Binary cache signing key file (used by nix-serve-ng).";
+        description = "Binary cache signing key file (used by nix-serve).";
       };
     };
   };

@@ -85,7 +85,7 @@ let
         ({ lib, ... }: {
           services.nixtache.overlay-nix.enable = true;
 
-          # Hermetic substituter: the deployer's nix-serve-ng (test LAN only).
+          # Hermetic substituter: the deployer's nix-serve (test LAN only).
           nix.settings.substituters = [ "http://deployer:5000" ];
           nix.settings.trusted-public-keys = [ cachePub ];
 
@@ -112,7 +112,7 @@ pkgs.testers.runNixOSTest {
   nodes.deployer = { pkgs, ... }: {
     services.nix-serve = {
       enable = true;
-      package = pkgs.nix-serve-ng;
+      package = pkgs.nix-serve;
       secretKeyFile = "${cacheKey}/private";
       bindAddress = "0.0.0.0";
       port = 5000;

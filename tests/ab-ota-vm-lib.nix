@@ -32,12 +32,12 @@ in
 {
   inherit fixture lib pkgs;
 
-  # The deployer node: nix-serve-ng on :5000 (signed with the throwaway key)
+  # The deployer node: nix-serve on :5000 (signed with the throwaway key)
   # + nginx on :80 serving the sysupdate staging dir.
   deployerNode = { extraDependencies ? [ ] }: { pkgs, ... }: {
     services.nix-serve = {
       enable = true;
-      package = pkgs.nix-serve-ng;
+      package = pkgs.nix-serve;
       secretKeyFile = "${cacheKey}/private";
       bindAddress = "0.0.0.0";
       port = 5000;

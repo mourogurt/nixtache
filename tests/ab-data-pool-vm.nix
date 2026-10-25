@@ -15,7 +15,7 @@
 #     1. v1 boots (no pool yet — first boot tolerates its absence), the test
 #        creates tank, writes state, restarts the overlay mount onto the pool
 #        dirs and realizes vim into the overlay upper (from the deployer's
-#        nix-serve-ng; hermetic LAN).
+#        nix-serve; hermetic LAN).
 #     2. v2 staged signed → sysupdate writes slot B → reboot into v2:
 #        the pool imports (zpool.cache lives on the persistent root), state
 #        reads, the probe unit is active, vim still runs from the upper, and

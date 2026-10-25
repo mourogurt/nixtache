@@ -3,7 +3,7 @@
 # normal nix on an A/B appliance (`nix.enable=false`, /nix/store ro squashFS) —
 # not just `nix-store` ops but the everyday nix surface.
 #
-# Covers (hermetic — a deployer node runs nix-serve-ng with `hello` and `vim`
+# Covers (hermetic — a deployer node runs nix-serve with `hello` and `vim`
 # pre-seeded; a LOCAL nixpkgs path is registered so `nix run/shell/build
 # nixpkgs#<x>` resolve without internet):
 #   O2  `nix-store --realize` a package from the cache → lands in upper, runs.
@@ -100,7 +100,7 @@ pkgs.testers.runNixOSTest {
   nodes.deployer = { pkgs, ... }: {
     services.nix-serve = {
       enable = true;
-      package = pkgs.nix-serve-ng;
+      package = pkgs.nix-serve;
       secretKeyFile = "${cacheKey}/private";
       bindAddress = "0.0.0.0";
       port = 5000;

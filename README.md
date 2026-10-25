@@ -16,7 +16,7 @@ that is supplied by the consumer via module options. Start with the
 
 | Module | What it gives you |
 |---|---|
-| [`runner`](doc/user_guide/quickstart.md) | `services.nixtache.runner`: the Forgejo Actions runner (`forgejo-runner`, multi-instance, uuid+token registration) inside a NixOS container, with a configurable/relocatable nix store, an `nix-serve-ng` binary cache + nginx vhost, and credential wiring for private flake inputs and deploy keys. |
+| [`runner`](doc/user_guide/quickstart.md) | `services.nixtache.runner`: the Forgejo Actions runner (`forgejo-runner`, multi-instance, uuid+token registration) inside a NixOS container, with a configurable/relocatable nix store, a `nix-serve` binary cache + nginx vhost, and credential wiring for private flake inputs and deploy keys. |
 | [`deploy-target`](doc/user_guide/deploy.md) | `services.nixtache.deploy-target`: the receiving side of direct deploy — root `nixtache-apply.service` (low-disk guard → activate → probe `criticalUnits` → rollback), polkit start-only rules, gated deploy user, Tier-0 health check. Import on every deploy target. |
 | [`ab-image`](doc/user_guide/ota.md) | `services.nixtache.ab-image`: build-time A/B appliance image config (repart slots, UKI, sysupdate transfers, boot counting, GPG verify, the slot's lower store DB dump + boot-time loader) — the OTA route. |
 | [`overlay-nix`](doc/user_guide/overlay-nix.md) | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` so image-based targets can install packages at runtime — delta installs against the shipped lower store DB and an upper-layer lifecycle across OTA updates (`"wipe"` default / `"reconcile"`). |
