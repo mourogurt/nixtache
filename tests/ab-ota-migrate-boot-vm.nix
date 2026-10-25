@@ -41,10 +41,10 @@
 #   / unsigned) is owned by ab-ota-verify-vm and not duplicated here.
 #
 # Needs KVM. Hermetic: v2 comes from the deployer node on the test LAN.
-{ nixpkgs, self, system ? "x86_64-linux", fileSystemsOverride ? false }:
+{ nixpkgs, self, system ? "x86_64-linux", fileSystemsOverride ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
 
 let
-  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) fixture pkgs lib;
 
   efiArch = pkgs.stdenv.hostPlatform.efiArch;
@@ -100,6 +100,7 @@ let
 
     system.image.id = "legacy";
     image.repart = {
+      enable = true;
       # 512M ESP + 2G root leaves ~1.5G free for 2 x 512M slots. The ext4
       # holds a full store closure (tens of thousands of small files) — the
       # default bytes-per-inode ratio exhausts inodes before space, so the

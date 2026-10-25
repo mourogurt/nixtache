@@ -17,7 +17,9 @@
 # TEST-SPECS.md sec. 5 / review sec. 11.4 (merged mountpoint ambiguity).
 #
 # Needs KVM (requiredSystemFeatures). Covers TEST-SPECS.md sec. 5: O1, O7.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs, self, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
@@ -47,10 +49,9 @@ let
           {
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest-overlay";
-            nixpkgs.hostPlatform = system;
             # Same contract as ab-fixture: the appliance world must evaluate
             # content-addressed (the ab-image module asserts it).
-            nixpkgs.config.contentAddressedByDefault = true;
+            nixpkgs.pkgs = appliancePkgs;
 
             services.nixtache.ab-image = {
               enable = true;

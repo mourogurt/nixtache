@@ -47,12 +47,16 @@
 #   - The action's trigger REALLY reboots the installed machine after v2
 #     lands (QEMU resets in place; boot counting may then boot the v2 UKI —
 #     exercised end-to-end; slot-state assertions hold from either slot).
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # Pinned external sources, fetched at eval time on the host (which has
   # internet); the VMs only ever see them as store paths.
@@ -73,7 +77,7 @@ let
   # pre-build and the deployer VM's flake evaluation — see the file header of
   # tests/ab-anywhere-install.nix.
   installConfig = import ./ab-anywhere-install.nix {
-    inherit nixpkgs system;
+    inherit nixpkgs system appliancePkgs;
     nixtachePath = self;
     nixtacheModules = self.nixosModules;
     disko = diskoSrc;
@@ -113,6 +117,40 @@ let
             system.kexec-installer.name = "nixos-kexec-installer-noninteractive";
             boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
             boot.supportedFilesystems.zfs = lib.mkForce false;
+            # The pinned nixos-images' restore-remote-access.nix sets
+            # boot.initrd.systemd.enable, which current nixpkgs removed:
+            # scripted initrd is gone, so systemd initrd is unconditional
+            # and the toggle is a no-op. Their module is otherwise exactly
+            # what the install needs — its initrd service carries
+            # authorized_keys / host keys / network state into the installer
+            # across the kexec (nixos-anywhere re-SSHes after it) — so the
+            # original is disabled by module key and the same service is
+            # vendored here without the dead toggle. Drop this when the
+            # nixos-images pin no longer sets the removed option.
+            disabledModules = [ (nixosImages + "/nix/restore-remote-access.nix") ];
+            boot.initrd.systemd.services.restore-state-from-initrd = {
+              unitConfig = {
+                DefaultDependencies = false;
+                RequiresMountsFor = "/sysroot /dev";
+              };
+              wantedBy = [ "initrd.target" ];
+              requiredBy = [ "rw-etc.service" ];
+              before = [ "rw-etc.service" ];
+              serviceConfig.Type = "oneshot";
+              script = ''
+                mkdir -m 700 -p /sysroot/root/.ssh
+                mkdir -m 755 -p /sysroot/etc/ssh
+                mkdir -m 755 -p /sysroot/root/network
+                if [[ -f ssh/authorized_keys ]]; then
+                  install -m 400 ssh/authorized_keys /sysroot/root/.ssh
+                fi
+                install -m 400 ssh/ssh_host_* /sysroot/etc/ssh
+                cp *.json /sysroot/root/network/
+                if [[ -f machine-id ]]; then
+                  cp machine-id /sysroot/etc/machine-id
+                fi
+              '';
+            };
           }
         )
       ];

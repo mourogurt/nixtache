@@ -18,12 +18,12 @@
 # subtree into its own flake directory — pure flake evaluation forbids
 # referencing absolute store paths, and a path: input would need a narHash
 # the host cannot compute for the dirty worktree.
-{ nixpkgs, nixtachePath, nixtacheModules, disko, system ? "x86_64-linux" }:
+{ nixpkgs, nixtachePath, nixtacheModules, disko, system ? "x86_64-linux", appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
 
 let
   lib = nixpkgs.lib;
   fixture = import (nixtachePath + "/tests/ab-fixture.nix") {
-    inherit nixpkgs system;
+    inherit nixpkgs system appliancePkgs;
     # mkAppliance only reads self.nixosModules.
     self = { nixosModules = nixtacheModules; };
   };

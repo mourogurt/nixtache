@@ -18,6 +18,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
+  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
 }:
 
 let
@@ -35,9 +36,8 @@ let
 
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
-    nixpkgs.hostPlatform = system;
     # The appliance world evaluates content-addressed (ab-image asserts it).
-    nixpkgs.config.contentAddressedByDefault = true;
+    nixpkgs.pkgs = appliancePkgs;
   };
 
   # Force toplevel.outPath to surface option-missing / assertion errors.
@@ -91,9 +91,8 @@ let
   # ========================================================================
   abPartCfg = ab-extra: {
     system.stateVersion = lib.trivial.release;
-    nixpkgs.hostPlatform = system;
     # The appliance world evaluates content-addressed (ab-image asserts it).
-    nixpkgs.config.contentAddressedByDefault = true;
+    nixpkgs.pkgs = appliancePkgs;
     # Dummy root FS so the base NixOS root-filesystem assertion does not fire
     # during `probeOK` (which forces `toplevel.outPath`). The module under test
     # never reads this — it's purely to satisfy the base system's bootability
@@ -273,9 +272,8 @@ let
   # ========================================================================
   overlayCfg = {
     system.stateVersion = lib.trivial.release;
-    nixpkgs.hostPlatform = system;
     # The appliance world evaluates content-addressed (ab-image asserts it).
-    nixpkgs.config.contentAddressedByDefault = true;
+    nixpkgs.pkgs = appliancePkgs;
     # Dummy root FS + grub off — same test-only rationale as abPartCfg / runnerBase.
     fileSystems."/".fsType = lib.mkDefault "tmpfs";
     boot.loader.grub.enable = lib.mkDefault false;

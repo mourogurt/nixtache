@@ -4,7 +4,18 @@
 #
 # The appliance imports the REAL nixtache modules (deploy-target + ab-image) so
 # the polkit/gating/repart/transfers/verify under test are framework code.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+#
+# `pkgs` is the build-time TOOLING import (signing keys, staging helpers) and
+# stays input-addressed; `appliancePkgs` is the import the appliance SYSTEM
+# evaluates with (`nixpkgs.pkgs`). ab-image asserts a content-addressed
+# evaluation (the shipped lower store DB holds the closure's registered
+# validity records — content-true only under CA), so the default is a CA
+# import; callers share one via flake.nix's caPkgs.
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
@@ -77,11 +88,11 @@ let
           {
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest";
-            nixpkgs.hostPlatform = system;
             # The appliance ships its closure's REGISTERED validity records —
             # content-true only under content-addressing (the ab-image module
-            # asserts this). All A/B fixtures therefore evaluate CA.
-            nixpkgs.config.contentAddressedByDefault = true;
+            # asserts pkgs.config.contentAddressedByDefault). Evaluate the
+            # system with the CA import handed in by the caller.
+            nixpkgs.pkgs = appliancePkgs;
 
             services.nixtache.ab-image = {
               enable = true;

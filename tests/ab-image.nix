@@ -10,6 +10,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
+  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
 }:
 
 let
@@ -18,7 +19,6 @@ let
 
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
-    nixpkgs.hostPlatform = system;
     # The shipped-DB pins force `system.build.toplevel` evaluation, which runs
     # the image-based-appliance profile's lockout assertion — these hosts never
     # configure a password, so opt out the way the profile documents.
@@ -27,11 +27,10 @@ let
 
   # The shipped DB is the closure's registered records — content-true only
   # under content-addressing. Included in every positive-leg host; the
-  # negative-leg host below omits it to pin the module's assertion. NOTE:
-  # nixpkgs.config merges FIRST-definition-wins, so a later override cannot
-  # turn CA off — the negative host must simply not include this module.
+  # negative-leg host below pins the module's assertion by simply not
+  # including this module (its world then evaluates input-addressed).
   caModule = {
-    nixpkgs.config.contentAddressedByDefault = true;
+    nixpkgs.pkgs = appliancePkgs;
   };
 
   mkHost = extra:

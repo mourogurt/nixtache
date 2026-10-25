@@ -38,12 +38,16 @@
 #
 # Needs KVM. Hermetic: vim's closure + the v2 package come from the deployer
 # node on the test LAN; no internet.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   vim = pkgs.vim;
   vimPath = vim.outPath;

@@ -13,10 +13,14 @@
 # is listed in criticalUnits (ukiTries=2, healthCheckTimeout=20s to keep the
 # failure window short); v3 is the fixed follow-up (hello marker proves new
 # lower content). Needs KVM. Hermetic (deployer LAN only).
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
-  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) fixture pkgs;
 
   # v2's broken boot: the canary fails, Tier-0 sees it via criticalUnits and

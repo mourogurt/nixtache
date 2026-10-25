@@ -21,12 +21,16 @@
 # qemu-vm/test-instrumentation modules), so the repo holds the v2 config only;
 # "unchanged source" (AU-F2/F3) is exercised by re-running the service without
 # modifying the repo. All spec assertions are preserved.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   autoMod = self.nixosModules.auto-update or null;
 

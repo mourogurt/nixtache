@@ -11,10 +11,14 @@
 # boot-from-slot lifecycle after migration is ab-ota-anywhere-vm's domain;
 # this suite pins the migration STEP: provisioning, idempotency, first image
 # install, live fallback intact.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
-  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) fixture pkgs lib;
 
   # The OTA payload: a real appliance image (version 2 > the provisioned

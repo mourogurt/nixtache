@@ -40,12 +40,12 @@
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test
 # LAN; no internet.
-{ nixpkgs, self, system ? "x86_64-linux", overlayOptions ? { }, upperTmpfs ? false, reconcileDegraded ? false }:
+{ nixpkgs, self, system ? "x86_64-linux", overlayOptions ? { }, upperTmpfs ? false, reconcileDegraded ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # pkgs_1: the lower-only runtime. A renamed busybox keeps multi-call
   # dispatch working: `busybox sh` (applet via argv[1]) requires argv[0] to

@@ -20,12 +20,16 @@
 # The mock Forgejo API is an nginx vhost on 127.0.0.1/[::1]:8080 serving a
 # static JSON body for /api/v1/actions/runners; the node points the NEW
 # self-contained option `ab.forgejoPort` at it (no runner module import).
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # v2 — the update staged into the local staging dir. Only its
   # sysupdate-package output is used (abtest_2.nix-store.raw, abtest_2+*.efi,

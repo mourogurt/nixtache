@@ -75,12 +75,16 @@
 #
 # Needs KVM (runNixOSTest boots QEMU; requiredSystemFeatures = ["kvm"] is set
 # by the framework itself).
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # The single config name the deploy map + fake `nix flake show` agree on.
   cfgName = "livetest";

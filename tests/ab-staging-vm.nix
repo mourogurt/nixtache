@@ -10,12 +10,16 @@
 #   nokey   — signingKeyFile = null → GC removes the (stale) .gpg
 #
 # Targets EXISTING code (modules/runner/ab.nix GC) → green on a KVM box.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (fixture) testSignKey;
 
   stage = "/var/lib/nixtache/ab-stage/myserver";

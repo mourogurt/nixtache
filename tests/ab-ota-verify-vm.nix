@@ -40,12 +40,16 @@
 # The nginx 404s for <file>.sha256.asc / <file>.sha256.gpg in the deployer
 # log are systemd-pull probing per-file signature sidecars before falling
 # back to SHA256SUMS.gpg — expected noise, not failures.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # v2 — the correctly-signed update (C4, full action run). v3 — the update the
   # negative cases stage manually + mutate. Both signed appliances so the

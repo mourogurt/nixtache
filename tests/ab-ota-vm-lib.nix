@@ -6,12 +6,20 @@
 #
 # The pattern is lifted from tests/overlay-nix-ab-swap-vm.nix; this module
 # exists so the new suites do not each duplicate the QEMU/deployer wiring.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+#
+# `appliancePkgs` is the nixpkgs import the appliance systems evaluate with
+# (CA — ab-image asserts it; see ab-fixture.nix). `pkgs` below stays the
+# input-addressed tooling import.
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # Throwaway binary-cache keypair: deployer signs, appliance trusts.
   cacheKey = pkgs.runCommand "ota-vm-cache-key" { nativeBuildInputs = [ pkgs.nix ]; } ''

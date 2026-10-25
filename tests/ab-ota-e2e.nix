@@ -43,12 +43,17 @@
 # slot B → relabels _empty → nix-store_2). Content assertions prove the
 # update delivered new content (hello in slot B) and left the rollback slot
 # intact (no hello in slot A).
-{ nixpkgs, self, system ? "x86_64-linux", variant ? { } }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, variant ? { }
+}:
 
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # Compression-matrix knobs. Defaults reproduce the base variant
   # (squashfs + zstd); the flake registers

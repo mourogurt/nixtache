@@ -6,10 +6,14 @@
 # Interruption window: sysupdate relabels the target partition BEFORE
 # downloading the content (pinned by ab-ota-e2e), so killing right after the
 # label appears always lands inside the download. Needs KVM. Hermetic.
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
-  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) pkgs;
 
   v1 = otaLib.mkAppliance { version = "1"; };

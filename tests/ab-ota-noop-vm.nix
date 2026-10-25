@@ -6,10 +6,14 @@
 # funnels into exactly this sysupdate behaviour — the action's staging + SSH
 # trigger are covered by ab-ota-e2e; this suite pins the target-side no-op.
 # Needs KVM. Hermetic (deployer LAN only).
-{ nixpkgs, self, system ? "x86_64-linux" }:
+{ nixpkgs
+, self
+, system ? "x86_64-linux"
+, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+}:
 
 let
-  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) pkgs;
 
   v1 = otaLib.mkAppliance { version = "1"; };

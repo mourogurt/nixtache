@@ -16,6 +16,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
+  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
 }:
 
 let
@@ -24,7 +25,7 @@ let
   # editing it. Its mkAppliance does NOT forward storeFs / storeCompression /
   # storeCompressionLevel, so we define a local variant below that does (its body
   # mirrors mkAppliance's thin consumer module + the three compression options).
-  fixture = import ./ab-fixture.nix { inherit nixpkgs self system; };
+  fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
   pkgs = fixture.pkgs;
 
   # Small store slot → small boot image (fast QEMU). The squashfs/erofs CONTENT
@@ -52,7 +53,9 @@ let
           {
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest";
-            nixpkgs.hostPlatform = system;
+            # ab-image ships the closure's registered validity records —
+            # content-true only under CA; the module asserts this.
+            nixpkgs.pkgs = appliancePkgs;
 
             services.nixtache.ab-image = {
               enable = true;

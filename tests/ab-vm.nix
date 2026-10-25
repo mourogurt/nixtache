@@ -16,6 +16,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
+  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
 }:
 
 let
@@ -25,7 +26,7 @@ let
   # Shared throwaway OpenPGP signing keypair + the appliance builder — single
   # source of truth in tests/ab-fixture.nix (its mkAppliance covers
   # version/signVerify/dataPartition; no local copy here).
-  inherit (import ./ab-fixture.nix { inherit nixpkgs self system; }) testSignKey mkAppliance;
+  inherit (import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; }) testSignKey mkAppliance;
 
   v1 = mkAppliance { version = "1"; dataPartition = true; };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
