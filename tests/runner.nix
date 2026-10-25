@@ -814,6 +814,58 @@ self.nixosModules.runner
     };
   };
 
+  # --- scenario: nginx edge cache on the cache vhost (default: on) --------
+  # The zone + the "/nar/" (immutable, 30d) and "/" (narinfo: 6h positive,
+  # 1m negative) cache policies land on the cache vhost; the ab staging
+  # location (scenarioAbStage) keeps its static root untouched.
+  vhostSrv = hostSrv.config.services.nginx.virtualHosts."bincache.test";
+  scenarioNginxCache = {
+    name = "cache.nginxCache default on: zone + /nar/ + narinfo policies on the vhost";
+    checks = {
+      zoneEnabled = hostSrv.config.services.nginx.proxyCachePath."nixtache-bincache".enable;
+      zoneMaxSize = hostSrv.config.services.nginx.proxyCachePath."nixtache-bincache".maxSize == "10g";
+      narLocation = vhostSrv.locations ? "/nar/";
+      narCached = lib.hasInfix "proxy_cache nixtache-bincache" vhostSrv.locations."/nar/".extraConfig;
+      narCoalesced = lib.hasInfix "proxy_cache_lock on" vhostSrv.locations."/nar/".extraConfig;
+      narStale = lib.hasInfix "proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504"
+        vhostSrv.locations."/nar/".extraConfig;
+      narLongTtl = lib.hasInfix "proxy_cache_valid 200 30d" vhostSrv.locations."/nar/".extraConfig;
+      narinfoNegativeTtl = lib.hasInfix "proxy_cache_valid 404 1m" (vhostSrv.locations."/".extraConfig or "");
+      # staging store (enabled in hostAb) must not inherit cache directives:
+      # asserted there via nginxAutoindex; here we pin the default host's
+      # vhost to exactly the two cache locations.
+      onlyCacheLocations = builtins.attrNames vhostSrv.locations == [ "/" "/nar/" ];
+    };
+  };
+
+  hostCacheOff = mkHost "/srv" {
+    services.nixtache.runner.cache.nginxCache.enable = false;
+  };
+  vhostCacheOff = hostCacheOff.config.services.nginx.virtualHosts."bincache.test";
+  scenarioNginxCacheOff = {
+    name = "cache.nginxCache.enable=false: plain proxy-pass, no zone, no /nar/ location";
+    checks = {
+      noZone = hostCacheOff.config.services.nginx.proxyCachePath == { };
+      noNarLocation = !(vhostCacheOff.locations ? "/nar/");
+      noCacheDirectives = !(lib.hasInfix "proxy_cache" (vhostCacheOff.locations."/".extraConfig or ""));
+    };
+  };
+
+  # --- scenario: daemon lifecycle + nix-serve scheduling --------------------
+  # KillMode=mixed: per-connection daemon workers must not outlive the unit
+  # (KillMode=process leaked them — chronic "remains running" records).
+  # nix-serve gets a mild CPU/IO edge over the (default-scheduled) CI units.
+  scenarioCacheBackendLifecycle = {
+    name = "nix-daemon-custom KillMode=mixed (no leaked workers); nix-serve scheduling edge";
+    checks = {
+      daemonKillMode = svcSrv."nix-daemon-custom".serviceConfig.KillMode == "mixed";
+      nixServeNice = svcSrv."nix-serve".serviceConfig.Nice == -5;
+      nixServeIoClass = svcSrv."nix-serve".serviceConfig.IOSchedulingClass == "best-effort";
+      nixServeIoPrio = svcSrv."nix-serve".serviceConfig.IOSchedulingPriority == 0;
+      runnersNotOutranking = !(svcSrv."forgejo-runner-default".serviceConfig ? Nice);
+    };
+  };
+
   scenarios = [
     scenarioSrv
     scenarioRoot
@@ -843,6 +895,9 @@ self.nixosModules.runner
     scenarioOverlayLower
     scenarioGitSshHost
     scenarioResources
+    scenarioNginxCache
+    scenarioNginxCacheOff
+    scenarioCacheBackendLifecycle
   ];
 
   failed = builtins.concatMap

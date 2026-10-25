@@ -46,7 +46,7 @@ concatenates all definitions into the inner `eval-config` modules list).
 | `default.nix` | Orchestrator: imports, container shell, identity options (`enable`, `forgejoUrl`, `containerName`, `package`, limits, `nixSettings`), base nix gc/optimise, host-side `container@<name>` limits. |
 | `types.nix` | Shared option types (`knownHostEntry`, `instanceType`, `sshCredsType`, `deployTargetType`, default GitHub known-hosts). |
 | `store.nix` | Relocated store: `store.{path,mode,hostBackup}`, custom `nix-daemon` + storage oneshot + socket, `BindPaths`. |
-| `cache.nix` | Binary cache: `cache.*`, `secrets.cachePrivateKey`, in-container `nix-serve`, host-side nginx vhost. |
+| `cache.nix` | Binary cache: `cache.*`, `secrets.cachePrivateKey`, in-container `nix-serve`, host-side nginx vhost with an edge cache ([availability machinery](binary-cache-availability.md)). |
 | `ssh.nix` | `flakeSshCreds` / `updateSshCreds`: key bindMounts + per-service `LoadCredential`. |
 | `sandbox.nix` | `enableSandbox` / `additionalCapabilities` (sole owner of container caps), forced `nix.settings.sandbox`. |
 | `known-hosts.nix` | `gitHost` / `extraKnownHosts`, in-container `services.openssh.knownHosts`. |
