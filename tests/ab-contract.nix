@@ -308,7 +308,7 @@ let
       remountHookInStoreUrl =
         lib.hasInfix "remount-hook=" (cfg.nix.settings.store or "");
       remountHookIsScript =
-        lib.hasInfix "nixtache-overlay-remount" (cfg.nix.settings.store or "");
+        lib.hasInfix "remount-hook=/nix/store/" (cfg.nix.settings.store or "");
     });
 
   overlayLifecycleCfg = mode: lib.recursiveUpdate overlayCfg {
