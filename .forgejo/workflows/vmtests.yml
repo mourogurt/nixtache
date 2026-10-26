@@ -8,6 +8,16 @@
 #   - /dev/kvm exposed to the runner environment
 #   - nix system-features containing `kvm` and `nixos-test` (the runner
 #     module propagates the host's nix.settings.system-features into jobs)
+#
+# Output contract (openspec/specs/ci-workflows): each job's step output holds
+# only the suite's own verdict (test-driver output when the test ran, or
+# "build never reached the test" + the closing build error); the complete
+# `nix build -L` transcript lands in artifacts/<suite>/full.log and is
+# uploaded on every outcome. Smoke-subset membership is filtered INSIDE the
+# run step (a matrix `include:` merging extra keys spawns never-starting
+# duplicate jobs on this runner — observed as permanently "waiting" jobs
+# holding the whole run open), so every matrix job — skipped ones included —
+# produces a full.log and the upload step can require it.
 name: vmtests
 
 on:
@@ -26,15 +36,26 @@ on:
     - cron: "15 3 * * *"
     - cron: "30 3 * * 0"
 
+env:
+  # Suites the nightly/smoke subset runs. Keep this list in sync with the
+  # matrix below (membership is checked by the run step, not by `include:`).
+  SMOKE_SUITES: "ab-ota-e2e overlay-nix-ota-invalid-vm"
+
 jobs:
   suites:
+    # Matrix jobs are displayed under their bare suite name (spec:
+    # ci-workflows — no `suites (…)` prefix).
+    name: ${{ matrix.suite }}
     runs-on: kvm
     timeout-minutes: 240
-    concurrency:
-      group: vmtests
-      cancel-in-progress: false
     strategy:
       fail-fast: false
+      # One KVM runner host died under a full-matrix dispatch with ~30
+      # concurrent suites (run #80: QEMU/build processes SIGKILLed, QMP
+      # connection resets), while ~7 concurrent suites ran green — bound a
+      # full dispatch to 3 concurrent suites to stay clearly inside one
+      # host's memory/KVM capacity at the cost of a longer dispatch.
+      max-parallel: 3
       matrix:
         # smoke keeps the KVM path warm nightly: one OTA e2e variant + the
         # replication baseline. Full = the whole vmTests inventory; the
@@ -77,11 +98,6 @@ jobs:
           - overlay-nix-ota-invalid-reconcile-degraded-vm
           - overlay-nix-ota-invalid-tmpfs-vm
           - runner-store-mode-vm
-        include:
-          - suite: ab-ota-e2e
-            smoke: true
-          - suite: overlay-nix-ota-invalid-vm
-            smoke: true
     steps:
       - name: Checkout nixtache
         uses: actions/checkout@v4
@@ -93,16 +109,34 @@ jobs:
         uses: ./.forgejo/actions/sandbox-probe
 
       - name: Run VM suite ${{ matrix.suite }}
-        # dispatch(full) and the Sunday schedule run every matrix entry;
-        # dispatch(smoke) and the nightly schedule run only smoke-tagged
-        # suites. Filtering is per-step (matrix exclude is static).
-        if: >-
-          (github.event_name == 'workflow_dispatch' && inputs.subset != 'smoke') ||
-          (github.event_name == 'workflow_dispatch' && inputs.subset == 'smoke' && matrix.smoke) ||
-          (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 0') ||
-          (github.event_name == 'schedule' && github.event.schedule == '15 3 * * *' && matrix.smoke)
+        env:
+          SUITE: ${{ matrix.suite }}
+          SUBSET: ${{ inputs.subset }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          log="artifacts/$SUITE/full.log"
+          mkdir -p "artifacts/$SUITE"
+
+          # Smoke-subset filtering: nightly schedule (15 3 * * *) and
+          # dispatch(subset=smoke) run only SMOKE_SUITES members; everything
+          # else runs the full suite. Skipped suites still write full.log so
+          # the upload step (if-no-files-found: error) stays meaningful.
+          if [ "$EVENT_SCHEDULE" = "15 3 * * *" ]; then subset=smoke; else subset="${SUBSET:-full}"; fi
+          case " $SMOKE_SUITES " in
+            *" $SUITE "*)
+              if [ "$subset" = "smoke" ]; then
+                echo "----- $SUITE: smoke subset member — running -----"
+              fi
+              ;;
+            *)
+              if [ "$subset" = "smoke" ]; then
+                echo "smoke dispatch: $SUITE is not in the smoke set — skipped" | tee "$log"
+                exit 0
+              fi
+              ;;
+          esac
+
           # SANDBOX_OK is set by sandbox-probe (1 = sandbox works, 0/unset =
           # broken). Without the flag, a KVM runner whose nix sandbox is
           # broken fails the suite build on missing namespaces instead of
@@ -113,13 +147,46 @@ jobs:
             echo "SANDBOX_OK!=1 → --no-sandbox"
             SANDBOX_FLAG="--no-sandbox"
           fi
-          echo "----- vmTests.x86_64-linux.${{ matrix.suite }} -----"
-          out=$(nix build -L --no-link --print-out-paths $SANDBOX_FLAG ".#vmTests.x86_64-linux.${{ matrix.suite }}")
-          echo "$out"
+
+          # The full transcript goes to the artifact file, never to the step
+          # stream; the step prints only the verdict view derived from it.
+          nix build -L --no-link --print-out-paths $SANDBOX_FLAG \
+            ".#vmTests.x86_64-linux.$SUITE" > "$log" 2>&1
+          rc=$?
+
+          if [ "$rc" -eq 0 ]; then
+            echo "----- $SUITE: PASS (full transcript in artifact vmtests-$SUITE) -----"
+            # The suite's own summary: runCommand suites (ab-vm,
+            # ab-compression-vm, …) print a `=== … ===` report section —
+            # show it from its last banner; runNixOSTest suites end with the
+            # driver's closing lines.
+            banner=$(grep -n '^=== ' "$log" | tail -1 | cut -d: -f1)
+            if [ -n "$banner" ]; then
+              tail -n +"$banner" "$log"
+            else
+              tail -n 20 "$log"
+            fi
+            exit 0
+          fi
+
+          echo "----- $SUITE: FAIL (verdict below; full transcript in artifact vmtests-$SUITE) -----"
+          if grep -qE '(finished: |must succeed: |must fail: |waiting for |^=== )' "$log"; then
+            # The test itself executed — show its closing output (failing
+            # command, traceback, verdict lines).
+            tail -n 150 "$log"
+          else
+            echo "build never reached the test — last 40 build-log lines:"
+            tail -n 40 "$log"
+          fi
+          exit "$rc"
 
       - name: Upload suite logs
         if: always()
         uses: actions/upload-artifact@v3
         with:
           name: vmtests-${{ matrix.suite }}
-          path: artifacts/
+          path: artifacts/${{ matrix.suite }}/
+          # A suite job that ran MUST leave a full.log (skipped smoke jobs
+          # write one too) — a silent no-op upload is a workflow bug and
+          # fails the job.
+          if-no-files-found: error

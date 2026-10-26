@@ -1054,10 +1054,11 @@ pkgs.runCommand "runner-module-test"
     # ...and complete the live path (switch mode): activated marker in its log
     grep -q "desktop: activated /nix/store/0000000000000000000000000000000-fake-toplevel" $combined \
       || contract_fail="$contract_fail desktop-not-activated"
-    # structural: the remote ab trigger uses the -reboot variant; the per-target
-    # timeout wrap is present; dry-activate is V2-native (pending-dry trigger,
-    # NO nixos-rebuild anywhere in the action).
-    grep -q "systemd-sysupdate-reboot.service" "$work/action.sh" || contract_fail="$contract_fail no-reboot-trigger"
+    # structural: the remote ab trigger starts the target-side install-then-
+    # reboot unit (nixtache-ab-update); the per-target timeout wrap is
+    # present; dry-activate is V2-native (pending-dry trigger, NO
+    # nixos-rebuild anywhere in the action).
+    grep -q "systemctl start nixtache-ab-update.service" "$work/action.sh" || contract_fail="$contract_fail no-ab-update-trigger"
     grep -q 'timeout "''${tmo}m"' "$work/action.sh" || contract_fail="$contract_fail no-timeout-wrap"
     grep -q "pending-dry && systemctl start nixtache-apply-dry.service" "$work/action.sh" \
       || contract_fail="$contract_fail no-dry-trigger"

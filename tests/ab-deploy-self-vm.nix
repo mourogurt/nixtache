@@ -30,6 +30,7 @@ let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
 
   # v2 — the update staged into the local staging dir. Only its
   # sysupdate-package output is used (abtest_2.nix-store.raw, abtest_2+*.efi,
@@ -188,7 +189,9 @@ pkgs.testers.runNixOSTest {
     stage_v2(b1)
     b1.succeed("systemctl start systemd-sysupdate.service", timeout=300)
     check_slot_b_written(b1)
-    b1.succeed("journalctl -u systemd-sysupdate --no-pager | grep -i 'Successfully installed'")
+    # Install evidence from the journal of THIS (installing) boot via the
+    # shared helper — B1 never reboots, so the query cannot race a reboot.
+    b1.succeed("${otaLib.assertSysupdateInstalled}")
     b1.succeed("unsquashfs -l /dev/vdb2 | grep hello")  # v2 content in slot B
     b1.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # rollback slot intact
     print("B1 OK: self-deploy wrote nix-store_2 + abtest_2+*.efi from local staging")
@@ -225,11 +228,17 @@ pkgs.testers.runNixOSTest {
     check_slot_b_written(b2)
     b2.succeed("test ! -f /var/lib/nixtache/ab-pending")
     b2.succeed("journalctl -u nixtache-ab-apply --no-pager | grep 'runners idle'")
-    # the gating script drives the stock two-leg trigger (--wait update,
-    # then the reboot assessment; the reboot is no-op'd above). `systemctl
-    # cat` shows only the script wrapper path — grep its text.
+    # The gating script delegates to nixtache-ab-update.service (oneshot:
+    # update to completion, reboot only on install evidence; the reboot unit
+    # itself is no-op'd above). `systemctl cat` shows only the script wrapper
+    # path — grep its text. The delegation target's own script must carry the
+    # reboot assessment.
     b2.succeed(
       "f=$(systemctl show -p ExecStart --value nixtache-ab-apply.service); "
+      + "grep nixtache-ab-update.service \"$(echo \"$f\" | sed -E 's/^\\{ path=([^ ;]+).*/\\1/')\""
+    )
+    b2.succeed(
+      "f=$(systemctl show -p ExecStart --value nixtache-ab-update.service); "
       + "grep systemd-sysupdate-reboot.service \"$(echo \"$f\" | sed -E 's/^\\{ path=([^ ;]+).*/\\1/')\""
     )
     print("B2 OK: idle gate passed — sysupdate applied, pending cleared")

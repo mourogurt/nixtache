@@ -151,9 +151,24 @@ let
     ${markerFn}
     t0=$(date '+%Y-%m-%d %H:%M:%S')
     marker "triggered sysupdate"
-    systemctl start systemd-sysupdate.service || { marker "systemd-sysupdate failed"; exit 1; }
+    # The stock update unit is Type=simple: a bare `systemctl start` returns
+    # once the process forked — poll for real completion so the install
+    # evidence below cannot race a still-running transfer.
+    if ! systemctl start systemd-sysupdate.service; then
+      marker "systemd-sysupdate failed to start"
+      exit 1
+    fi
+    while systemctl is-active --quiet systemd-sysupdate.service; do sleep 2; done
+    sleep 1  # let journald flush the update run's final messages
+    if systemctl is-failed --quiet systemd-sysupdate.service; then
+      marker "systemd-sysupdate run failed"
+      exit 1
+    fi
     installed=0
-    if journalctl -u systemd-sysupdate --since "$t0" | grep -q "Successfully installed"; then
+    # journalctl -u does not resolve unit aliases: the stock update unit
+    # records under its canonical name systemd-sysupdate-update.service, a
+    # local override under the alias name — query both.
+    if journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --since "$t0" --no-pager | grep -q "Successfully installed"; then
       installed=1
       marker "new image installed"
     else

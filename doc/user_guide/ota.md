@@ -36,13 +36,17 @@ deploy-map entry.
   sysupdate triggers; on the runner host itself, the idle-gated
   `nixtache-ab-apply` (wait for runners to go idle before self-updating).
 - **The apply trigger** (remote action targets and the runner-host
-  self-apply alike): the stock units split the duties —
-  `systemd-sysupdate.service` runs `update` (fetch + install, never
-  reboots), `systemd-sysupdate-reboot.service` runs `reboot` (a purely
-  offline check that reboots only when a NEWER version is already
-  installed) — so the trigger chains both, update first and with `--wait`
-  (the update unit is Type=simple; a plain start returns at fork, long
-  before the slot write finished).
+  self-apply alike): `nixtache-ab-update.service` (provisioned by
+  `deploy-target.ab` on every A/B target). It runs the stock update unit to
+  COMPLETION — the unit is Type=simple, so even `systemctl start --wait`
+  returns long before a large slot write finishes, which is why the
+  completion is polled explicitly — and starts
+  `systemd-sysupdate-reboot.service` (the purely offline check that reboots
+  only when a NEWER version than the booted one is already installed) only
+  on journal evidence that THIS run installed a new version. A failed or
+  empty update leaves the target running and fails the trigger with the
+  sysupdate journal, so a deploy reports the real cause instead of a reboot
+  followed by timeouts on artifacts that never landed.
 - **Runtime versioning**: the version is assigned at deploy time (explicit
   `NIXTACHE_AB_VERSION` or a UTC calendar value), written to the repo's
   `image-version` file before `nix build` (wire it via

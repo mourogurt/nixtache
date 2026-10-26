@@ -313,6 +313,15 @@ pkgs.testers.runNixOSTest {
         "action.yml must build the sysupdate-package exactly once (after assigning the version)"
     assert run_text.index('echo "$version" > image-version') < run_text.index("config.system.build.sysupdate-package"), \
         "image-version write must precede the sysupdate-package build"
+    # The remote trigger must start the target-side install-then-reboot unit
+    # and propagate its failure: chaining the stock sysupdate units reboots
+    # mid-install (the update unit is Type=simple — its start job returns at
+    # fork — and the reboot assessment sees the freshly relabelled slot as a
+    # newer INSTALLED version before the transfer completes).
+    assert "systemctl start nixtache-ab-update.service" in run_text, \
+        "action.yml remote trigger must start nixtache-ab-update.service"
+    assert "::error::" in run_text, \
+        "action.yml must fail the deploy when the ab-update trigger fails"
     print("Q5 OK: parsed action.yml (%d chars of run text)" % len(run_text))
 
     # -- Boot both nodes ------------------------------------------------------
@@ -393,20 +402,20 @@ pkgs.testers.runNixOSTest {
     deployer.succeed("cat /var/lib/nixtache/ab-stage/abtest-remote/SHA256SUMS")
 
     # -- Verify: sysupdate pulled v2 over HTTP → wrote to GPT partition -------
-    # sysupdate processes transfers sequentially (nix-store first, then
-    # boot-image) and sets the partition label BEFORE downloading content.
-    # So we must wait for the ENTIRE service to finish, not just poll the
-    # label.  The action's SSH `systemctl start` is synchronous, but the
-    # label is visible early — use wait_until_succeeds on the .efi (the last
-    # transfer) to know sysupdate is truly done.
+    # nixtache-ab-update (the action's trigger) waits for the update run to
+    # REALLY finish before signalling the reboot, so by the time the action
+    # returns both the partition relabel and the boot-image transfer (the
+    # .efi, the last transfer) are complete — a plain poll for the .efi is
+    # enough; the ordering (install fully complete, then reboot) is the
+    # unit's contract.
     try:
         target.wait_until_succeeds(
           "test -f /var/lib/nixtache/ab-slots/abtest_2+*.efi",
           timeout=180
         )
     except BrokenPipeError:
-        # The reboot leg follows the .efi within seconds; a poll iteration
-        # can straddle QEMU's exit — the exit itself is expected here.
+        # The reboot leg follows the completed install within seconds; a poll
+        # iteration can straddle QEMU's exit — the exit itself is expected.
         pass
     # The reboot leg restarts the node; declared test nodes run QEMU with
     # -no-reboot, so the reboot manifests as QEMU exiting — wait for the
@@ -426,6 +435,30 @@ pkgs.testers.runNixOSTest {
     assert v1_still == "0", f"slot A was clobbered by the update ({v1_still})"
     target.succeed("sgdisk -p /dev/vdb | grep nix-store_1")  # rollback slot intact
     print("OK: slot B = v2 (hello present), slot A = v1 (no hello, intact)")
+
+    # -- RUN 2n (negative): staging unreachable → install nothing, no reboot --
+    # With the deployer's nginx down, sysupdate cannot resolve the staged v3;
+    # the trigger contract says: the update installs nothing, the target is
+    # NOT rebooted, and the deploy FAILS with the sysupdate cause surfaced in
+    # the target's deploy log (nixtache-ab-update dumps the update journal on
+    # both failure paths).
+    deployer.succeed("systemctl stop nginx.service")
+    boot_before = target.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    deployer.fail(
+      "cd /tmp && . /etc/deploy-env.sh && "
+      "GITHUB_REF=refs/heads/main NIXTACHE_AB_VERSION=3 bash /etc/deploy-action.sh",
+      timeout=600
+    )
+    nlog = deployer.succeed("cat artifacts/deploy_abtest-remote.log")
+    assert ("ab-update trigger failed" in nlog) or ("nixtache-ab-update:" in nlog), \
+        "negative run did not surface the sysupdate failure: " + nlog[-500:]
+    target.succeed("test -f /var/lib/nixtache/ab-slots/abtest_2+*.efi")  # v2 intact
+    target.fail("test -f /var/lib/nixtache/ab-slots/abtest_3+*.efi")     # no v3
+    target.fail("sgdisk -p /dev/vdb | grep nix-store_3")
+    assert target.succeed("cat /proc/sys/kernel/random/boot_id").strip() == boot_before, \
+        "target rebooted although the update installed nothing"
+    deployer.succeed("systemctl start nginx.service")
+    print("RUN 2n OK: unreachable staging → no install, no reboot, error surfaced, deploy failed")
 
     # -- RUN 3: calver fallback — NIXTACHE_AB_VERSION unset, dry-activate ----
     # Without the env override the action assigns a UTC calver

@@ -257,17 +257,18 @@ runs:
               "mkdir -p /var/lib/nixtache && touch /var/lib/nixtache/ab-pending && systemctl start nixtache-ab-apply.service" \
               || { echo "::error::$cfg: nixtache-ab-apply trigger failed"; return 1; }
           else
-            echo "→ $cfg: remote ab-image — trigger target systemd-sysupdate"
-            # Stock units split the duties: systemd-sysupdate.service runs
-            # `update` (fetch + install, never reboots; Type=simple, so
-            # --wait blocks until the update really finished), while
-            # systemd-sysupdate-reboot.service runs `reboot` (a purely
-            # offline check that reboots only when a NEWER version is
-            # already installed). Update alone never reboots; reboot alone
-            # never fetches — the trigger must chain both.
-            ssh $ssh_opts "$user@$host" \
-              "systemctl start --wait systemd-sysupdate.service && systemctl start systemd-sysupdate-reboot.service" \
-              || echo "::warning::$cfg: remote sysupdate trigger failed — or the target rebooted into the new slot and dropped the connection; verify on the target"
+            echo "→ $cfg: remote ab-image — trigger target nixtache-ab-update.service"
+            # The target-side unit runs systemd-sysupdate update to completion
+            # (the stock update unit is Type=simple — a chained
+            # `systemctl start --wait` does not wait for the transfer) and
+            # starts systemd-sysupdate-reboot.service only on journal evidence
+            # that THIS run installed a new version. It is Type=oneshot, so
+            # the ssh call returns the actual apply outcome: on a failed or
+            # no-op update the target stays up and the sysupdate journal (its
+            # stderr) lands in this target's artifact log — failing the deploy
+            # with the real cause instead of a reboot followed by timeouts.
+            ssh $ssh_opts "$user@$host" "systemctl start nixtache-ab-update.service" \
+              || { echo "::error::$cfg: remote ab-update trigger failed on $host — target left running, update not applied (sysupdate journal tail in artifacts/deploy_${cfg}.log)"; return 1; }
           fi
           echo "✓ $cfg: ab-image staged + apply signalled"
         }

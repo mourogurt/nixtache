@@ -233,9 +233,10 @@ pkgs.testers.runNixOSTest {
     )
 
     # -- C4 (positive control, FIRST): full action run, correctly signed -----
-    # The action's trigger chains update → reboot-assessment; with v2 (2)
-    # newer than the booted baseline (1) the target REALLY reboots — see
-    # the reboot handling after the .efi wait below.
+    # The action's trigger starts the target-side nixtache-ab-update unit
+    # (update to completion, then the reboot assessment); with v2 (2) newer
+    # than the booted baseline (1) the target REALLY reboots — see the
+    # reboot handling after the .efi wait below.
     deployer.succeed(
       "cd /tmp && . /etc/deploy-env.sh && "
       "GITHUB_REF=refs/heads/main NIXTACHE_AB_VERSION=2 bash /etc/deploy-action.sh",

@@ -32,7 +32,7 @@ the [quickstart](doc/user_guide/quickstart.md).
 | `docs.yml` | build + upload the caller's generated documentation |
 | `update-flake.yml` | scheduled flake-input bump with an SSH-signed bot commit |
 | `ci.yml` | nixtache's **own** CI (not reusable) |
-| `vmtests.yml` | KVM VM suite matrix on a `kvm`-labelled runner (dispatch + weekly/nightly schedule) |
+| `vmtests.yml` | KVM VM suite matrix on a `kvm`-labelled runner (dispatch + weekly/nightly schedule); per-suite full-log artifacts, bounded matrix concurrency |
 
 Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 `rebuild-configurations`, `rebuild-devshells`, `generate-docs`,

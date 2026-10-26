@@ -86,11 +86,13 @@ let
       allow
     fi
 
-    # remote ab-image trigger: the stock units split the update (fetch +
-    # install, no reboot; Type=simple, so --wait is what makes the ssh command
-    # mean "update completed") from the offline reboot assessment — the action
-    # chains both. Exact match, like every entry here.
-    if [ "$cmd" = "systemctl start --wait systemd-sysupdate.service && systemctl start systemd-sysupdate-reboot.service" ]; then
+    # remote ab-image trigger: nixtache-ab-update.service is the target-side
+    # install-then-reboot unit (waits for the sysupdate transfer to really
+    # finish, reboots only on install evidence — chaining the stock sysupdate
+    # units reboots mid-install because the update unit is Type=simple). It is
+    # Type=oneshot, so the ssh command returns the actual apply outcome.
+    # Exact match, like every entry here.
+    if [ "$cmd" = "systemctl start nixtache-ab-update.service" ]; then
       allow
     fi
 

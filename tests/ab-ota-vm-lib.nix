@@ -32,6 +32,21 @@ in
 {
   inherit fixture lib pkgs;
 
+  # Assert that a sysupdate run installed a new version, from the journal of
+  # the boot that PERFORMED the update. Two invariants:
+  #   - the stock update unit's canonical name is
+  #     systemd-sysupdate-update.service (systemd-sysupdate.service is only an
+  #     Alias); journald records messages under the canonical name and
+  #     `journalctl -u` does not resolve aliases, so BOTH names are queried —
+  #     a suite that overrides the unit (gating tests ship a
+  #     systemd-sysupdate.service override) records under the alias name;
+  #   - the evidence lives in the installing boot's journal: run this BEFORE
+  #     any reboot leg (or in flows that never reboot) — after a reboot the
+  #     previous boot's volatile journal may be gone.
+  assertSysupdateInstalled = ''
+    journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --no-pager | grep -i 'Successfully installed'
+  '';
+
   # The deployer node: nix-serve on :5000 (signed with the throwaway key)
   # + nginx on :80 serving the sysupdate staging dir.
   deployerNode = { extraDependencies ? [ ] }: { pkgs, ... }: {

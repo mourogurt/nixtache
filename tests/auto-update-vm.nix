@@ -31,6 +31,7 @@ let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
 
   autoMod = self.nixosModules.auto-update or null;
 
@@ -344,7 +345,7 @@ pkgs.testers.runNixOSTest {
     a.succeed("systemctl start nixtache-auto-update.service", timeout=300)
     a.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
     a.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
-    a.succeed("journalctl -u systemd-sysupdate --no-pager | grep -i 'Successfully installed'")
+    a.succeed("${otaLib.assertSysupdateInstalled}")
     a.succeed("journalctl -u nixtache-auto-update --no-pager | grep 'nixtache-auto-update:'")
     assert boot_ts(a) == ts_before, "rebootPolicy default never — VM must not reboot"
     print("AU-A1 OK: auto-update triggered sysupdate — nix-store_2 + abtest_2+*.efi, no reboot")
@@ -397,7 +398,7 @@ pkgs.testers.runNixOSTest {
     absigned.succeed("systemctl start nixtache-auto-update.service", timeout=300)
     absigned.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
     absigned.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
-    absigned.succeed("journalctl -u systemd-sysupdate --no-pager | grep -i 'Successfully installed'")
+    absigned.succeed("${otaLib.assertSysupdateInstalled}")
     print("AU-A4 OK: signed image accepted through the auto-update trigger")
     absigned.shutdown()
 

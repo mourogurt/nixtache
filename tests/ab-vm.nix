@@ -104,6 +104,17 @@ let
     # --- INFO_* (multi-line, printed for human visibility) -------------------
     print("INFO_NIXOS_VERSION=" + run("nixos-version 2>/dev/null || grep -E '^VERSION=' /etc/os-release"))
     print("INFO_UNAME=" + run("uname -a"))
+    # First-boot attestation diagnostics: what Automatic Boot Assessment can
+    # and cannot report under this boot path (QEMU + OVMF + systemd-boot +
+    # UKI-with-+tries filename). bless-boot status exit code (0 = good/bad
+    # determined, non-zero = indeterminate), the loader's view of the boot,
+    # the ESP's UKI entries (the +N suffix is the tries-left counter), and
+    # the LoaderEntrySelected EFI variable raw bytes (empty = runtime
+    # services did not expose the loader's choice to the OS).
+    print("INFO_BLESS_STATUS=" + run("${pkgs.systemd}/lib/systemd/systemd-bless-boot status 2>&1; echo rc=$?"))
+    print("INFO_BOOTCTL=" + run("bootctl 2>&1 | head -40"))
+    print("INFO_ESP_LINUX=" + run("ls -la /boot/EFI/Linux/ 2>&1"))
+    print("INFO_LOADER_SELECTED=" + run("od -An -tx1 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2>&1 | head -5"))
     print("INFO_LSBLK=" + run("lsblk -o NAME,PARTLABEL,PARTTYPENAME,FSTYPE,SIZE,MOUNTPOINT"))
     print("INFO_PARTED=" + run("parted -s /dev/sda print 2>/dev/null || echo '(no parted)'"))
     print("INFO_STORE_PATHS=" + run("find /nix/store -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l"))

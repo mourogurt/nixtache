@@ -37,25 +37,73 @@ on the matrix job (drops the `suites (…)` prefix). Parallelism:
 `strategy.max-parallel: 3` — seven concurrent suites ran green in run #80;
 thirty killed the host; three keeps a full dispatch inside a few hours.
 
+Run #80 post-mortem added two workflow defects to this scope. First, the
+smoke tagging via matrix `include:` spawned extra never-starting jobs
+(`suites (true, ab-ota-e2e)`, `suites (true, overlay-nix-ota-invalid-vm)`,
+task_id 0, waiting forever) that keep the whole run — and its job-level
+`concurrency: vmtests` group — hostage; smoke membership therefore moves
+into the run step itself (a `SMOKE_SUITES` env list + bash case), the plain
+suite matrix has no `include:`, and the job-level concurrency group is
+dropped (it demonstrably did not serialize siblings under load and only
+created the hostage situation). Skipped smoke jobs still write a `full.log`
+marker so the `if-no-files-found: error` upload stays meaningful. Second,
+`nix build`'s own retry of failed matrix jobs left `ab-staging-vm` attempt 2
+pending forever on the overloaded runner — cancelling the wedged run is an
+operational prerequisite for any new dispatch (the kvm runner stays occupied
+by the zombie job otherwise).
+
 ### D2 — Journal assertion (ab-deploy-self-vm, auto-update-vm)
 
-Assert installation evidence in the boot that performed it: either query
-before the reboot leg runs, or grep the captured console/serial transcript
-(the evidence already printed on the console). Prefer the pre-reboot query
-via the shared OTA test helper (`tests/ab-ota-vm-lib.nix`) so both suites
-and future ones reuse one `assertSysupdateInstalled` helper. No product
-change.
+The run #80 job log disproves the first "volatile journal across reboot"
+theory: in `ab-deploy-self-vm` B1 the console shows the install and the
+failing `journalctl` in the SAME boot — no reboot ever happened (the
+logind session teardown that looked like a shutdown is the normal 10s
+post-logout user-manager cleanup). The real cause is unit naming: on
+current systemd the stock update unit's canonical name is
+`systemd-sysupdate-update.service` (`systemd-sysupdate.service` is only an
+Alias), journald records messages under the canonical name, and
+`journalctl -u` does not resolve aliases — so a grep on the alias finds
+nothing right after a successful install. Fix: a shared
+`assertSysupdateInstalled` helper in `tests/ab-ota-vm-lib.nix` that queries
+BOTH unit names (a suite that overrides the unit — the gating tests —
+records under the alias name), asserted before any reboot leg runs. The
+same alias bug breaks the auto-update module's ab poll (its
+`journalctl -u systemd-sysupdate` install-evidence grep never matches, so
+`rebootPolicy = "if-needed"` can never reboot): the module queries both
+names and waits for the update run's completion (see D3).
 
 ### D3 — Reboot only after install (spec: ab-ota)
 
-In the deploy-side AB trigger script (the action's second leg), gate
-`systemd-sysupdate reboot` on the just-run `systemd-sysupdate update`
-reporting a successful installation (exit status plus journal evidence from
-that boot, per D2's helper semantics). On install failure: do not reboot,
-propagate the sysupdate error to the deployer so the suite fails with the
-real cause. Update `ab-ota-e2e.nix`/`ab-ota-verify-vm.nix` to assert the
-new contract, and add the negative scenario (unreachable staging → no
-reboot, error surfaced) as a test case.
+The chained stock trigger `systemctl start --wait systemd-sysupdate.service
+&& systemctl start systemd-sysupdate-reboot.service` cannot express
+"install, then reboot": the update unit is Type=simple (its start job —
+with or without `--wait` — returns when the process forks or fails, not
+when a large transfer completes), and `systemd-sysupdate reboot` reboots
+whenever a newer version than the booted one is INSTALLED, which becomes
+true the moment the update relabels the inactive partition — BEFORE the
+content transfer finishes. In run #80 the e2e/verify suites additionally
+showed the failure mode where the update run terminates quickly without
+installing anything and the old action swallowed that (`|| echo
+::warning::`), leaving the suite to time out on artifacts that never land
+with no diagnostics anywhere.
+
+Fix, one mechanism in three places: a target-side
+`nixtache-ab-update.service` (shipped by deploy-target for every `ab.enable`
+target) starts the update, polls the unit until it is really
+inactive/failed, and starts the reboot leg only on journal evidence
+("Successfully installed", queried under both unit names per D2) from this
+run — on failure or no-op it dumps the update journal and fails the unit.
+The deploy action's remote leg SSH-starts that unit (a short exact string
+the deploy user's SSH gate can whitelist; Type=oneshot, so the SSH call
+returns the real outcome) and fails the target on non-zero instead of
+warning. `nixtache-ab-apply` (runner-host gating) delegates to the same
+unit and keeps the pending flag on failure. The auto-update module's ab
+poll gets the same completion-wait + both-names evidence check (it must
+NOT start the reboot leg — the reboot policy owns that).
+`ab-ota-e2e.nix`/`ab-ota-verify-vm.nix` assert the new ordering (parse
+guard + install-complete-before-reboot behavior) and the e2e suite gains
+the negative scenario: staging unreachable → deploy fails, target not
+rebooted, sysupdate journal surfaced in the target's deploy log.
 
 ### D4 — bless-boot on first boot (ab-vm)
 

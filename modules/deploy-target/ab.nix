@@ -160,19 +160,67 @@ in
               && subject.user === "${duName}"
               && (action.lookup("unit") === "systemd-sysupdate.service"
                   || action.lookup("unit") === "systemd-sysupdate-reboot.service"
+                  || action.lookup("unit") === "nixtache-ab-update.service"
                   || action.lookup("unit") === "nixtache-ab-apply.service")) {
               return polkit.Result.YES;
           }
       });
     '';
 
+    # --- install-then-reboot trigger core --------------------------------------
+    # nixtache-ab-update.service runs one A/B apply: systemd-sysupdate update,
+    # then — only on evidence that THIS run installed a new version — the
+    # reboot assessment. It exists because the stock pieces cannot express that
+    # ordering: the update unit is Type=simple (its start job returns once the
+    # process forks, so `systemctl start --wait` on it does not block until the
+    # transfer finished), and systemd-sysupdate-reboot.service reboots whenever
+    # a newer version than the booted one is INSTALLED — which becomes true the
+    # moment the update relabels the inactive slot, BEFORE the content transfer
+    # completes. Chaining the stock units therefore reboots mid-install. A
+    # failed or no-op update leaves the target running and fails this unit, so
+    # callers see the sysupdate journal instead of a reboot followed by
+    # timeouts. Two consumers start it: the remote CI trigger (the deploy
+    # action, over SSH) and the idle-gated nixtache-ab-apply below.
+    # journalctl -u does not resolve unit aliases: the stock update unit records
+    # under its canonical name systemd-sysupdate-update.service, a local
+    # override (e.g. a test wrapper unit) under the alias name — query both.
+    systemd.services.nixtache-ab-update = {
+      description = "nixtache ab-image: sysupdate update, reboot only after a completed installation";
+      path = with pkgs; [ systemd gnugrep coreutils ];
+      serviceConfig.Type = "oneshot";
+      script = ''
+        set -uo pipefail
+        t0=$(date +%s)
+        if ! systemctl start systemd-sysupdate.service; then
+          echo "nixtache-ab-update: failed to start systemd-sysupdate.service" >&2
+          exit 1
+        fi
+        while systemctl is-active --quiet systemd-sysupdate.service; do sleep 2; done
+        sleep 1  # let journald flush the update run's final messages
+        update_journal() { journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --since "@$t0" --no-pager; }
+        if systemctl is-failed --quiet systemd-sysupdate.service; then
+          echo "nixtache-ab-update: systemd-sysupdate run FAILED — not rebooting, journal:" >&2
+          update_journal >&2
+          exit 1
+        fi
+        if ! update_journal | grep -q "Successfully installed"; then
+          echo "nixtache-ab-update: systemd-sysupdate installed NOTHING — not rebooting, journal:" >&2
+          update_journal >&2
+          exit 1
+        fi
+        echo "nixtache-ab-update: new version installed — triggering the reboot assessment"
+        systemctl start --no-block systemd-sysupdate-reboot.service \
+          || echo "nixtache-ab-update: reboot trigger failed — new slot staged, reboot deferred" >&2
+      '';
+    };
+
     # --- idle-gated self-update apply (runner-host only, gating = true) -------
     # `nixtache-ab-apply.path` fires when CI signals a newly staged image
     # (`touch ab-pending`); the service then waits for runner idle (Forgejo API)
-    # before triggering `systemd-sysupdate`, which writes the inactive slot and
-    # reboots. boot-counting rolls a bad slot back automatically. The whole path
-    # only exists on the runner host, so `config.services.nixtache.runner.*`
-    # (the runner module) is present there.
+    # before delegating to nixtache-ab-update.service, which writes the inactive
+    # slot and reboots. boot-counting rolls a bad slot back automatically. The
+    # whole path only exists on the runner host, so
+    # `config.services.nixtache.runner.*` (the runner module) is present there.
     systemd.paths.nixtache-ab-apply = mkIf ab.gating {
       description = "Trigger nixtache-ab-apply when a new ab-image is staged";
       wantedBy = [ "multi-user.target" ];
@@ -180,7 +228,7 @@ in
     };
 
     systemd.services.nixtache-ab-apply = mkIf ab.gating {
-      description = "nixtache ab-image self-update: wait for runner idle, then trigger systemd-sysupdate";
+      description = "nixtache ab-image self-update: wait for runner idle, then apply the staged image";
       path = with pkgs; [ systemd curl jq coreutils ];
       serviceConfig = {
         Type = "oneshot";
@@ -214,23 +262,16 @@ in
           echo "nixtache-ab-apply: runners still busy, forceAfterTimeout=true — applying anyway"
         fi
 
-        echo "nixtache-ab-apply: runners idle — triggering systemd-sysupdate (writes inactive slot, then reboots)"
-        # Stock units split the duties: systemd-sysupdate.service runs
-        # `update` (fetch + install, never reboots; Type=simple, so --wait
-        # blocks until the update really finished), while
-        # systemd-sysupdate-reboot.service runs `reboot` (a purely offline
-        # check that reboots only when a NEWER version is already
-        # installed). The pending flag guards the update itself: it is
-        # consumed only after the slot write succeeded — a failed reboot
-        # start (or the reboot cutting this unit short mid-shutdown) must
-        # not re-trigger an already-applied update.
-        if ! systemctl start --wait systemd-sysupdate.service; then
-          echo "nixtache-ab-apply: systemd-sysupdate update failed — keeping ${pendingFile} for retry" >&2
+        echo "nixtache-ab-apply: runners idle — applying the staged image (writes inactive slot, then reboots)"
+        # nixtache-ab-update is Type=oneshot: this start blocks until the slot
+        # write finished (and the reboot was signalled), so its exit status is
+        # the apply result. The pending flag is consumed only after that
+        # success — any failure path keeps it for retry on the next trigger.
+        if ! systemctl start nixtache-ab-update.service; then
+          echo "nixtache-ab-apply: ab update failed — keeping ${pendingFile} for retry" >&2
           exit 1
         fi
         rm -f "${pendingFile}"
-        systemctl start systemd-sysupdate-reboot.service \
-          || echo "nixtache-ab-apply: reboot trigger failed — new slot staged, reboot deferred" >&2
       '';
     };
   };

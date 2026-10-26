@@ -337,14 +337,27 @@ let
     boot.loader.systemd-boot.bootCounting.enable = true;
   };
   polkitAbRule = hostAb.config.environment.etc."polkit-1/rules.d/49-nixtache-ab.rules".text or "";
+  abUpdateScript = hostAb.config.systemd.services."nixtache-ab-update".script or "";
   scenarioAb = {
-    name = "ab.enable=true (+sysupdate+bootCounting) → ab polkit rule authorizes sysupdate(+reboot) + nixtache-ab-apply (start only)";
+    name = "ab.enable=true (+sysupdate+bootCounting) → ab polkit rule + install-then-reboot nixtache-ab-update unit";
     checks = {
       polkitAbPresent = polkitAbRule != "";
       polkitAbSysupdate = lib.hasInfix "\"systemd-sysupdate.service\"" polkitAbRule;
       polkitAbSysupdateReboot = lib.hasInfix "\"systemd-sysupdate-reboot.service\"" polkitAbRule;
+      polkitAbUpdate = lib.hasInfix "\"nixtache-ab-update.service\"" polkitAbRule;
       polkitAbApply = lib.hasInfix "\"nixtache-ab-apply.service\"" polkitAbRule;
       polkitAbStartOnly = lib.hasInfix "\"start\"" polkitAbRule;
+      # nixtache-ab-update ships for EVERY ab target (the remote CI trigger
+      # starts it over SSH); it is a oneshot that waits for the update run to
+      # finish and starts the reboot leg only on install evidence.
+      hasAbUpdate = hostAb.config.systemd.services ? "nixtache-ab-update";
+      abUpdateOneshot = hostAb.config.systemd.services."nixtache-ab-update".serviceConfig.Type == "oneshot";
+      abUpdateWaitsForCompletion = lib.hasInfix "while systemctl is-active --quiet systemd-sysupdate.service" abUpdateScript;
+      abUpdateQueriesCanonicalUnit = lib.hasInfix "-u systemd-sysupdate-update.service" abUpdateScript;
+      abUpdateRebootGatedOnEvidence =
+        (posOf "Successfully installed" abUpdateScript)
+          < (posOf "systemd-sysupdate-reboot.service" abUpdateScript);
+      abUpdateNoRebootOnNothing = lib.hasInfix "installed NOTHING — not rebooting" abUpdateScript;
       # gating off (default) → no nixtache-ab-apply path/service provisioned
       noAbPath = !(hostAb.config.systemd.paths ? "nixtache-ab-apply");
       noAbService = !(hostAb.config.systemd.services ? "nixtache-ab-apply");
@@ -379,18 +392,17 @@ let
       abServiceOneshot = svcAbGating.services."nixtache-ab-apply".serviceConfig.Type == "oneshot";
       # forgejoPort (3000, parsed from the runner module's forgejoUrl) reaches the script
       scriptHasForgejoPort = lib.hasInfix ":3000/api/v1/actions/runners" abApplyScript;
-      # idle-poll loop + the chained sysupdate trigger present: --wait update
-      # (fetch + slot write, Type=simple needs --wait to mean completion),
-      # then the offline reboot assessment unit
+      # idle-poll loop + the delegation: apply waits for runner idle, then
+      # starts nixtache-ab-update (oneshot: update to completion, reboot only
+      # on install evidence — the ordering contract lives in that unit, see
+      # scenarioAb's checks)
       scriptPollsBusy = lib.hasInfix "busy" abApplyScript;
-      scriptTriggersUpdateThenReboot =
-        lib.hasInfix "systemctl start --wait systemd-sysupdate.service" abApplyScript
-        && lib.hasInfix "systemctl start systemd-sysupdate-reboot.service" abApplyScript;
-      # the pending flag is consumed ONLY after the update succeeded (the
+      scriptDelegatesAbUpdate = lib.hasInfix "systemctl start nixtache-ab-update.service" abApplyScript;
+      # the pending flag is consumed ONLY after the apply succeeded (the
       # slot write is what the flag guards — a deferred reboot must not
       # re-trigger an already-applied update)
       rmAfterSuccessfulUpdate =
-        (posOf "systemctl start --wait systemd-sysupdate.service" abApplyScript)
+        (posOf "systemctl start nixtache-ab-update.service" abApplyScript)
           < (posOf "rm -f /var/lib/nixtache/ab-pending" abApplyScript);
       scriptKeepsPendingOnFail = lib.hasInfix "for retry" abApplyScript;
       # idleWaitTimeout propagates into the script (600s set above)

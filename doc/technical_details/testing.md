@@ -52,6 +52,35 @@ and nightly-smoke schedules. Full inventory:
 `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
 `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
 
+#### vmtests job output contract
+
+Each matrix job (displayed under its bare suite name) keeps its step output
+limited to what the suite itself reported, while the complete
+`nix build -L` transcript is attached as an artifact — the requirements live
+in [`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md):
+
+- the suite step writes the full transcript to `artifacts/<suite>/full.log`
+  and prints only a verdict view derived from it: the suite's own report
+  section (`=== … ===` banner to EOF) or closing driver lines on success;
+  the closing build error plus the last 40 log lines, prefixed with
+  `build never reached the test`, when the build fails before any test
+  executes;
+- `Upload suite logs` (`if: always()`) uploads `artifacts/<suite>/` with
+  `if-no-files-found: error` — every job leaves a `full.log`, smoke-skipped
+  ones included (their log states the skip);
+- a full-matrix dispatch runs at most `strategy.max-parallel` suites
+  concurrently (3): an unbounded dispatch (~30 concurrent KVM suites on one
+  runner host) turns unrelated suites into host-level kills — QEMU/build
+  processes dying with SIGKILL or connection resets — which look like
+  product failures but are runner overload.
+
+Smoke membership (the nightly subset) is decided INSIDE the run step from
+the workflow-level `SMOKE_SUITES` list, not via matrix `include:` — on this
+Forgejo runner, `include:` entries that add keys to existing matrix values
+spawn extra, never-starting jobs that hold the whole run (and the runner)
+open. A wedged vmtests run occupies the `kvm` runner indefinitely; cancel
+it before dispatching a new one (the dispatch queues behind it otherwise).
+
 The migrate pair splits the migration contract:
 `ab-ota-migrate-vm` pins the live side (provisioning, idempotency, update
 machinery ready, live closure retained) and deliberately never boots the
