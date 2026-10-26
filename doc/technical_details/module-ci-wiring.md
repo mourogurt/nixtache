@@ -9,7 +9,7 @@ not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
 
 | module option | job env / credential | used by |
 |---|---|---|
-| `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`, `nix flake update`) |
+| `flakeSshCreds.user` | `NIXTACHE_FLAKE_GIT_USER` + `flake_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: flake) → fetch private flake inputs (`nix flake check`, `nix flake update`, `docs.yml` builds) |
 | `updateSshCreds.user` | `NIXTACHE_UPDATE_GIT_USER` + `update_ssh_{private,public}` LoadCredential | `ssh-setup` (creds: update) + `update-flake.yml` guard probe, push URL + commit signing |
 | `bot.name` / `bot.email` | `NIXTACHE_BOT_NAME` / `NIXTACHE_BOT_EMAIL` | `update-flake.yml` commit author |
 | `gitHost.hostNames[0]` | `NIXTACHE_GIT_SSH_HOST` | push host for `update-flake.yml` guard/push and first entry of the derived `ssh-setup` host list (mechanics: [workflow-mechanics.md](workflow-mechanics.md)); `GITHUB_SERVER_URL` is HTTP-only — its port is the HTTP port, not SSH |

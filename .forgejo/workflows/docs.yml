@@ -13,6 +13,13 @@
 # `nixtache.lib.mkDocs`. Override `inputs.attributes` to build per-machine
 # references (`configurationDocs-server`) or a different attribute name.
 #
+# Private flake inputs: before the docs build, the SSH host list is derived
+# from the push host plus every `ssh://`/`git+ssh://` host in the caller's
+# `flake.lock`, and `ssh-setup` wires the `flake` credential bundle. The
+# bundle is optional: runners without `flakeSshCreds` warn and skip it, so
+# public-only callers keep building. Every derived host needs a matching
+# known-hosts entry (`gitHost`/`extraKnownHosts`).
+#
 # In the Forgejo UI a reusable call renders as two jobs: `docs` (0s caller) and
 # `docs-1` (the work). Expected.
 name: Generate documentation
@@ -51,6 +58,48 @@ jobs:
           repository: nixops/nixtache
           path: .nixtache
           ref: main
+
+      - name: Derive git hosts
+        # Same derivation as nix-check.yml: push host =
+        # NIXTACHE_GIT_SSH_HOST (fallback: bare GITHUB_SERVER_URL hostname,
+        # HTTP port stripped), plus every ssh:///git+ssh:// host in the
+        # caller's flake.lock — nix fetches inputs by the locked hostname
+        # (possibly an alias of the push host) and ssh offers the credential
+        # key only for hosts with a Host block, so one missing alias means
+        # Permission denied at input fetch.
+        id: githost
+        shell: bash
+        run: |
+          push_host="${NIXTACHE_GIT_SSH_HOST:-}"
+          if [ -z "$push_host" ]; then
+            push_host="${GITHUB_SERVER_URL#https://}"; push_host="${push_host#http://}"
+            push_host="${push_host%%:*}"
+          fi
+          hosts="$push_host"
+          while IFS= read -r url; do
+            case "$url" in
+              git+ssh://*) url="${url#git+ssh://}" ;;
+              ssh://*)     url="${url#ssh://}" ;;
+              *)           continue ;;
+            esac
+            host="${url%%/*}"
+            host="${host#*@}"
+            case " $hosts " in
+              *" $host "*) ;;
+              *) hosts="$hosts $host" ;;
+            esac
+          done < <(jq -r '.nodes[].locked.url // empty' flake.lock)
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
+
+      - name: Setup SSH
+        # flake bundle only, required left at its default (false): runners
+        # without flakeSshCreds warn and skip the bundle, so public-only
+        # callers keep building; private-input callers need
+        # services.nixtache.runner.flakeSshCreds on the runner host.
+        uses: ./.nixtache/.forgejo/actions/ssh-setup
+        with:
+          git-host: ${{ steps.githost.outputs.hosts }}
+          creds: flake
 
       - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
         # generate-docs reads SANDBOX_OK; without the probe it always falls

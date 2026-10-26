@@ -28,7 +28,7 @@ not by `nix flake check`.
 | `tests/ab-existing.nix` | compression/UKI options, runner A/B staging assertions and retain-GC wiring, `hostBackup`, `deploy-target.ab.forceAfterTimeout`, native-store/A/B assertion | `checks.<system>.ab-existing` |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
 | `tests/ab-deploy-drift.nix` | the deploy action's protocol-drift skip contract (extracted action.yml text vs a fake old SSH gate) | `checks.<system>.ab-deploy-drift` |
-| `tests/ci-workflow-drift.nix` | the workflows' sandbox-probe ordering contract and vmtests flag wiring | `checks.<system>.ci-workflow-drift` |
+| `tests/ci-workflow-drift.nix` | the workflows' sandbox-probe ordering contract, the vmtests flag wiring, and `docs.yml`'s private-input SSH wiring (host derivation from `flake.lock`, optional `flake` bundle, `ssh-setup` before `generate-docs`) | `checks.<system>.ci-workflow-drift` |
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` flag × documentation-completeness matrix | `checks.<system>.mkDocs` |
 
 `tests/ab-fixture.nix`, `tests/ab-anywhere-install.nix` and

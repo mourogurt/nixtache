@@ -80,6 +80,23 @@ After CI runs, the `docs` artifact contains your generated documentation
 > `docs-1` work); expected. More:
 > [`doc/technical_details/workflow-mechanics.md`](../technical_details/workflow-mechanics.md).
 
+### Private flake inputs
+
+If your flake locks private `git+ssh://`/`ssh://` inputs, the docs build
+fetches them at generation time. When the locked revision is not already in
+the runner's nix store cache and the runner provides no flake SSH
+credentials, the workflow fails at input fetch with
+`Permission denied (publickey)`. To fetch private inputs, configure the
+runner host with `services.nixtache.runner.flakeSshCreds` and make sure the
+known-hosts configuration covers **every** SSH host named in your
+`flake.lock` (an alias of the git server counts as its own host) — the
+workflow derives that host list from the lock file and offers the
+credential key on each connection. Flakes with only public inputs need
+none of this: a runner without the credentials just warns and builds.
+Details: [`doc/technical_details/module-ci-wiring.md`](../technical_details/module-ci-wiring.md);
+requirements:
+[`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md).
+
 ## Tips
 
 - **Tag your shells:** `mkShell { meta.description = "VRChat SDK (Python/C++/Qt)"; }`
