@@ -2,10 +2,10 @@
 
 ## 1. Module: the cutover lifecycle unit
 
-- [ ] 1.1 In `modules/overlay-nix/default.nix` add the cutover detector using `/etc/image-version` and the lifecycle-only `/var/lib/nixtache/last-boot-image-version`: absent marker records a baseline without action, mismatch runs the policy, success writes the marker, reconcile failure leaves it pending; keep `lower-db-version` independent so the loader cannot consume retry — pin semantics in `tests/ab-contract.nix` and run that suite in CI
+- [x] 1.1 In `modules/overlay-nix/default.nix` add the cutover detector using `/etc/image-version` and the lifecycle-only `/var/lib/nixtache/last-boot-image-version`: absent marker records a baseline without action, mismatch runs the policy, success writes the marker, reconcile failure leaves it pending; keep `lower-db-version` independent so the loader cannot consume retry — pin semantics in `tests/ab-contract.nix` and run that suite in CI
 - [x] 1.2 Order `nixtache-overlay-lifecycle.service` by mode: `wipe` runs after `local-fs.target` (+ `zfs-mount.service` where needed) and before both `nixtache-lower-store-db-load.service` and `nix-daemon-overlay-mount.service`; `reconcile` runs after the lower-DB loader and after+requires the overlay mount, resolving roots live with no pre-captured `roots.txt` — pin ordering in `ab-contract`
 - [x] 1.3 Add the D6 tmpfs path: detect `upperDir` with `findmnt -T` and clear stale upper-owned Nix state on every boot before the lower-DB loader reseeds and the overlay mounts; same-version persistent uppers remain untouched — add static ordering/configuration pins and the VM scenario in group 2
-- [ ] 1.4 Delete `nixtache-overlay-preupdate.service`, the `wants`/`after` wiring on `systemd-sysupdate.service` and the old reconcile-arming marker; rewrite the `upperOnUpdate` option description for cutover and tmpfs semantics — verify `ab-contract` asserts the old wiring is gone and `nix flake check` passes in CI
+- [x] 1.4 Delete `nixtache-overlay-preupdate.service`, the `wants`/`after` wiring on `systemd-sysupdate.service` and the old reconcile-arming marker; rewrite the `upperOnUpdate` option description for cutover and tmpfs semantics — verify `ab-contract` asserts the old wiring is gone and `nix flake check` passes in CI
 
 ## 2. VM pins
 
@@ -18,7 +18,7 @@
 ## 3. Docs + integration
 
 - [x] 3.1 Rewrite `doc/user_guide/overlay-nix.md` for cutover-time semantics, baseline/distinct markers, reconcile retry and tmpfs reset/reseed, with a link to `openspec/specs/overlay-nix/spec.md`; check `doc/user_guide/ota.md` for stale trigger phrasing and update `doc/technical_details/testing.md` — verify maintained docs match the module without local CA builds
-- [ ] 3.2 Run `openspec validate wipe-on-cutover --strict`, `openspec validate --specs --strict`, and the required checks in CI rather than duplicating the CA world locally
+- [x] 3.2 Run `openspec validate wipe-on-cutover --strict`, `openspec validate --specs --strict`, and the required checks in CI rather than duplicating the CA world locally
 - [x] 3.3 Verify marker and ordering contracts against the landed lower-DB loader: `lower-db-version` remains independent, wipe precedes the loader, reconcile follows it, and a loader success cannot clear a pending reconcile retry — pin in `ab-contract` and the degraded VM leg
 
 ## Workflow follow-up
