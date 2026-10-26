@@ -76,6 +76,7 @@ let
       forgejoUrl = "http://localhost:3000";
       cache = { enable = true; domain = "bincache.test"; port = 5000; };
       instances.default.tokenFile = dummySecret;
+      instances.default.uuid = "00000000-0000-0000-0000-000000000000";
       secrets.cachePrivateKey = dummySecret;
       store.path = "/srv";
     };
@@ -552,6 +553,10 @@ let
   failed = builtins.concatMap
     (s: if builtins.all (c: c) (builtins.attrValues s.checks) then [ ] else [ s.name ])
     scenarios;
+  failedCheckNames = builtins.concatMap
+    (s: map (cn: "${s.name} :: ${cn}")
+      (builtins.filter (cn: !s.checks.${cn}) (builtins.attrNames s.checks)))
+    scenarios;
   allOk = failed == [ ];
   report = lib.concatStringsSep "\n" (lib.flatten (map
     (s:
@@ -560,7 +565,7 @@ let
         (builtins.attrNames s.checks)))
     scenarios));
   failMsg = lib.optionalString (!allOk)
-    "FAILED: ${lib.concatStringsSep ", " failed}";
+    "FAILED: ${lib.concatStringsSep ", " failedCheckNames}";
 in
 pkgs.runCommand "ab-contract-test"
   {
