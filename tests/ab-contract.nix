@@ -307,9 +307,8 @@ let
     (cfg: {
       remountHookInStoreUrl =
         lib.hasInfix "remount-hook=" (cfg.nix.settings.store or "");
-      remountHookIsScript = builtins.trace
-        "ab-contract: actual overlay store URL = ${cfg.nix.settings.store or "<unset>"}"
-        (lib.hasInfix "remount-hook=/nix/store/" (cfg.nix.settings.store or ""));
+      remountHookIsScript =
+        lib.hasInfix "remount-hook=/" (cfg.nix.settings.store or "");
     });
 
   overlayLifecycleCfg = mode: lib.recursiveUpdate overlayCfg {
