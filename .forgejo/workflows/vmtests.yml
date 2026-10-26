@@ -150,9 +150,12 @@ jobs:
 
           # The full transcript goes to the artifact file, never to the step
           # stream; the step prints only the verdict view derived from it.
+          # NOTE: the runner invokes run steps with bash -e (errexit), so
+          # every command whose non-zero status is EXPECTED (a failed build,
+          # a banner grep with no match) must be explicitly status-guarded.
+          rc=0
           nix build -L --no-link --print-out-paths $SANDBOX_FLAG \
-            ".#vmTests.x86_64-linux.$SUITE" > "$log" 2>&1
-          rc=$?
+            ".#vmTests.x86_64-linux.$SUITE" > "$log" 2>&1 || rc=$?
 
           if [ "$rc" -eq 0 ]; then
             echo "----- $SUITE: PASS (full transcript in artifact vmtests-$SUITE) -----"
@@ -160,8 +163,8 @@ jobs:
             # ab-compression-vm, …) print a `=== … ===` report section —
             # show it from its last banner; runNixOSTest suites end with the
             # driver's closing lines.
-            banner=$(grep -n '^=== ' "$log" | tail -1 | cut -d: -f1)
-            if [ -n "$banner" ]; then
+            banner=$(grep -n '^=== ' "$log" | tail -1 | cut -d: -f1 || true)
+            if [ -n "${banner:-}" ]; then
               tail -n +"$banner" "$log"
             else
               tail -n 20 "$log"
