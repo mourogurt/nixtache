@@ -26,17 +26,16 @@
 #
 # Profile leg (the spec's "recorded installables are replayed" scenario):
 #   pkgs_2 is additionally `nix profile install`ed into root's per-user
-#   profile pre-swap; the capture records the profile link target, and the
-#   reconcile variant asserts the tool runs through the profile link again
+#   profile pre-swap; reconcile resolves the profile link target live at
+#   cutover and asserts the tool runs through the profile link again
 #   post-swap (wipe variant asserts the negative).
 #
 # Variant knobs (flake attr = suite instance):
 #   overlayOptions — merged into services.nixtache.overlay-nix (the
 #     lifecycle mode: { upperOnUpdate = "reconcile"; } ...; unset = the
 #     module default, "wipe").
-#   upperTmpfs — move the upper layer to tmpfs (the "nothing to preserve"
-#     branch: lifecycle behaviour degenerates, only overlay health asserted
-#     after the swap).
+#   upperTmpfs — move the upper layer to tmpfs (every reboot clears stale
+#     upper-owned state and reseeds the lower DB, even without a swap).
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test
 # LAN; no internet.
@@ -90,6 +89,7 @@ let
   mkAppliance = { version, extraPackages ? [ ] }:
     fixture.mkAppliance {
       inherit version;
+      signVerify = true;
       stagingPath = "http://deployer/ab-stage/abtest";
       storeSize = "1G";
       extraPackages = extraPackages ++ [ pkgs.curl pkgs.gptfdisk ];
@@ -152,6 +152,8 @@ pkgs.testers.runNixOSTest {
       extraConfig = "autoindex on;";
     };
     systemd.tmpfiles.rules = [ "d /var/lib/nixtache/ab-stage 1777 root root -" ];
+    environment.systemPackages = [ pkgs.gnupg ];
+    environment.etc."signing-key".source = "${fixture.testSignKey}/priv.asc";
     # the staged v2 sysupdate-package must fit on the root disk
     virtualisation.diskSize = 8192;
     # pkgs_2 must be servable (realize fetch); pkgs_1's closure must be
@@ -189,6 +191,19 @@ pkgs.testers.runNixOSTest {
         machine = create_machine(start_command=" ".join(start_command), **kwargs)
         driver.machines_qemu.append(machine)
         return machine
+
+    def sign_stage():
+        deployer.succeed(
+          "export GNUPGHOME=$(mktemp -d) && "
+          "gpg --batch --import /etc/signing-key 2>/dev/null && "
+          "cd /var/lib/nixtache/ab-stage/abtest && "
+          "gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS"
+        )
+
+    def stage_v2():
+        deployer.succeed("mkdir -p /var/lib/nixtache/ab-stage/abtest")
+        deployer.succeed("cp ${v2SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/")
+        sign_stage()
 
     deployer.start()
     deployer.wait_for_unit("nix-serve.service")
@@ -231,13 +246,13 @@ pkgs.testers.runNixOSTest {
     # invariants (files gone, store usable, rooted tool alive); the journal
     # capture documents which GC branch Nix takes on the appliance wiring.
     # the root file must be reboot-persistent (a /tmp root dies with the
-    # plain-reboot control and would de-root pkgs_2 before the capture).
+    # plain-reboot control and would de-root pkgs_2 before the swap).
     appliance.succeed(f"nix-store --add-root /var/lib/nixtache/tool-root -r {P2}")
 
     # -- Profile-install leg (the spec's "recorded installables are replayed"
-    # scenario): install the tool into root's per-user profile. The pre-update
-    # capture records the profile link target; the reconcile pass re-realises
-    # it after the swap. A bare store path is a valid installable — no eval,
+    # scenario): install the tool into root's per-user profile. Reconcile
+    # resolves the profile link target live at cutover and re-realises it.
+    # A bare store path is a valid installable — no eval,
     # no network, the path is already valid from the realize above.
     PROF = "/nix/var/nix/profiles/per-user/root/profile"
     appliance.succeed("nix profile install --profile " + PROF + " " + P2)
@@ -257,28 +272,85 @@ pkgs.testers.runNixOSTest {
     assert "tool-ok" in out, f"rooted tool broken by GC ({out!r})"
     print("OK: GC removed the unrooted path, rooted tool alive")
 
-    # -- Plain-reboot control (no update): a persistent upper must survive -
-    # (tmpfs upper: nothing to preserve — skip to the swap leg.)
+    PROFILE_TARGET = appliance.succeed("readlink -f " + PROF).strip()
+
+    def assert_persistent_tool_intact():
+      appliance.succeed(f"test -d {UPPER}/{P2B}")
+      appliance.succeed("nix path-info " + P2)
+      out = appliance.succeed(P2 + "/bin/tool")
+      assert "tool-ok" in out, f"persistent upper tool did not run ({out!r})"
+      assert appliance.succeed("readlink -f " + PROF).strip() == PROFILE_TARGET
+
+    if MODE == "wipe" and not TMPFS:
+      deployer.succeed(
+        "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+        "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+        "cd /var/lib/nixtache/ab-stage/abtest && : > SHA256SUMS"
+      )
+      sign_stage()
+      appliance.succeed("systemctl start --wait systemd-sysupdate.service", timeout=900)
+      assert_persistent_tool_intact()
+      assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
+      print("OK: empty sysupdate poll left the upper, DB entry and profile intact")
+
     if not TMPFS:
       appliance.reboot()
       appliance.wait_for_unit("multi-user.target")
       appliance.wait_until_succeeds("nix --version", timeout=300)
+      assert_persistent_tool_intact()
+      assert appliance.succeed("cat /etc/image-version").strip() == "1"
+      assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
+      print("OK: plain-reboot control — persistent upper survived, tool runs")
+
+    if MODE == "wipe" and not TMPFS:
+      stage_v2()
+      deployer.succeed(
+        "raw=/var/lib/nixtache/ab-stage/abtest/abtest_2.nix-store.raw; "
+        "offset=1048576; "
+        "byte=$(dd if=\"$raw\" bs=1 skip=\"$offset\" count=1 status=none | od -An -tu1); "
+        "flipped=$((byte ^ 1)); "
+        "printf '%b' \"$(printf '\\\\%03o' \"$flipped\")\" | "
+        "dd of=\"$raw\" bs=1 seek=\"$offset\" count=1 conv=notrunc status=none"
+      )
+      appliance.fail("systemctl start --wait systemd-sysupdate.service", timeout=900)
+      assert appliance.succeed("cat /etc/image-version").strip() == "1"
+      assert_persistent_tool_intact()
+      appliance.succeed("systemd-sysupdate vacuum", timeout=300)
+      print("OK: tampered update failed without wiping; partial instance vacuumed")
+
+    if TMPFS:
+      appliance.reboot()
+      appliance.wait_for_unit("multi-user.target")
+      appliance.wait_until_succeeds("nix --version", timeout=300)
+      appliance.wait_until_succeeds(
+        "systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=180
+      )
+      appliance.wait_until_succeeds(
+        "systemctl is-active --quiet nixtache-lower-store-db-load.service", timeout=180
+      )
+      assert appliance.succeed("cat /etc/image-version").strip() == "1"
+      appliance.fail(f"test -d {UPPER}/{P2B}")
+      appliance.fail("test -e " + PROF)
+      out = appliance.succeed(f"nix path-info {P2} 2>&1 || true")
+      assert "is not valid" in out, f"tmpfs reboot left a stale DB entry ({out!r})"
+      appliance.succeed("nix path-info " + P1)
+      assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "1"
+      assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
+      appliance.succeed("nix-store --realize " + P2, timeout=600)
       out = appliance.succeed(P2 + "/bin/tool")
-      assert "tool-ok" in out, f"upper did not survive plain reboot ({out!r})"
-      print("OK: plain-reboot control — upper survived, tool runs")
+      assert "tool-ok" in out, f"tmpfs store could not realize the tool again ({out!r})"
+      appliance.succeed(f"test -d {UPPER}/{P2B}")
+      print("TMPFS OK: same-version reboot reset stale state, reseeded v1 and allowed re-realize")
 
     # -- Stage v2 + sysupdate → slot B → reboot into the new lower ---------
     # The degraded variant cuts the substituter (nix-serve) before the swap:
     # nginx (port 80) still serves the sysupdate staging, but the reconcile
     # repair pass finds no cache — the unit must fail red without breaking
-    # the boot, keep its marker and heal on a manual retry once the cache
-    # returns.
+    # the boot, keep its lifecycle marker behind and heal on the next boot
+    # once the cache returns, even though the lower-DB marker is current.
     if DEGRADED:
         deployer.succeed("systemctl stop nix-serve.service")
-    deployer.succeed(
-      "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
-      "cp ${v2SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/"
-    )
+    stage_v2()
     appliance.succeed("systemctl start systemd-sysupdate.service", timeout=900)
     appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_2", timeout=900)
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
@@ -300,51 +372,60 @@ pkgs.testers.runNixOSTest {
     print("OK: booted v2, overlay remounted over the new lower")
 
     if MODE == "wipe":
-        # -- wipe: the pre-update unit cleared the upper at cutover --------
         appliance.fail(f"test -d {UPPER}/{P2B}")
         out = appliance.succeed(f"nix path-info {P2} 2>&1 || true")
         assert "is not valid" in out, f"wipe left DB entry ({out!r})"
-        # The recorded profile went with the wiped /nix/var/nix state.
         appliance.fail("test -e " + PROF)
         appliance.succeed("nix --version")
+        assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "2"
+        assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "2"
         print("WIPE OK: no stale upper content, DB entries or profiles; overlay functional")
     elif MODE == "reconcile":
+        assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "2"
         if DEGRADED:
-            # repair finds no cache: red unit, intact boot, marker kept.
             appliance.wait_until_succeeds(
-              "systemctl is-failed nixtache-overlay-reconcile.service", timeout=600
+              "systemctl is-failed nixtache-overlay-lifecycle.service", timeout=600
             )
             appliance.fail(P2 + "/bin/tool")
-            appliance.succeed("test -e /var/lib/nixtache/overlay-reconcile-pending")
+            assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
             appliance.succeed("nix --version")
-            print("RECONCILE-DEGRADED OK: unit red, boot fine, marker kept")
-            # cache returns → manual retry heals everything.
+            print("RECONCILE-DEGRADED OK: unit red, boot fine, lifecycle retry pending")
             deployer.succeed("systemctl start nix-serve.service")
-            appliance.succeed("systemctl start nixtache-overlay-reconcile.service", timeout=600)
+            appliance.wait_until_succeeds(
+              "systemctl is-active --quiet boot-complete.target", timeout=300
+            )
+            appliance.reboot()
+            appliance.wait_for_unit("multi-user.target")
+            appliance.wait_until_succeeds("nix --version", timeout=300)
+            appliance.wait_until_succeeds(
+              "systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=180
+            )
+            appliance.wait_until_succeeds(
+              "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=600
+            )
+            assert appliance.succeed("cat /etc/image-version").strip() == "2"
+            assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "2"
+            assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "2"
             out = appliance.succeed(P2 + "/bin/tool")
-            assert "tool-ok" in out, f"retry did not heal the tool ({out!r})"
+            assert "tool-ok" in out, f"boot retry did not heal the tool ({out!r})"
             appliance.succeed(f"test -d {UPPER}/{P1B}")
-            appliance.fail("test -e /var/lib/nixtache/overlay-reconcile-pending")
-            print("RECONCILE-RETRY OK: healed after the cache returned, marker consumed")
+            out = appliance.succeed(PROF + "/bin/tool")
+            assert "tool-ok" in out, f"boot retry did not heal the profile ({out!r})"
+            print("RECONCILE-RETRY OK: current lower-DB marker did not consume lifecycle retry")
         else:
             appliance.wait_until_succeeds(
-              "systemctl is-active --quiet nixtache-overlay-reconcile.service", timeout=600
+              "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=600
             )
+            assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "2"
             appliance.succeed(f"test -d {UPPER}/{P1B}")
             out = appliance.succeed(P2 + "/bin/tool")
             assert "tool-ok" in out, f"reconcile did not heal the tool ({out!r})"
-            # The coherence machinery observed the dangling old-lower entries:
-            # the reconcile pass's own `nix-store --verify` reported them
-            # (pass 1 invalidated the stale records before the repair).
             jout = appliance.succeed(
-              "journalctl -u nixtache-overlay-reconcile.service 2>&1 || true"
+              "journalctl -u nixtache-overlay-lifecycle.service 2>&1 || true"
             )
             assert "disappeared" in jout, f"verify pass saw no danglers ({jout[-400:]!r})"
-            # The recorded profile installable is replayed: the tool runs
-            # through the per-user profile link again.
             out = appliance.succeed(PROF + "/bin/tool")
             assert "tool-ok" in out, f"reconcile did not replay the profile ({out!r})"
-            appliance.fail("test -e /var/lib/nixtache/overlay-reconcile-pending")
             print("RECONCILE OK: dangling ref healed (pkgs_1 re-fetched), profile replayed")
 
     print("PASS: overlay-nix-ota-invalid matrix leg (mode=" + str(MODE) + ")")

@@ -64,8 +64,9 @@
         deploy-target = import ./tests/deploy-target.nix { inherit nixpkgs self system; };
         # ab-image module pure-eval: fixed vs max-disk sizing + Verify (fast, no KVM).
         ab-image = import ./tests/ab-image.nix { inherit nixpkgs self system; appliancePkgs = caPkgsFor system; };
+        ab-contract = import ./tests/ab-contract.nix { inherit nixpkgs self system; appliancePkgs = caPkgsFor system; };
         # overlay-nix module pure-eval: upperOnUpdate enum (wipe/reconcile),
-        # default, hook wiring. Runtime swap behaviour lives in vmTests.
+        # default, lifecycle wiring. Runtime swap behaviour lives in vmTests.
         overlay-nix = import ./tests/overlay-nix.nix { inherit nixpkgs self system; };
         mkDocs = import ./tests/mkDocs.nix { inherit nixpkgs self system; };
         # ── Conformance / contract tests for the landed A/B modules.
@@ -129,9 +130,9 @@
         # through the local-overlay store →
         # runs + lands in the upper layer. Hermetic (no internet).
         overlay-nix-install-vm = import ./tests/overlay-nix-install-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        # overlay-nix-ab-swap-vm: O9 — overlay upper survives an A/B slot swap:
+        # overlay-nix-ab-swap-vm: default wipe across an A/B slot swap:
         # boot v1 appliance → install vim into upper → sysupdate to v2 → reboot
-        # into v2 → vim still works + v2 lower visible. 2-boot, heavy.
+        # into v2 → stale upper gone + v2 lower visible + vim realizes again.
         overlay-nix-ab-swap-vm = import ./tests/overlay-nix-ab-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
         # overlay-nix-ota-invalid-vm: overlay-nix across a real OTA swap on the
         # shipped world A (the image carries the lower store DB — loaded at
@@ -146,8 +147,8 @@
         overlay-nix-ota-invalid-wipe-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; overlayOptions.upperOnUpdate = "wipe"; };
         overlay-nix-ota-invalid-reconcile-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; overlayOptions.upperOnUpdate = "reconcile"; };
         overlay-nix-ota-invalid-reconcile-degraded-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; overlayOptions.upperOnUpdate = "reconcile"; reconcileDegraded = true; };
-        # tmpfs upper: nothing persists — the lifecycle degenerates to "wipe
-        # for free"; asserts overlay health across the swap only.
+        # tmpfs upper: same-version reboot clears stale upper-owned state and
+        # reseeds the current lower DB; the swap leg checks overlay health too.
         overlay-nix-ota-invalid-tmpfs-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; overlayOptions.upperOnUpdate = "wipe"; upperTmpfs = true; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style

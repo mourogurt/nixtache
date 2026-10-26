@@ -23,7 +23,8 @@ not by `nix flake check`.
 | `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH creds, sandbox cap on/off, deploy map wiring, `runner.envs` | `checks.<system>.runner` |
 | `tests/deploy-target.nix` | the target side — apply unit, deploy user, polkit, health check, rollback wiring | `checks.<system>.deploy-target` |
 | `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify, store-tree imaging | `checks.<system>.ab-image` |
-| `tests/overlay-nix.nix` | the overlay-nix module — `upperOnUpdate` enum (wipe/reconcile), default, hook wiring | `checks.<system>.overlay-nix` |
+| `tests/ab-contract.nix` | cross-module A/B contracts — provisioning, overlay cutover ordering and marker independence, runner store modes | `checks.<system>.ab-contract` |
+| `tests/overlay-nix.nix` | the overlay-nix module — `upperOnUpdate` enum (wipe/reconcile), default, lifecycle wiring | `checks.<system>.overlay-nix` |
 | `tests/ab-existing.nix` | compression/UKI options, runner A/B staging assertions and retain-GC wiring, `hostBackup`, `deploy-target.ab.forceAfterTimeout`, native-store/A/B assertion | `checks.<system>.ab-existing` |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
 | `tests/ab-deploy-drift.nix` | the deploy action's protocol-drift skip contract (extracted action.yml text vs a fake old SSH gate) | `checks.<system>.ab-deploy-drift` |
@@ -66,6 +67,12 @@ host-store lower with its own database. Results do not transfer between those
 worlds. Faithful store imaging is pinned by `checks.ab-image` (a store tree
 containing a symlink path) and `overlay-nix-vm` (the symlink survives imaging
 and resolves through `nix path-info`).
+
+The `overlay-nix-ota-invalid` matrix covers empty and tampered update attempts,
+same-version persistent-upper reboots, live-root reconcile, degraded reconcile
+retry with independent lower-DB/lifecycle markers, and same-version tmpfs
+reset/reseed. `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` retain the
+default-wipe swap and non-appliance installation contracts.
 
 ### Pure-eval suite and scenario shape
 

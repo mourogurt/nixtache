@@ -2,11 +2,9 @@
 # (`services.nixtache.overlay-nix`).
 #
 # Pins the option-level contract without booting a VM: the upperOnUpdate
-# policy is a two-value enum (the old "none" carry-over value is gone — with
-# the shipped lower store DB a carried upper only produces dangling
-# references), the default is "wipe", and the pre-update hook + reconcile
-# unit wiring follows the selected policy. Runtime behaviour across swaps is
-# covered by the VM suites (overlay-nix-ota-invalid-vm and variants).
+# policy is a two-value enum with default "wipe", and the cutover lifecycle
+# unit's ordering follows the selected policy. Runtime behaviour across swaps
+# is covered by the VM suites (overlay-nix-ota-invalid-vm and variants).
 #
 # Exposed via the flake as `checks.<system>.overlay-nix`.
 {
@@ -42,17 +40,16 @@ let
   hostDefault = mkHost { };
   svcDefault = servicesOf hostDefault;
   scenarioDefault = {
-    name = "upperOnUpdate unset: default \"wipe\", pre-update hook wired, no reconcile unit";
+    name = "upperOnUpdate unset: default \"wipe\" lifecycle runs before the lower-DB loader";
     checks = {
       defaultIsWipe = (cfgOf hostDefault).upperOnUpdate == "wipe";
-      preupdateExists = svcDefault ? nixtache-overlay-preupdate;
-      preupdateSaysWipe = svcDefault ? nixtache-overlay-preupdate
-        && lib.hasInfix "wipe the upper layer" svcDefault.nixtache-overlay-preupdate.description;
-      preupdateBeforeSysupdate = svcDefault ? nixtache-overlay-preupdate
-        && builtins.elem "systemd-sysupdate.service" svcDefault.nixtache-overlay-preupdate.before;
-      sysupdatePullsHook = svcDefault ? systemd-sysupdate
-        && builtins.elem "nixtache-overlay-preupdate.service" svcDefault.systemd-sysupdate.wants;
-      noReconcileUnit = !(svcDefault ? nixtache-overlay-reconcile);
+      lifecycleExists = svcDefault ? nixtache-overlay-lifecycle;
+      lifecycleSaysWipe = svcDefault ? nixtache-overlay-lifecycle
+        && lib.hasInfix "wipe the upper layer" svcDefault.nixtache-overlay-lifecycle.description;
+      lifecycleBeforeLowerDb = svcDefault ? nixtache-overlay-lifecycle
+        && builtins.elem "nixtache-lower-store-db-load.service" svcDefault.nixtache-overlay-lifecycle.before;
+      noPreupdateUnit = !(svcDefault ? nixtache-overlay-preupdate);
+      noLegacyReconcileUnit = !(svcDefault ? nixtache-overlay-reconcile);
     };
   };
 
@@ -60,24 +57,29 @@ let
   hostReconcile = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "reconcile"; };
   svcReconcile = servicesOf hostReconcile;
   scenarioReconcile = {
-    name = "upperOnUpdate = \"reconcile\": capture hook + reconcile unit configured";
+    name = "upperOnUpdate = \"reconcile\": lifecycle follows the lower-DB loader and requires the mount";
     checks = {
       valueIsReconcile = (cfgOf hostReconcile).upperOnUpdate == "reconcile";
-      preupdateSaysReconcile = svcReconcile ? nixtache-overlay-preupdate
-        && lib.hasInfix "reconcile the upper layer" svcReconcile.nixtache-overlay-preupdate.description;
-      reconcileUnitExists = svcReconcile ? nixtache-overlay-reconcile;
-      reconcileAfterMount = svcReconcile ? nixtache-overlay-reconcile
-        && builtins.elem "nix-daemon-overlay-mount.service" svcReconcile.nixtache-overlay-reconcile.requires;
+      lifecycleSaysReconcile = svcReconcile ? nixtache-overlay-lifecycle
+        && lib.hasInfix "reconcile the upper layer" svcReconcile.nixtache-overlay-lifecycle.description;
+      lifecycleAfterLowerDb = svcReconcile ? nixtache-overlay-lifecycle
+        && builtins.elem "nixtache-lower-store-db-load.service" svcReconcile.nixtache-overlay-lifecycle.after;
+      lifecycleAfterMount = svcReconcile ? nixtache-overlay-lifecycle
+        && builtins.elem "nix-daemon-overlay-mount.service" svcReconcile.nixtache-overlay-lifecycle.after;
+      lifecycleRequiresMount = svcReconcile ? nixtache-overlay-lifecycle
+        && builtins.elem "nix-daemon-overlay-mount.service" svcReconcile.nixtache-overlay-lifecycle.requires;
+      noPreupdateUnit = !(svcReconcile ? nixtache-overlay-preupdate);
     };
   };
 
   # --- scenario 3: explicit "wipe" --------------------------------------------
   hostWipe = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "wipe"; };
   scenarioWipe = {
-    name = "upperOnUpdate = \"wipe\" explicit: hook configured, no reconcile unit";
+    name = "upperOnUpdate = \"wipe\" explicit: lifecycle configured without legacy units";
     checks = {
       valueIsWipe = (cfgOf hostWipe).upperOnUpdate == "wipe";
-      noReconcileUnit = !((servicesOf hostWipe) ? nixtache-overlay-reconcile);
+      lifecycleExists = (servicesOf hostWipe) ? nixtache-overlay-lifecycle;
+      noLegacyReconcileUnit = !((servicesOf hostWipe) ? nixtache-overlay-reconcile);
     };
   };
 

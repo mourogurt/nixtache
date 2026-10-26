@@ -213,8 +213,8 @@ pkgs.testers.runNixOSTest {
     print("OK: booted v2, overlay remounted over the new lower")
 
     # -- Default policy ("wipe"): the upper did NOT survive the swap ----------
-    # The pre-update hook cleared the upper + the store DB state before the
-    # slot write; the boot loader re-seeded the DB from v2's shipped dump.
+    # The cutover lifecycle cleared the upper + store DB state before the
+    # loader re-seeded the DB from v2's shipped dump.
     appliance.fail("test -d /var/lib/nix-overlay/upper/${vimBasename}")
     out = appliance.succeed("nix path-info ${vimPath} 2>&1 || true")
     assert "is not valid" in out, f"wipe left a DB entry for vim ({out!r})"

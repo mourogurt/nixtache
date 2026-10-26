@@ -43,11 +43,11 @@ upstream-intended overlay design ("world A"):
 
 ## Upper-layer persistence
 
-| `upperDir` on | Plain reboot | OTA swap (default `"wipe"`) |
+| `upperDir` on | Plain reboot | OTA cutover |
 |---|---|---|
-| persistent root FS | installs survive | upper cleared by the policy; `"reconcile"` heals + replays instead |
-| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same policy behaviour |
-| tmpfs | installs wiped (by design) | nothing to preserve — overlay remounts clean |
+| persistent root FS | installs survive | `"wipe"` clears them; `"reconcile"` repairs them |
+| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same persistent-upper policy |
+| tmpfs | upper files vanish and stale upper-owned Nix state is reset | the same every-boot reset runs before the new lower DB loads |
 
 The upper layer may live on a ZFS dataset (e.g. a data pool with more space
 than the root partition): OverlayFS needs `d_type` + `renameat2`
@@ -59,35 +59,58 @@ must sit on the SAME dataset, and the overlay mounts after the pool import
 
 ## Upper lifecycle across OTA updates: `upperOnUpdate`
 
-An update replaces the lower store; pick a policy for the upper layer:
+For a persistent upper, the lifecycle event is the **cutover boot**, not an
+update attempt. `nixtache-overlay-lifecycle.service` compares
+`/etc/image-version` with `/var/lib/nixtache/last-boot-image-version`:
 
-- `"wipe"` (default): before `systemd-sysupdate` writes the inactive slot,
-  the upper layer, work dir and the overlay store state (`/nix/var/nix`)
-  are cleared. Deterministic, needs no cache — but ad-hoc installs do not
-  survive an update (a no-op update leaves the machine fully working; the
-  nix daemon is stopped only for the wipe instant). The shipped lower DB
-  re-seeds from the new slot's dump at the next boot.
-- `"reconcile"`: before the update, gc-roots and profile targets are
-  captured; after the reboot a reconcile pass runs `nix-store --verify`
-  (drops DB entries whose files are gone and that nothing valid refers to)
-  and then re-fetches, for every recorded root, exactly the closure paths
-  whose files are absent from the merged store (`nix-store --repair-path` —
-  a delta repair: present paths are not touched). If the cache cannot serve
-  a path, the reconcile unit fails red — the boot is unaffected and the
-  pass retries on the next boot (or a manual
-  `systemctl start nixtache-overlay-reconcile`).
+- an absent marker records the running version as a baseline without wiping or
+  reconciling existing installs;
+- a mismatch runs the selected policy and advances the marker only after
+  success, so booting an older slot during rollback applies the policy again;
+- a match leaves a persistent upper untouched. No-op polls, rejected updates
+  and timer ticks do not run the policy because they do not cause a cutover.
+
+The lifecycle marker is deliberately separate from the loader's
+`/var/lib/nixtache/lower-db-version`. Loading the current lower DB cannot mark
+a reconcile pass complete: if reconcile fails, its older lifecycle marker
+still requests a retry after the loader has succeeded.
+
+The two persistent-upper policies are:
+
+- `"wipe"` (default): early in the cutover boot, clear the upper layer, work
+  directory and overlay store state under `/nix/var/nix` before the lower-DB
+  loader and overlay mount run. The loader then reseeds the running slot's
+  records. This is deterministic and needs no substituter, but ad-hoc
+  installs do not survive a cutover.
+- `"reconcile"`: after the lower DB loads and the overlay mounts, resolve
+  gc-root and user-profile targets live from their persistent links. Run
+  `nix-store --verify` to invalidate records whose files vanished, then
+  `nix-store --repair-path` for only the missing closure paths of those roots;
+  present paths are not reinstalled. If the substituter cannot serve a path,
+  the unit reports it and fails without blocking the boot or deleting
+  unrelated upper content. The lifecycle marker remains pending, so the pass
+  retries on the next boot or after
+  `systemctl start nixtache-overlay-lifecycle.service` once the cache is
+  available.
 
   `reconcile` requires a substituter that still serves the OLD references.
   `services.nixtache.runner.deploy.ab.retain` keeps five staged image versions
   by default, but that is separate from NAR retention: configure the binary
   cache and its store GC to retain the old closures needed for repair.
 
+For a tmpfs upper, `nixtache-overlay-tmpfs-reset.service` detects the upper's
+filesystem with `findmnt -T` and clears the upper-owned Nix state on **every**
+boot before the lower-DB loader and overlay mount. The loader reseeds the
+current slot even when its version marker is unchanged because the DB is
+missing. No upper roots survive to reconcile, and no image-version mismatch is
+required. Same-version reboots of persistent uppers remain untouched.
+
 There is no carry-over value: with the shipped lower DB a carried upper
 deterministically dangles after a swap. **Upgrade note:** a configuration that
 still sets `"none"` fails evaluation with the enum naming the two valid
-values; a configuration that never set the option uses `"wipe"` (its upper is
-cleared at the next update). To keep ad-hoc installs across updates, choose
-`"reconcile"` with a substituter configured.
+values; a configuration that never set the option uses `"wipe"` (its persistent
+upper is cleared at the next cutover). To keep ad-hoc installs across updates,
+choose `"reconcile"` with a substituter configured.
 
 ## Garbage collection
 

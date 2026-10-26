@@ -63,7 +63,7 @@ read-only lower store a first-class readable nix store. A boot-time loader
 | update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` (old slot's dump vacuumed with its UKI) |
 | first boot | the DB is missing → the dump loads, the image version is recorded in a marker |
 | slot swap | the new slot's records merge in **additively**; stale old-slot records are left for `nix-store --verify` to report and the overlay reconcile pass to heal |
-| after `upperOnUpdate = "wipe"` | the wiped DB re-seeds from the running slot's dump at the next boot |
+| cutover boot with `upperOnUpdate = "wipe"` | upper-owned state is cleared before the loader, which re-seeds the DB from the running slot's dump during that same boot |
 
 The image also ships the `nix` CLI — the loader runs on a nix-less
 appliance. This is what makes the runner container work on appliance hosts
