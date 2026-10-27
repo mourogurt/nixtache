@@ -127,6 +127,23 @@ pkgs.testers.runNixOSTest {
     deployer.start()
     deployer.wait_for_unit("nginx.service")
     deployer.wait_for_unit("nix-serve.service")
+    # The framework's kernel cmdline carries a double-prefixed regInfo=
+    # (/nix/.ro-store/nix/store/<hash>/registration) while the guest mounts
+    # the host store share directly at /nix/.ro-store, so the boot-time
+    # register-nix-paths.service fails with "No such file or directory" and
+    # the deployer's store DB misses the extraDependencies (vim and the v2
+    # payload) — the appliance's `nix-store --realize` below then gets 404s
+    # from nix-serve. Re-load the registration from the actually-mounted
+    # path. Names need no massaging: the dump records CA-context paths under
+    # flattened alias names, and the test requests them through the same
+    # alias names (they are interpolated from the same CA-context
+    # evaluation), so db, served files and queries agree as-is. Pure
+    # test-harness workaround: a prod system boots a real disk — no
+    # regInfo= cmdline and no register-nix-paths.service exist there.
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
+
 
     appliance = create_pool_machine(name="appliance")
     appliance.start(allow_reboot=True)
