@@ -212,6 +212,17 @@ pkgs.testers.runNixOSTest {
     deployer.start()
     deployer.wait_for_unit("nix-serve.service")
     deployer.wait_for_unit("nginx.service")
+    # The framework's kernel cmdline carries a double-prefixed regInfo=
+    # (/nix/.ro-store/nix/store/<hash>/registration) while the guest mounts
+    # the host store share directly at /nix/.ro-store, so the boot-time
+    # register-nix-paths.service fails with "No such file or directory" and
+    # the deployer's store DB misses the extraDependencies — nix-serve then
+    # cannot serve them and the appliance's `nix-store --realize` dies with
+    # "no substituter that can build it". Re-load the registration from the
+    # actually-mounted path.
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
 
     appliance = create_ab_machine(name="appliance")
     appliance.start(allow_reboot=True)

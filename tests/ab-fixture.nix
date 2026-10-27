@@ -124,7 +124,28 @@ let
 
             services.getty.autologinUser = "root";
             users.users.root.initialPassword = "";
-            environment.systemPackages = with pkgs; [ util-linux gawk parted ] ++ extraPackages;
+            # Put the appliance's OWN systemd-bless-boot / systemd-sysupdate
+            # into PATH: the sysupdate units ExecStart them by absolute store
+            # path, but suites assert post-update state by invoking them from
+            # the autologin shell (`systemd-sysupdate list`/`vacuum`,
+            # `systemd-bless-boot status`). A bare-name call resolves only
+            # what the system path carries; referencing the test's pkgs
+            # systemd path instead would miss the store (this appliance
+            # evaluates against a separate CA package set, so that exact
+            # path is not part of the image).
+            environment.systemPackages =
+              with pkgs;
+              [
+                util-linux
+                gawk
+                parted
+                (pkgs.runCommand "abtest-systemd-aux-bins" { } ''
+                  mkdir -p $out/bin
+                  ln -s ${config.systemd.package}/lib/systemd/systemd-bless-boot $out/bin/
+                  ln -s ${config.systemd.package}/lib/systemd/systemd-sysupdate $out/bin/
+                '')
+              ]
+              ++ extraPackages;
             # sshd so the deployer can SSH in + trigger systemd-sysupdate (the
             # deploy user is provisioned by the deploy-target module below).
             services.openssh.enable = true;

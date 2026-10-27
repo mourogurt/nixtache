@@ -398,6 +398,16 @@ pkgs.testers.runNixOSTest {
     deployer.wait_for_unit("nginx.service")
     deployer.wait_for_unit("sshd.service")
     target.wait_for_unit("sshd.service")
+    # The framework's kernel cmdline carries a double-prefixed regInfo=
+    # (/nix/.ro-store/nix/store/<hash>/registration) while the guest mounts
+    # the host store share directly at /nix/.ro-store, so the boot-time
+    # register-nix-paths.service fails with "No such file or directory" and
+    # the deployer's store DB misses the extraDependencies — the in-VM
+    # `nix build` behind nixos-anywhere then re-substitutes them instead of
+    # no-op'ing. Re-load the registration from the actually-mounted path.
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
 
     # -- Stage the v1 baseline store image (out-of-band "factory flash" of
     #    slot A; the install itself puts the v1 closure on the ext4 root) ----

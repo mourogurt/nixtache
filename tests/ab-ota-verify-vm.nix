@@ -304,8 +304,11 @@ pkgs.testers.runNixOSTest {
         target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
         target.succeed(f"test -f {slots}/abtest_2+*.efi")
         # Journal of THIS run shows the rejection (tail = latest attempt).
+        # Query BOTH names: on current systemd the update unit's canonical
+        # name is systemd-sysupdate-update.service (the plain name is an
+        # alias) and `journalctl -u` does not resolve aliases.
         target.succeed(
-          "journalctl -u systemd-sysupdate --no-pager -n 40 | "
+          "journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --no-pager -n 40 | "
           "grep -iE 'verify|signature|checksum|hash|sha256|gpg'"
         )
 

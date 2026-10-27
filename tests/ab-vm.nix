@@ -87,7 +87,7 @@ let
     # --- RESULT_* (single-line, asserted by the wrapper) ---------------------
     print("RESULT_VERSION=" + run("cat /etc/image-version"))
     print("RESULT_BOOT_COMPLETE=" + run("systemctl is-active boot-complete.target || true"))
-    print("RESULT_BLESS=" + run("${pkgs.systemd}/lib/systemd/systemd-bless-boot status 2>/dev/null || echo unknown"))
+    print("RESULT_BLESS=" + run("systemd-bless-boot status 2>/dev/null || echo unknown"))
     # PARTLABEL = GPT partition label (filesystem LABEL is empty for squashfs).
     print("RESULT_SLOTS=" + run("lsblk -lno PARTLABEL | tr '\\n' ','"))
     print("RESULT_DATA=" + run("echo alive >/mnt/data/marker 2>/dev/null; cat /mnt/data/marker 2>/dev/null || echo MISSING"))
@@ -111,7 +111,7 @@ let
     # the ESP's UKI entries (the +N suffix is the tries-left counter), and
     # the LoaderEntrySelected EFI variable raw bytes (empty = runtime
     # services did not expose the loader's choice to the OS).
-    print("INFO_BLESS_STATUS=" + run("${pkgs.systemd}/lib/systemd/systemd-bless-boot status 2>&1; echo rc=$?"))
+    print("INFO_BLESS_STATUS=" + run("systemd-bless-boot status 2>&1; echo rc=$?"))
     print("INFO_BOOTCTL=" + run("bootctl 2>&1 | head -40"))
     print("INFO_ESP_LINUX=" + run("ls -la /boot/EFI/Linux/ 2>&1"))
     print("INFO_LOADER_SELECTED=" + run("od -An -tx1 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2>&1 | head -5"))
