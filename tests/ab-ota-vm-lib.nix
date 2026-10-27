@@ -103,12 +103,17 @@ in
 
   # Single-string start command for `create_machine(start_command=...)`;
   # each suite embeds it via Nix interpolation (`"${otaLib.startCommand v1Image}"`).
+  # `-accel kvm -accel tcg`: KVM first, TCG fallback — on CI runners whose
+  # build sandbox cannot open /dev/kvm (EPERM via the device cgroup), QEMU
+  # falls back to TCG instead of dying before QMP handshake. The framework's
+  # own declared-node VMs do the same fallback internally.
   startCommand = image:
     lib.concatStringsSep " " [
       "${pkgs.qemu_test}/bin/qemu-kvm"
       "-machine q35"
       "-cpu max"
       "-accel kvm"
+      "-accel tcg"
       "-bios ${pkgs.OVMF.fd}/FV/OVMF.fd"
       "-m 3072"
       "-smp 4"

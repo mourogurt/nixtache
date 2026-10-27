@@ -50,11 +50,13 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      # One KVM runner host died under a full-matrix dispatch with ~30
-      # concurrent suites (run #80: QEMU/build processes SIGKILLed, QMP
-      # connection resets), while ~7 concurrent suites ran green — bound a
-      # full dispatch to 3 concurrent suites to stay clearly inside one
-      # host's memory/KVM capacity at the cost of a longer dispatch.
+      # Bound a full dispatch to 3 concurrent suites. The runner executes the
+      # suites inside build sandboxes whose /dev/kvm access can be denied
+      # (EPERM), in which case the VMs fall back to TCG emulation — several
+      # CPU-hungry processes per suite. Three concurrent suites keep one
+      # runner host inside its CPU/memory capacity (an unbounded dispatch of
+      # ~30 suites produced QEMU/build SIGKILLs and connection resets) at the
+      # cost of a longer dispatch.
       max-parallel: 3
       matrix:
         # smoke keeps the KVM path warm nightly: one OTA e2e variant + the

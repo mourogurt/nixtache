@@ -175,11 +175,15 @@ pkgs.testers.runNixOSTest {
     DEGRADED = ${if reconcileDegraded then "True" else "False"}
 
     def create_ab_machine(**kwargs):
+        # -accel kvm then -accel tcg: TCG fallback for CI runners whose build
+        # sandbox cannot open /dev/kvm (EPERM) — without the fallback the QEMU
+        # dies before the QMP handshake and the suite looks like a host kill.
         start_command = [
             "${pkgs.qemu_test}/bin/qemu-kvm",
             "-machine", "q35",
             "-cpu", "max",
             "-accel", "kvm",
+            "-accel", "tcg",
             "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
             "-m", "3072",
             "-smp", "4",

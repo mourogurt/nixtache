@@ -106,6 +106,7 @@ let
       "-machine q35"
       "-cpu max"
       "-accel kvm"
+      "-accel tcg"
       "-bios ${pkgs.OVMF.fd}/FV/OVMF.fd"
       "-m 3072"
       "-smp 4"
