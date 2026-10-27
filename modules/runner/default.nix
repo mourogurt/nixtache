@@ -232,6 +232,11 @@ in
           ...
         }:
         {
+          # The forced experimental-features live in ./nix-features.nix —
+          # one definition, also exported as `nixosModules.nix-features`
+          # for environments that handle nixtache closures without the
+          # whole runner module.
+          imports = [ ./nix-features.nix ];
           nix = {
             gc = {
               automatic = true;
@@ -245,11 +250,6 @@ in
             settings = mkMerge [
               cfg.nixSettings
               {
-                experimental-features = [
-                  "nix-command"
-                  "flakes"
-                  "ca-derivations"
-                ];
                 trusted-users = [
                   "root"
                   "@users"

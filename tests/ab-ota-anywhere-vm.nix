@@ -109,6 +109,14 @@ let
     (nixpkgs.lib.nixosSystem {
       inherit system;
       modules = [
+        # The installer's serving nix must accept the appliance's
+        # content-addressed closure: `nix copy --to ssh://target` runs
+        # `nix-store --serve` on the installer, whose daemon rejects CA
+        # paths unless ca-derivations is on in ITS nix.conf (the copy
+        # fails with "experimental Nix feature 'ca-derivations' is
+        # disabled"). The feature set is the shared nixtache definition
+        # the runner container also forces.
+        self.nixosModules.nix-features
         (nixosImages + "/nix/kexec-installer/module.nix")
         (nixosImages + "/nix/noninteractive.nix")
         (
@@ -117,12 +125,6 @@ let
             system.kexec-installer.name = "nixos-kexec-installer-noninteractive";
             boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
             boot.supportedFilesystems.zfs = lib.mkForce false;
-            # The installed closure is content-addressed (CA evaluation for the
-            # appliance); `nix copy --to ssh://target` runs `nix-store --serve`
-            # on the installer, whose daemon rejects CA paths unless the
-            # feature is enabled in ITS nix.conf (the copy fails with
-            # "experimental Nix feature 'ca-derivations' is disabled").
-            nix.settings.experimental-features = [ "nix-command" "flakes" "ca-derivations" ];
             # The pinned nixos-images' restore-remote-access.nix sets
             # boot.initrd.systemd.enable, which current nixpkgs removed:
             # scripted initrd is gone, so systemd initrd is unconditional
@@ -333,10 +335,12 @@ pkgs.testers.runNixOSTest {
     virtualisation.memorySize = 4096;
     virtualisation.cores = 4;
     environment.systemPackages = with pkgs; [ nixos-anywhere curl gnupg openssh jq ];
-    # The appliance closure this suite installs is content-addressed; both
-    # sides of nixos-anywhere's `nix copy --to ssh://target` (the deployer's
-    # client nix and the installer's serving nix) must accept CA paths.
-    nix.settings.experimental-features = [ "nix-command" "flakes" "ca-derivations" ];
+    # The deployer stands in for a nixtache runner host (it runs the deploy
+    # action), so its nix feature set comes from the runner module's shared
+    # definition — ca-derivations is load-bearing: the appliance closure is
+    # content-addressed and `nix copy --to ssh://target` rejects CA paths
+    # without it.
+    imports = [ self.nixosModules.nix-features ];
     environment.etc."deploy-action.sh".source = "${actionRunScript}";
     environment.etc."deploy-env.sh".source = "${deployEnvFile}";
     environment.etc."fake-nix/nix".source = "${fakeNix}";

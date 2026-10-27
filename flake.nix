@@ -27,6 +27,11 @@
       #   inputs.nixtache.nixosModules.default     # = .runner
       nixosModules = {
         runner = import ./modules/runner;
+        # The nix feature set the runner container forces (nix-command,
+        # flakes, ca-derivations) as a standalone module — import it for
+        # any nix environment that must handle nixtache's content-addressed
+        # closures without the whole runner module.
+        nix-features = import ./modules/runner/nix-features.nix;
         deploy-target = import ./modules/deploy-target;
         ab-image = import ./modules/ab-image;
         overlay-nix = import ./modules/overlay-nix;
