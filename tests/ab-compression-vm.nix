@@ -197,11 +197,20 @@ pkgs.runCommand "ab-compression-vm-test"
     # Compare the SPLIT nix-store.raw (the compressed store image), not the
     # fixed-size partition slot — so the compression algorithm/level is visible
     # in the byte count.
-    # `du -B1` (actual disk usage in 1-byte blocks), NOT `stat -c%s` or `du -b`
-    # (both return apparent size): repart pads the split image to the partition
-    # size (512M apparent for all variants), but the compressed squashfs/erofs
-    # CONTENT differs (zstd ~361M vs gzip ~385M actual disk usage).
-    sizeOf() { du -B1 "$1" | cut -f1; }
+    # The split image is SPARSE: repart pads it to the partition size (512M
+    # apparent for all variants), but the compressed squashfs/erofs CONTENT
+    # differs (zstd ~361M vs gzip ~385M actual disk usage). Sparse holes do
+    # not survive every store round-trip or filesystem (NAR import/export,
+    # btrfs copies via copy_file_range materialize them), so `dd
+    # conv=sparse` re-punches the zero runs FIRST and `du -B1` (actual usage
+    # in 1-byte blocks) then sees the content size on any host — never the
+    # 512M padding. (`cp --sparse=always` is NOT enough: coreutils takes the
+    # copy_file_range fast path on some filesystems and copies dense.)
+    sizeOf() {
+      tmp=$(mktemp)
+      dd if="$1" of="$tmp" conv=sparse bs=1M status=none && du -B1 "$tmp" | cut -f1
+      rm -f "$tmp"
+    }
     noneSize=$(sizeOf ${splitRaw noneSquashfs})
     sqZstd19=$(sizeOf ${splitRaw zstd19Squashfs})
     erZstd19=$(sizeOf ${splitRaw zstd19Erofs})
