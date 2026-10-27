@@ -447,12 +447,18 @@ in
       imageSize = mkIf (cfg.diskSize != null) cfg.diskSize;
       # EROFS density: block-aligned file tails waste ~half a block per file
       # (~40M on a ~22K-file closure), which makes erofs lose to squashfs
-      # despite zstd. fragments/ztailpacking pack the tails; -C1M (big_pcluster)
-      # lets zstd compress across 4K block boundaries. No-ops when the store is
-      # uncompressed. Repart appends these after the positional args (getopt
-      # permutes) via SYSTEMD_REPART_MKFS_OPTIONS_EROFS.
+      # despite zstd. fragments/ztailpacking pack the tails; -C262144 (big
+      # pcluster, capped at 256K) lets zstd compress across 4K block
+      # boundaries. The cap is a kernel constraint: 1M pclusters break the
+      # pinned kernel's (6.18) zstd readahead decompression — boots die in
+      # initrd activation with "failed to decompress … Unknown frame
+      # descriptor" — while 256K and below boot green with the same
+      # compression win. Raise only with a kernel pin that carries the fix.
+      # No-ops when the store is uncompressed. Repart appends these after
+      # the positional args (getopt permutes) via
+      # SYSTEMD_REPART_MKFS_OPTIONS_EROFS.
       mkfsOptions = mkIf (cfg.storeFs == "erofs") {
-        erofs = [ "-Efragments,ztailpacking" "-C1048576" ];
+        erofs = [ "-Efragments,ztailpacking" "-C262144" ];
       };
       partitions = cfg.extraPartitions // {
         esp = {
