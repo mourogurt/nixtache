@@ -331,6 +331,19 @@ pkgs.testers.runNixOSTest {
     target.wait_for_unit("sshd.service")
     target.wait_for_unit("systemd-sysupdate.timer")
     target.wait_for_unit("nixtache-ab-provision.service")
+    # The framework's kernel cmdline carries a double-prefixed regInfo=
+    # (/nix/.ro-store/nix/store/<hash>/registration) while the guest mounts
+    # the host store share directly at /nix/.ro-store, so the boot-time
+    # register-nix-paths.service fails and the deployer's store DB misses
+    # the extraDependencies — the in-VM `nix build` behind the deploy
+    # action then cannot resolve the sysupdate-package from the store.
+    # Re-load the registration from the actually-mounted path. Pure
+    # test-harness workaround: a prod system boots a real disk — no
+    # regInfo= cmdline and no register-nix-paths.service exist there — so
+    # this step has no prod counterpart.
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
 
     # -- Verify initial GPT partition state on /dev/vdb (laid out by the
     #    provision module: slot A + free slot B) ----------------------------

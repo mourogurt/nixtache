@@ -132,7 +132,10 @@ let
             # what the system path carries; referencing the test's pkgs
             # systemd path instead would miss the store (this appliance
             # evaluates against a separate CA package set, so that exact
-            # path is not part of the image).
+            # path is not part of the image). Test-assertion ergonomics
+            # only — a prod appliance needs nothing here: the units
+            # ExecStart absolute store paths, so functionality never
+            # depends on these being in PATH.
             environment.systemPackages =
               with pkgs;
               [

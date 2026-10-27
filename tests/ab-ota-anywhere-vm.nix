@@ -410,6 +410,9 @@ pkgs.testers.runNixOSTest {
     # the deployer's store DB misses the extraDependencies — the in-VM
     # `nix build` behind nixos-anywhere then re-substitutes them instead of
     # no-op'ing. Re-load the registration from the actually-mounted path.
+    # Pure test-harness workaround: a prod system boots a real disk — no
+    # regInfo= cmdline and no register-nix-paths.service exist there — so
+    # this step has no prod counterpart.
     deployer.succeed(
       "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
     )

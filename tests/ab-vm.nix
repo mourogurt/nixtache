@@ -84,6 +84,11 @@ let
     # --- RESULT_* (single-line, asserted by the wrapper) ---------------------
     print("RESULT_VERSION=" + run("cat /etc/image-version"))
     print("RESULT_BOOT_COMPLETE=" + run("systemctl is-active boot-complete.target || true"))
+    # First-boot attestation contract: on the fresh image ABA attains `good`
+    # (boot-complete.target reached → bless-boot rewards the entry). The call
+    # is by bare name, so the appliance's own systemd-bless-boot must be in
+    # PATH (ab-fixture's abtest-systemd-aux-bins) — `unknown` here means the
+    # binary did not run at all, not an indeterminate bless state.
     print("RESULT_BLESS=" + run("systemd-bless-boot status 2>/dev/null || echo unknown"))
     # PARTLABEL = GPT partition label (filesystem LABEL is empty for squashfs).
     print("RESULT_SLOTS=" + run("lsblk -lno PARTLABEL | tr '\\n' ','"))

@@ -152,7 +152,9 @@ pkgs.testers.runNixOSTest {
     # the deployer's store DB misses the extraDependencies — nix-serve then
     # cannot serve them and the appliance's realize dies with "no substituter
     # that can build it". Re-load the registration from the actually-mounted
-    # path.
+    # path. Pure test-harness workaround: a prod system boots a real disk —
+    # no regInfo= cmdline and no register-nix-paths.service exist there — so
+    # this step has no prod counterpart.
     deployer.succeed(
       "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
     )
