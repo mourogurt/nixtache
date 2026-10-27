@@ -81,6 +81,15 @@ spawn extra, never-starting jobs that hold the whole run (and the runner)
 open. A wedged vmtests run occupies the `kvm` runner indefinitely; cancel
 it before dispatching a new one (the dispatch queues behind it otherwise).
 
+A `kvm`-label runner may still deny `/dev/kvm` to build-sandboxed processes
+(EPERM via the device cgroup). The test framework's declared-node VMs fall
+back to TCG silently in that case; every suite that starts its own QEMU via
+`create_machine(start_command=...)` (or pexpect) MUST pass
+`-accel kvm -accel tcg` — KVM first, TCG fallback — or its QEMU dies before
+the QMP handshake and the job fails with a bare `ConnectionResetError`.
+Under TCG the suites are CPU-emulated: expect several minutes per VM boot
+and size the matrix concurrency accordingly.
+
 The migrate pair splits the migration contract:
 `ab-ota-migrate-vm` pins the live side (provisioning, idempotency, update
 machinery ready, live closure retained) and deliberately never boots the
