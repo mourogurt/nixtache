@@ -117,6 +117,12 @@ let
             system.kexec-installer.name = "nixos-kexec-installer-noninteractive";
             boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
             boot.supportedFilesystems.zfs = lib.mkForce false;
+            # The installed closure is content-addressed (CA evaluation for the
+            # appliance); `nix copy --to ssh://target` runs `nix-store --serve`
+            # on the installer, whose daemon rejects CA paths unless the
+            # feature is enabled in ITS nix.conf (the copy fails with
+            # "experimental Nix feature 'ca-derivations' is disabled").
+            nix.settings.experimental-features = [ "nix-command" "flakes" "ca-derivations" ];
             # The pinned nixos-images' restore-remote-access.nix sets
             # boot.initrd.systemd.enable, which current nixpkgs removed:
             # scripted initrd is gone, so systemd initrd is unconditional
@@ -327,6 +333,10 @@ pkgs.testers.runNixOSTest {
     virtualisation.memorySize = 4096;
     virtualisation.cores = 4;
     environment.systemPackages = with pkgs; [ nixos-anywhere curl gnupg openssh jq ];
+    # The appliance closure this suite installs is content-addressed; both
+    # sides of nixos-anywhere's `nix copy --to ssh://target` (the deployer's
+    # client nix and the installer's serving nix) must accept CA paths.
+    nix.settings.experimental-features = [ "nix-command" "flakes" "ca-derivations" ];
     environment.etc."deploy-action.sh".source = "${actionRunScript}";
     environment.etc."deploy-env.sh".source = "${deployEnvFile}";
     environment.etc."fake-nix/nix".source = "${fakeNix}";

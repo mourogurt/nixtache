@@ -124,7 +124,16 @@ let
             "-display", "none", "-serial", "stdio", "-monitor", "none"]
     p = pexpect.spawn(qemu, args, encoding="utf-8", timeout=240)
 
-    p.expect(r"Welcome to NixOS|login:", timeout=240)
+    try:
+        p.expect(r"Welcome to NixOS|login:", timeout=240)
+    except (pexpect.TIMEOUT, pexpect.EOF) as e:
+        # Serial evidence for the failure: the last 2000 chars the guest emitted
+        # (empty buffer = firmware/kernel never wrote to ttyS0; partial buffer =
+        # where the boot stalled) and whether QEMU is still alive.
+        print("BOOT-FAIL:", type(e).__name__, "qemu-alive:", p.isalive())
+        print("--- serial tail ---")
+        print((p.before or "")[-2000:])
+        raise
     time.sleep(6)  # let the autologin root shell settle on ttyS0
 
     # Sentinel sync (not the prompt — it carries brackets/ANSI). $$ = shell PID.
