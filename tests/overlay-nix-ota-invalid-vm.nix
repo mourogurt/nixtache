@@ -287,7 +287,16 @@ pkgs.testers.runNixOSTest {
         "cd /var/lib/nixtache/ab-stage/abtest && : > SHA256SUMS"
       )
       sign_stage()
-      appliance.succeed("systemctl start --wait systemd-sysupdate.service", timeout=900)
+      # --wait: the update unit is Type=simple, so a plain start returns
+      # at fork — without --wait the assertions below would race the
+      # still-running update. The CANONICAL unit name is required here:
+      # `systemd-sysupdate.service` is only an alias, and on the appliance
+      # systemd a `--wait` issued against the alias never returns even
+      # after the canonical unit deactivates (observed: unit finished in
+      # <1s, systemctl hung the full 900s timeout with empty output).
+      appliance.succeed(
+        "systemctl start --wait systemd-sysupdate-update.service", timeout=900
+      )
       assert_persistent_tool_intact()
       assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
       print("OK: empty sysupdate poll left the upper, DB entry and profile intact")
@@ -311,7 +320,10 @@ pkgs.testers.runNixOSTest {
         "printf '%b' \"$(printf '\\\\%03o' \"$flipped\")\" | "
         "dd of=\"$raw\" bs=1 seek=\"$offset\" count=1 conv=notrunc status=none"
       )
-      appliance.fail("systemctl start --wait systemd-sysupdate.service", timeout=900)
+      # Canonical unit name, not the alias — see the --wait comment above.
+      appliance.fail(
+        "systemctl start --wait systemd-sysupdate-update.service", timeout=900
+      )
       assert appliance.succeed("cat /etc/image-version").strip() == "1"
       assert_persistent_tool_intact()
       appliance.succeed("systemd-sysupdate vacuum", timeout=300)

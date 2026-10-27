@@ -168,7 +168,7 @@ pkgs.testers.runNixOSTest {
     networking.firewall.enable = false;
   };
 
-  nodes.target = { pkgs, lib, ... }: {
+  nodes.target = { pkgs, lib, config, ... }: {
     imports = [ self.nixosModules.deploy-target ];
     services.openssh.enable = true;
     boot.loader.systemd-boot.bootCounting.enable = true;
@@ -205,7 +205,20 @@ pkgs.testers.runNixOSTest {
     };
 
     systemd.tmpfiles.rules = [ "d /var/lib/nixtache/ab-slots 0755 root root -" ];
-    environment.systemPackages = with pkgs; [ util-linux gptfdisk squashfsTools curl ];
+    environment.systemPackages = with pkgs; [
+      util-linux
+      gptfdisk
+      squashfsTools
+      curl
+      # Expose systemd-sysupdate in PATH: the binary lives in systemd's
+      # private lib dir, and the C2 recovery step below runs
+      # `systemd-sysupdate vacuum` as a bare command (the appliance suites
+      # get the same exposure via the fixture's abtest-systemd-aux-bins).
+      (pkgs.runCommand "abtest-sysupdate-bin" { } ''
+        mkdir -p $out/bin
+        ln -s ${config.systemd.package}/lib/systemd/systemd-sysupdate $out/bin/
+      '')
+    ];
     networking.firewall.enable = false;
   };
 
