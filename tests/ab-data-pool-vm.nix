@@ -100,26 +100,17 @@ let
     dd if=/dev/zero of=$out bs=1M count=0 seek=1024
   '';
 
-  startCommand = image:
-    lib.concatStringsSep " " [
-      "${pkgs.qemu_test}/bin/qemu-kvm"
-      "-machine q35"
-      "-cpu max"
-      "-accel kvm"
-      "-accel tcg"
-      "-bios ${pkgs.OVMF.fd}/FV/OVMF.fd"
-      "-m 3072"
-      "-smp 4"
-      "-drive file=${image},id=drive1,if=none,werror=report,snapshot=on"
-      "-device virtio-blk-pci,drive=drive1,bootindex=1"
-      # serial= gives the disk a /dev/disk/by-id/ entry — NixOS's zfs-import
-      # scans /dev/disk/by-id (boot.zfs.devNodes default), so without a serial
-      # the pool would be unfindable after a reboot.
-      "-drive file=${dataDisk},id=drive2,if=none,werror=report,snapshot=on"
-      "-device virtio-blk-pci,drive=drive2,serial=datadisk"
-      "-netdev vde,id=vlan1,sock=$QEMU_VDE_SOCKET_1"
-      "-device virtio-net-pci,netdev=vlan1,mac=52:54:00:12:01:03"
+  # The shared created-machine shape plus the pool's second disk. serial=
+  # gives the disk a /dev/disk/by-id/ entry — NixOS's zfs-import scans
+  # /dev/disk/by-id (boot.zfs.devNodes default), so without a serial the
+  # pool would be unfindable after a reboot.
+  poolStartCommand = otaLib.startCommand {
+    image = v1Image;
+    extraArgs = [
+      "-drive" "file=${dataDisk},id=drive2,if=none,werror=report,snapshot=on"
+      "-device" "virtio-blk-pci,drive=drive2,serial=datadisk"
     ];
+  };
 in
 pkgs.testers.runNixOSTest {
   name = "ab-data-pool";
@@ -129,7 +120,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     def create_pool_machine(**kwargs):
-        machine = create_machine(start_command="${startCommand v1Image}", **kwargs)
+        machine = create_machine(start_command="${poolStartCommand}", **kwargs)
         driver.machines_qemu.append(machine)
         return machine
 

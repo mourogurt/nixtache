@@ -56,7 +56,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     def create_ab_machine(**kwargs):
-        machine = create_machine(start_command="${otaLib.startCommand v1Image}", **kwargs)
+        machine = create_machine(start_command="${otaLib.startCommand { image = v1Image; }}", **kwargs)
         driver.machines_qemu.append(machine)
         return machine
 

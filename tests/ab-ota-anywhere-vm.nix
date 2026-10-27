@@ -56,6 +56,7 @@
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # Pinned external sources, fetched at eval time on the host (which has
@@ -483,24 +484,18 @@ pkgs.testers.runNixOSTest {
     #    systemd-boot → UKI is the ONLY boot path on the disk. The machine
     #    joins the vde test LAN (vlan 1) with nodeNumber 3 → 192.168.1.3.
     def create_installed_machine(oldmachine, **kwargs):
+        # Shared machine base (vm-lib) + this suite's deltas: the installed
+        # disk is attached at RUNTIME (f-string — its path lives in the
+        # driver's state dir), WITHOUT snapshot (the install's writes must
+        # reach the real qcow2), and a guest reboot EXITS QEMU instead of
+        # resetting in place — the reboot leg below relies on that
+        # (wait_for_shutdown + start re-boots the same disk).
         start_command = [
-            "${pkgs.qemu_test}/bin/qemu-kvm",
-            "-machine", "q35",
-            "-cpu", "max",
-            "-accel", "kvm",
-            "-accel", "tcg",
-            "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
-            "-m", "2048",
-            "-smp", "2",
-            # Match the driver's declared nodes: a guest reboot EXITS QEMU
-            # instead of resetting in place — the reboot leg below relies on
-            # that (wait_for_shutdown + start re-boots the same disk).
+            ${lib.concatMapStringsSep ",\n            " (s: ''"${s}"'') (otaLib.machineArgs { memory = "2048"; smp = "2"; })}
             "-no-reboot",
             "-drive", f"file={oldmachine.state_dir}/empty0.qcow2,id=drive1,if=none,werror=report",
             "-device", "virtio-blk-pci,drive=drive1,bootindex=1",
-            "-netdev", "vde,id=vlan1,sock=$QEMU_VDE_SOCKET_1",
-            "-device", "virtio-net-pci,netdev=vlan1,mac=52:54:00:12:01:03",
-        ]
+        ] + ${otaLib.pyArgs otaLib.vdeNetArgs}
         machine = create_machine(start_command=" ".join(start_command), **kwargs)
         driver.machines_qemu.append(machine)
         return machine

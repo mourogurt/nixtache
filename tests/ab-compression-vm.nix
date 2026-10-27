@@ -26,6 +26,7 @@ let
   # storeCompressionLevel, so we define a local variant below that does (its body
   # mirrors mkAppliance's thin consumer module + the three compression options).
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   pkgs = fixture.pkgs;
 
   # Small store slot → small boot image (fast QEMU). The squashfs/erofs CONTENT
@@ -113,15 +114,12 @@ let
     image = sys.argv[1]
     label = sys.argv[2]          # SQUASHFS / EROFS (tags RESULT_* keys)
 
-    # QEMU invocation: q35, KVM (TCG fallback), OVMF UEFI firmware, the A/B disk
-    # as -hda (OVMF auto-boots its ESP), -snapshot so the read-only store image is
-    # never mutated. Serial on stdio (pexpect reads it).
-    qemu = "${pkgs.qemu_kvm}/bin/qemu-system-x86_64"
-    args = ["-machine", "q35", "-accel", "kvm", "-accel", "tcg",
-            "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
-            "-hda", image, "-snapshot",
-            "-m", "2048", "-smp", "4",
-            "-display", "none", "-serial", "stdio", "-monitor", "none"]
+    # QEMU invocation: the shared pexpect base (q35, KVM with TCG fallback,
+    # OVMF UEFI, serial on stdio — tests/ab-ota-vm-lib.nix) plus this
+    # driver's disk: the image as -hda (OVMF auto-boots its ESP) and
+    # -snapshot so the read-only store image is never mutated.
+    qemu = "${otaLib.pexpectQemuBin}"
+    args = ${otaLib.pyArgs (otaLib.pexpectQemuArgs { })} + ["-hda", image, "-snapshot"]
     p = pexpect.spawn(qemu, args, encoding="utf-8", timeout=240)
 
     try:

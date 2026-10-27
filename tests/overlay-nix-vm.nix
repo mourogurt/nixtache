@@ -24,6 +24,7 @@
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
 
   # Local appliance builder = ab-fixture mkAppliance + the overlay-nix
   # module + its config. (ab-fixture.nix mkAppliance doesn't take extra modules,
@@ -100,12 +101,8 @@ let
   } ''
     import pexpect, sys, time
     image = sys.argv[1]
-    qemu = "${pkgs.qemu_kvm}/bin/qemu-system-x86_64"
-    args = ["-machine", "q35", "-accel", "kvm", "-accel", "tcg",
-            "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
-            "-hda", image, "-snapshot",
-            "-m", "2048", "-smp", "4",
-            "-display", "none", "-serial", "stdio", "-monitor", "none"]
+    qemu = "${otaLib.pexpectQemuBin}"
+    args = ${otaLib.pyArgs (otaLib.pexpectQemuArgs { })} + ["-hda", image, "-snapshot"]
     p = pexpect.spawn(qemu, args, encoding="utf-8", timeout=240)
     p.expect(r"Welcome to NixOS|login:", timeout=240)
     time.sleep(6)

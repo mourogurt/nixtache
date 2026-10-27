@@ -27,6 +27,7 @@ let
   # source of truth in tests/ab-fixture.nix (its mkAppliance covers
   # version/signVerify/dataPartition; no local copy here).
   inherit (import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; }) testSignKey mkAppliance;
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
 
   v1 = mkAppliance { version = "1"; dataPartition = true; };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
@@ -44,16 +45,12 @@ let
     # The A/B disk image to boot is passed as the only CLI argument.
     image = sys.argv[1]
 
-    # QEMU invocation: q35 machine, KVM (TCG fallback), OVMF UEFI firmware, the
-    # image as an IDE/SATA disk (-hda; OVMF auto-boots its ESP), -snapshot so the
-    # read-only store image is never mutated. Serial on stdio (pexpect reads it),
-    # no graphical display, no QEMU monitor mux.
-    qemu = "${pkgs.qemu_kvm}/bin/qemu-system-x86_64"
-    args = ["-machine", "q35", "-accel", "kvm", "-accel", "tcg",
-            "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
-            "-hda", image, "-snapshot",
-            "-m", "2048", "-smp", "4",
-            "-display", "none", "-serial", "stdio", "-monitor", "none"]
+    # QEMU invocation: the shared pexpect base (q35, KVM with TCG fallback,
+    # OVMF UEFI, serial on stdio — tests/ab-ota-vm-lib.nix) plus this
+    # driver's disk: the image as -hda (OVMF auto-boots its ESP) and
+    # -snapshot so the read-only store image is never mutated.
+    qemu = "${otaLib.pexpectQemuBin}"
+    args = ${otaLib.pyArgs (otaLib.pexpectQemuArgs { })} + ["-hda", image, "-snapshot"]
     p = pexpect.spawn(qemu, args, encoding="utf-8", timeout=240)
 
     # Wait until the kernel/userspace come up far enough to print a login banner.

@@ -188,7 +188,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     def create_legacy_machine(**kwargs):
-        machine = create_machine(start_command="${otaLib.startCommand legacyImage}", **kwargs)
+        machine = create_machine(start_command="${otaLib.startCommand { image = legacyImage; }}", **kwargs)
         driver.machines_qemu.append(machine)
         return machine
 

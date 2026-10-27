@@ -44,6 +44,7 @@
 let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
+  otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # pkgs_1: the lower-only runtime. A renamed busybox keeps multi-call
@@ -175,24 +176,7 @@ pkgs.testers.runNixOSTest {
     DEGRADED = ${if reconcileDegraded then "True" else "False"}
 
     def create_ab_machine(**kwargs):
-        # -accel kvm then -accel tcg: TCG fallback for CI runners whose build
-        # sandbox cannot open /dev/kvm (EPERM) — without the fallback the QEMU
-        # dies before the QMP handshake and the suite looks like a host kill.
-        start_command = [
-            "${pkgs.qemu_test}/bin/qemu-kvm",
-            "-machine", "q35",
-            "-cpu", "max",
-            "-accel", "kvm",
-            "-accel", "tcg",
-            "-bios", "${pkgs.OVMF.fd}/FV/OVMF.fd",
-            "-m", "3072",
-            "-smp", "4",
-            "-drive", "file=${v1Image},id=drive1,if=none,werror=report,snapshot=on",
-            "-device", "virtio-blk-pci,drive=drive1,bootindex=1",
-            "-netdev", "vde,id=vlan1,sock=$QEMU_VDE_SOCKET_1",
-            "-device", "virtio-net-pci,netdev=vlan1,mac=52:54:00:12:01:03",
-        ]
-        machine = create_machine(start_command=" ".join(start_command), **kwargs)
+        machine = create_machine(start_command="${otaLib.startCommand { image = v1Image; }}", **kwargs)
         driver.machines_qemu.append(machine)
         return machine
 

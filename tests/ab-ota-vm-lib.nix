@@ -1,11 +1,10 @@
-# Shared machinery for the OTA VM suites that boot REAL appliance images
-# (rollback / noop / interrupted): a deployer test node (binary cache +
-# sysupdate staging over nginx) and a driver-created appliance machine
-# (OVMF → systemd-boot fallback → UKI, backdoor root shell on virtconsole
-# from test-instrumentation.nix, static test-LAN address .3).
-#
-# The pattern is lifted from tests/overlay-nix-ab-swap-vm.nix; this module
-# exists so the new suites do not each duplicate the QEMU/deployer wiring.
+# Shared machinery for the VM suites that boot REAL appliance images
+# outside the framework's declared nodes: a deployer test node (binary
+# cache + sysupdate staging over nginx), a driver-created appliance
+# machine (OVMF → systemd-boot fallback → UKI, backdoor root shell on
+# virtconsole from test-instrumentation.nix, static test-LAN address .3),
+# and the shared QEMU invocation base for created machines and pexpect
+# drivers alike.
 #
 # `appliancePkgs` is the nixpkgs import the appliance systems evaluate with
 # (CA — ab-image asserts it; see ab-fixture.nix). `pkgs` below stays the
@@ -28,9 +27,48 @@ let
     nix-store --generate-binary-cache-key ota-vm-local $out/private $out/public
   '';
   cachePub = builtins.readFile "${cacheKey}/public";
+
+  # ---- Shared QEMU invocation for out-of-band appliance boots ------------
+  # Every suite that boots a REAL appliance image outside the framework's
+  # declared nodes — driver-created machines (create_machine) and pexpect
+  # drivers alike — builds on these pieces, so the accelerator contract
+  # lives in exactly one place:
+  #   `-accel kvm -accel tcg` — KVM first, TCG fallback. On CI runners
+  #   whose build sandbox cannot open /dev/kvm (EPERM via the device
+  #   cgroup), QEMU falls back to TCG instead of dying before the QMP
+  #   handshake; the framework's own declared-node VMs do the same
+  #   fallback internally.
+  accelArgs = [ "-accel" "kvm" "-accel" "tcg" ];
+
+  # Created-machine base: q35 + `-cpu max` (the appliance userspace — zfs,
+  # repart tooling — expects modern CPU features under the TCG fallback
+  # too) and OVMF (the images' only boot path is UEFI: ESP fallback →
+  # systemd-boot → UKI). Disks and NICs are the caller's concern — some
+  # suites attach their image at runtime (python f-string disk path).
+  machineArgs = { memory ? "3072", smp ? "4" }: [
+    "${pkgs.qemu_test}/bin/qemu-kvm"
+    "-machine"
+    "q35"
+    "-cpu"
+    "max"
+  ]
+  ++ accelArgs
+  ++ [
+    "-bios" "${pkgs.OVMF.fd}/FV/OVMF.fd"
+    "-m" memory
+    "-smp" smp
+  ];
+
+  # The test-LAN netdev every created machine joins (vlan 1, static .3) so
+  # the deployer node can reach it; $QEMU_VDE_SOCKET_1 is expanded by the
+  # test driver when the start_command runs.
+  vdeNetArgs = [
+    "-netdev" "vde,id=vlan1,sock=$QEMU_VDE_SOCKET_1"
+    "-device" "virtio-net-pci,netdev=vlan1,mac=52:54:00:12:01:03"
+  ];
 in
 {
-  inherit fixture lib pkgs;
+  inherit fixture lib pkgs machineArgs vdeNetArgs;
 
   # Assert that a sysupdate run installed a new version, from the journal of
   # the boot that PERFORMED the update. Two invariants:
@@ -104,25 +142,42 @@ in
       ] ++ extraModules;
     };
 
-  # Single-string start command for `create_machine(start_command=...)`;
-  # each suite embeds it via Nix interpolation (`"${otaLib.startCommand v1Image}"`).
-  # `-accel kvm -accel tcg`: KVM first, TCG fallback — on CI runners whose
-  # build sandbox cannot open /dev/kvm (EPERM via the device cgroup), QEMU
-  # falls back to TCG instead of dying before QMP handshake. The framework's
-  # own declared-node VMs do the same fallback internally.
-  startCommand = image:
-    lib.concatStringsSep " " [
-      "${pkgs.qemu_test}/bin/qemu-kvm"
-      "-machine q35"
-      "-cpu max"
-      "-accel kvm"
-      "-accel tcg"
-      "-bios ${pkgs.OVMF.fd}/FV/OVMF.fd"
-      "-m 3072"
-      "-smp 4"
-      "-drive file=${image},id=drive1,if=none,werror=report,snapshot=on"
-      "-device virtio-blk-pci,drive=drive1,bootindex=1"
-      "-netdev vde,id=vlan1,sock=$QEMU_VDE_SOCKET_1"
-      "-device virtio-net-pci,netdev=vlan1,mac=52:54:00:12:01:03"
+  # The common created-machine shape as a single-string start_command:
+  # machine base + the image as a snapshot COW drive (the store image is
+  # never mutated; in-test writes survive guest reboots) + the test LAN.
+  # `extraArgs` carries suite deltas such as extra disks with serials.
+  # Suites whose disk path is runtime knowledge compose machineArgs /
+  # vdeNetArgs themselves instead.
+  startCommand = { image, memory ? "3072", smp ? "4", extraArgs ? [ ] }:
+    lib.concatStringsSep " " (
+      machineArgs { inherit memory smp; }
+      ++ [
+        "-drive" "file=${image},id=drive1,if=none,werror=report,snapshot=on"
+        "-device" "virtio-blk-pci,drive=drive1,bootindex=1"
+      ]
+      ++ vdeNetArgs
+      ++ extraArgs
+    );
+
+  # pexpect-driver base: the same accelerator contract + OVMF, with serial
+  # on stdio (pexpect reads the console), no display, no monitor mux. No
+  # -cpu flag: under KVM that is host passthrough, under the TCG fallback
+  # qemu64. Drivers append their image:
+  #   args = base + ["-hda", image, "-snapshot"]
+  pexpectQemuBin = "${pkgs.qemu_kvm}/bin/qemu-system-x86_64";
+  pexpectQemuArgs = { memory ? "2048", smp ? "4" }:
+    [ "-machine" "q35" ]
+    ++ accelArgs
+    ++ [
+      "-bios" "${pkgs.OVMF.fd}/FV/OVMF.fd"
+      "-m" memory
+      "-smp" smp
+      "-display" "none"
+      "-serial" "stdio"
+      "-monitor" "none"
     ];
+
+  # Render a list of QEMU args as a Python list literal for ${} embedding
+  # into testScripts and pexpect drivers (the args carry no quotes).
+  pyArgs = args: "[${lib.concatMapStringsSep ", " (s: ''"${s}"'') args}]";
 }
