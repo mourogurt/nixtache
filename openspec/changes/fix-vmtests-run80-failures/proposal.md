@@ -32,10 +32,15 @@ which the actual test verdict is buried.
   `ab-ota-verify-vm`: the reboot must follow only a completed installation,
   and a failed/no-op update must surface the sysupdate error instead of a
   reboot-plus-timeout.
-- Investigate the two opaque failures with proper logs: `ab-ota-anywhere-vm`
-  (`nixos-anywhere failed with 1`, no diagnostics captured) and
-  `ab-compression-vm` K4 (EROFS appliance boot produces **zero** serial
-  output before the 240 s pexpect timeout — squashfs boots fine).
+- Root-cause the two opaque failures:
+  - `ab-ota-anywhere-vm`: run #99 pinned it — both nix sides of the CA
+    closure copy (deployer client + kexec-installer serve) need
+    `ca-derivations`; fixed, and the feature set moves to one
+    module-level definition shared by runner container, test deployer
+    and kexec installer instead of hand-copied test lists.
+  - `ab-compression-vm` K4 (EROFS appliance boot produces **zero** serial
+    output before the 240 s pexpect timeout — squashfs boots fine):
+    still under investigation.
 - Rework `vmtests.yml` diagnosability:
   - the suite step's job output shows only the suite's own output (test
     verdict lines) or a clear "build never reached the test" + error tail;
@@ -44,6 +49,12 @@ which the actual test verdict is buried.
   - matrix jobs are named after their suite (no `suites (…)` prefix);
   - the full-matrix dispatch bounds parallelism (`max-parallel`) so one
     dispatch cannot OOM-kill a single KVM runner the way run #80 did.
+- Test-surface hygiene: the created-machine/pexpect QEMU invocation
+  (KVM-first with TCG fallback, OVMF, test-LAN wiring) is centralized in
+  the shared VM-test lib instead of per-suite copies; the test-only
+  workarounds (regInfo load-db, PATH aux-bins) are recorded as
+  test-only with their no-prod-surface rationale; the temporary
+  vde-repro diagnostic is retired after CI confirms the fallback green.
 - The 12 host-killed jobs need no code change; they are expected to pass on
   a healthy runner with bounded parallelism.
 
@@ -67,11 +78,18 @@ which the actual test verdict is buried.
 
 - Files: `.forgejo/workflows/vmtests.yml`, `tests/ab-deploy-self-vm.nix`,
   `tests/auto-update-vm.nix`, `tests/ab-vm.nix`, `tests/ab-ota-e2e.nix`,
-  `tests/ab-ota-verify-vm.nix`, `tests/ab-ota-vm-lib.nix` (shared helpers),
-  the deploy-side AB action script (reboot-after-install guard),
+  `tests/ab-ota-verify-vm.nix`, `tests/ab-ota-anywhere-vm.nix`
+  (ca-derivations placement), `tests/ab-ota-vm-lib.nix` (shared helpers,
+  consolidated QEMU base), `tests/ab-data-pool-vm.nix`,
+  `tests/overlay-nix-ab-swap-vm.nix`, `tests/overlay-nix-ota-invalid-vm.nix`,
+  `tests/overlay-nix-vm.nix` (QEMU-args consolidation),
+  `modules/runner/` (extracted nix-features definition), the deploy-side
+  AB action script (reboot-after-install guard),
   `tests/ab-compression-vm.nix` (EROFS investigation), and — if the
-  bless-boot root cause lands in the module — `modules/deploy-target/` or
-  `modules/ab-image/`.
+  bless-boot root cause lands in the module — `modules/deploy-target/`
+  or `modules/ab-image/`. The temporary `tests/vde-repro.nix` diagnostic
+  and its `probe-vde.yml` dispatch are retired by this change once CI
+  confirms the KVM/TCG fallback.
 - Coordination: `deploy-runner-contract-fixes` already tracks artifact-loss
   and suppressed suite reports for the *reusable* CI workflows; this change
   owns the same concerns for `vmtests.yml` specifically and must not

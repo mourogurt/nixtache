@@ -25,21 +25,22 @@
         to assert install-then-reboot ordering with the real error surfaced
   - [x] 3.3 Add the negative scenario (staging unreachable → no reboot,
         sysupdate error surfaced) to the e2e suite
-- [ ] 4. ab-vm bless-boot resolution (design D4)
-  - [ ] 4.1 Reproduce locally; capture `systemd-bless-boot status`,
+- [x] 4. ab-vm bless-boot resolution (design D4)
+  - [x] 4.1 Reproduce locally; capture `systemd-bless-boot status`,
         `bootctl`, and ESP loader-entry state on the fresh image
-  - [ ] 4.2 Implement outcome (a) module wiring or (b) assertion aligned
+  - [x] 4.2 Implement outcome (a) module wiring or (b) assertion aligned
         with the attainable first-boot contract, with the rationale
         recorded in the test
-- [ ] 5. EROFS boot root cause (design D5)
-  - [ ] 5.1 Reproduce `ab-compression-vm` K4 locally; diff the erofs image
+- [x] 5. EROFS boot root cause (design D5)
+  - [x] 5.1 Reproduce `ab-compression-vm` K4 locally; diff the erofs image
         (ESP, kernel, offsets) against the squashfs one
-  - [ ] 5.2 Fix the origin (image definition or test assembly); keep K1–K3
+  - [x] 5.2 Fix the origin (image definition or test assembly); keep K1–K3
         and both K4 boots intact
-- [ ] 6. ab-ota-anywhere root cause (design D6)
-  - [ ] 6.1 Re-run the suite after task 1 so the full log is captured;
-        diagnose the `nixos-anywhere failed with 1` exit
-  - [ ] 6.2 Fix the identified cause
+- [x] 6. ab-ota-anywhere root cause (design D6)
+  - [x] 6.1 Diagnose the `nixos-anywhere failed with 1` exit (run #99
+        pinned the same deterministic assertion; verdict in design D6)
+  - [x] 6.2 Fix the identified cause (ca-derivations on both nix sides of
+        the CA closure copy)
 - [x] 7. Documentation (per repo rule)
   - [x] 7.1 Update `doc/technical_details/testing.md`: vmtests job output
         contract, full-log artifact layout, job naming, and bounded matrix
@@ -47,9 +48,27 @@
         `openspec/specs/ab-ota`
   - [x] 7.2 Update `README.md` repository map if the artifact/log layout
         changes what CI produces
-- [ ] 8. Verification
-  - [ ] 8.1 Local: `nix flake check --show-trace --all-systems` and the
+- [ ] 8. Test-surface hygiene from review (design D6/D7)
+  - [x] 8.1 Extract the runner container's forced `experimental-features`
+        into a single importable definition under `modules/runner/`
+        (exported via the flake); consume it in the runner container
+        config, the anywhere suite's deployer node, and its kexec
+        installer config; delete the hand-copied lists from the suite
+  - [x] 8.2 Consolidate created-machine/pexpect QEMU invocations onto one
+        parameterized helper in `tests/ab-ota-vm-lib.nix`; suites keep
+        only their deltas: `ab-data-pool-vm`, `ab-ota-anywhere-vm`,
+        `overlay-nix-ab-swap-vm`, `overlay-nix-ota-invalid-vm`, `ab-vm`,
+        `ab-compression-vm`, `overlay-nix-vm`
+  - [x] 8.3 Make the suite/fixture comments state the no-prod-surface
+        facts explicitly: the regInfo `nix-store --load-db` step is a
+        runNixOSTest framework quirk (no `regInfo=` cmdline exists on a
+        prod system); `abtest-systemd-aux-bins` is assertion ergonomics
+        (units ExecStart absolute store paths — no prod impact)
+  - [x] 8.4 Retire the temporary `tests/vde-repro.nix` diagnostic and its
+        `probe-vde.yml` dispatch (flake.nix `vmTests` entry included)
+- [ ] 9. Verification
+  - [x] 9.1 Local: `nix flake check --show-trace --all-systems` and the
         affected pure-eval suites stay green
-  - [ ] 8.2 CI: dispatch a full `vmtests` run on a healthy KVM runner;
+  - [ ] 9.2 CI: dispatch a full `vmtests` run on a healthy KVM runner;
         confirm bounded parallelism, verdict-only job output, uploaded
         per-suite logs, and green suites for every cluster fixed here
