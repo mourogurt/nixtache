@@ -198,27 +198,33 @@ pkgs.runCommand "ab-compression-vm-test"
     # fixed-size partition slot — so the compression algorithm/level is visible
     # in the byte count.
     # The split image is SPARSE: repart pads it to the partition size (512M
-    # apparent for all variants), but the compressed squashfs/erofs CONTENT
-    # differs (zstd ~361M vs gzip ~385M actual disk usage). Sparse holes do
-    # not survive every store round-trip or filesystem (NAR import/export,
-    # btrfs copies via copy_file_range materialize them), so `dd
-    # conv=sparse` re-punches the zero runs FIRST and `du -B1` (actual usage
-    # in 1-byte blocks) then sees the content size on any host — never the
-    # 512M padding. (`cp --sparse=always` is NOT enough: coreutils takes the
-    # copy_file_range fast path on some filesystems and copies dense.)
+    # apparent for every variant) — the compressed content at the start, a
+    # long zero tail after it. Allocation-based measures (`du`, st_blocks of
+    # a `dd conv=sparse` copy) are filesystem-dependent: CoW/compressed
+    # filesystems report physical usage, container/overlay layouts round
+    # differently, so the same image can measure as garbage on one host and
+    # sanely on another. K1-K3 therefore count NON-ZERO BYTES of the image —
+    # a pure byte-level measure, identical on every host. Compressed
+    # payloads carry ~0.4% zero bytes spread evenly across variants and the
+    # zero padding tail contributes none, so the ordering between variants
+    # is preserved.
     sizeOf() {
-      tmp=$(mktemp)
-      dd if="$1" of="$tmp" conv=sparse bs=1M status=none && du -B1 "$tmp" | cut -f1
-      rm -f "$tmp"
+      dd if="$1" bs=4M status=none | tr -d '\0' | wc -c
     }
     noneSize=$(sizeOf ${splitRaw noneSquashfs})
     sqZstd19=$(sizeOf ${splitRaw zstd19Squashfs})
     erZstd19=$(sizeOf ${splitRaw zstd19Erofs})
     sqZstd1=$(sizeOf ${splitRaw zstd1Squashfs})
     sqZstd9=$(sizeOf ${splitRaw zstd9Squashfs})
-    echo "  nix-store.raw sizes (bytes):"
+    echo "  nix-store.raw sizes (nonzero bytes):"
     echo "    squashfs+none(gzip)=$noneSize  squashfs+zstd19=$sqZstd19  erofs+zstd19=$erZstd19"
     echo "    squashfs+zstd1=$sqZstd1  squashfs+zstd9=$sqZstd9"
+    # Host-filesystem view of the same files (apparent vs allocated blocks):
+    # pure diagnostics for size anomalies — the comparisons above never read
+    # these numbers.
+    for img in ${splitRaw noneSquashfs} ${splitRaw zstd19Squashfs} ${splitRaw zstd19Erofs} ${splitRaw zstd1Squashfs} ${splitRaw zstd9Squashfs}; do
+      stat -c 'fs-diag %n apparent=%s blocks(512B)=%b' "$img"
+    done
 
     # K1: squashfs+zstd-19 strictly smaller than the squashfs default (null→gzip).
     if [ "$sqZstd19" -lt "$noneSize" ]; then
