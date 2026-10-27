@@ -43,9 +43,12 @@ in
   #   - the evidence lives in the installing boot's journal: run this BEFORE
   #     any reboot leg (or in flows that never reboot) — after a reboot the
   #     previous boot's volatile journal may be gone.
-  assertSysupdateInstalled = ''
-    journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --no-pager | grep -i 'Successfully installed'
-  '';
+  # Single-line command (no trailing newline/indent): suites interpolate it
+  # inside a Python string literal — `node.succeed("${…}")` — and a raw
+  # newline inside a double-quoted Python string is a syntax error that fails
+  # the driver's script type-check at build time.
+  assertSysupdateInstalled =
+    "journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --no-pager | grep -i 'Successfully installed'";
 
   # The deployer node: nix-serve on :5000 (signed with the throwaway key)
   # + nginx on :80 serving the sysupdate staging dir.
