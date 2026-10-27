@@ -1,0 +1,26 @@
+name: probe-vde
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repro:
+    name: created-machine-qemu-repro
+    runs-on: kvm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout nixtache
+        uses: actions/checkout@v4
+      - name: Probe sandbox
+        uses: ./.forgejo/actions/sandbox-probe
+      - name: Run repro suite
+        env:
+          SUBSET: full
+          EVENT_SCHEDULE: ""
+        run: |
+          set -uo pipefail
+          if [ "${SANDBOX_OK:-0}" = "1" ]; then SANDBOX_FLAG=""; else SANDBOX_FLAG="--no-sandbox"; fi
+          rc=0
+          nix build -L --no-link --print-out-paths $SANDBOX_FLAG \
+            ".#vmTests.x86_64-linux.vde-repro" || rc=$?
+          exit "$rc"
