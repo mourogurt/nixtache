@@ -677,22 +677,31 @@ self.nixosModules.runner
   cfgAppliance = containerCfg hostApplianceClone;
   svcAppliance = servicesOf hostApplianceClone;
 
-  # --- scenario: appliance HOST (nix.enable=false) — nspawn bind sources ----
-  # nixpkgs' container start unconditionally bind-ros the host's
-  # /nix/var/nix/db + daemon-socket into the container; on a nix-less
-  # appliance those paths don't exist and the container fails to start.
-  # The module guarantees them as empty dirs via tmpfiles.
+  # --- scenario: appliance HOST (nix.enable=false) — host lower-DB bind ------
+  # The pinned nixpkgs' container start binds the host's /nix/var/nix/db into
+  # the container only when the host has nix enabled; on a nix-less appliance
+  # that bind is skipped, so the module must provide it itself (read-only) —
+  # the container's store machinery reads the host's lower-store DB (clone
+  # seed enumerates it, overlay's lower-store=local opens it). The host dir is
+  # guaranteed via tmpfiles: nspawn refuses to bind-mount a missing hostPath.
   hostApplianceHost = mkHost "/srv" {
     services.nixtache.runner.enableSandbox = false;
     nix.enable = false;
   };
+  applianceBinds = bindMountsOf hostApplianceHost;
   scenarioApplianceHost = {
-    name = "appliance host (nix.enable=false): nspawn bind sources guaranteed via tmpfiles";
+    name = "appliance host (nix.enable=false): host lower-DB bind provided by the module";
     checks = {
       hostDbDir = lib.elem "d /nix/var/nix/db 0755 root root -"
         hostApplianceHost.config.systemd.tmpfiles.rules;
-      hostSocketDir = lib.elem "d /nix/var/nix/daemon-socket 0755 root root -"
-        hostApplianceHost.config.systemd.tmpfiles.rules;
+      hostDbBind = (applianceBinds ? "host-nix-db")
+        && applianceBinds."host-nix-db".hostPath == "/nix/var/nix/db"
+        && applianceBinds."host-nix-db".mountPoint == "/nix/var/nix/db"
+        && applianceBinds."host-nix-db".isReadOnly == true;
+      # A nix-enabled host gets the bind from nixpkgs' container start —
+      # the module must not duplicate it (a --bind of the live daemon's db
+      # would be writable-path-shared, not ro).
+      noHostDbBindOnNixHost = !(bindMountsOf hostSrv ? "host-nix-db");
     };
   };
   scenarioApplianceClone = {

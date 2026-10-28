@@ -170,41 +170,42 @@ in
     systemd.tmpfiles.rules = mkMerge [      (mkIf customStore [
         "d ${cfg.store.hostBackup} 0755 root root -"
       ])
-      # nixpkgs' container start unconditionally bind-ros the host's
-      # /nix/var/nix/db + /nix/var/nix/daemon-socket into the container
-      # (nixos-containers.nix). On an appliance host (nix.enable=false, e.g.
-      # an A/B image) those paths don't exist and the container fails to
-      # start ("Failed to clone ...: No such file or directory"). Guarantee
-      # them — empty dirs at first; the slot's boot loader then fills the
-      # host DB from the shipped lower-store dump, and the container's
-      # appliance-mode wiring consults it (clone enumerates it via a scratch
-      # copy; overlay reads it as the local lower).
-      (mkIf (!config.nix.enable) [
+      # The host DB dir must exist before the container starts — systemd-
+      # nspawn refuses to bind-mount a missing hostPath (the host-db bind is
+      # declared below in containers.<name>.bindMounts). Create it
+      # declaratively; the slot's lower-DB loader fills it at boot.
+      (mkIf hostNixDisabled [
         "d /nix/var/nix/db 0755 root root -"
-        "d /nix/var/nix/daemon-socket 0755 root root -"
       ])
     ];
 
-    # On an A/B appliance host, the slot's lower-DB loader must merge the
-    # running slot's records before the container's store machinery reads the
-    # host DB (clone: the seed enumerates it; overlay: the local lower opens
-    # it) — an unordered start could copy/open only the pre-swap records and
-    # silently miss the new slot's content. Ordering only (no requirement):
-    # the loader is ConditionPathExists-guarded and legitimately skips when
-    # no dump arrived.
+    # The pinned nixpkgs' container start binds the host's /nix/var/nix/db
+    # into the container ONLY when the host has nix enabled
+    # (nixos-containers.nix: optionalString config.nix.enable …). An
+    # appliance host (nix.enable=false) must provide that bind itself: the
+    # container's store machinery reads the host's lower-store DB — clone
+    # mode's seed enumerates it via a scratch copy, overlay mode's
+    # lower-store=local opens it read-only. Without the bind the seed
+    # copies an empty DB and the clone retries forever.
     systemd.services."container@${cfg.containerName}" =
       mkIf (config.services.nixtache.ab-image.enable or false) {
         after = [ "nixtache-lower-store-db-load.service" ];
       };
 
     containers.${cfg.containerName} = {
-      bindMounts = optionalAttrs customStore {
+      bindMounts = (optionalAttrs customStore {
         "srv-nix" = {
           mountPoint = cfg.store.path;
           hostPath = cfg.store.hostBackup;
           isReadOnly = false;
         };
-      };
+      }) // (optionalAttrs hostNixDisabled {
+        "host-nix-db" = {
+          mountPoint = "/nix/var/nix/db";
+          hostPath = "/nix/var/nix/db";
+          isReadOnly = true;
+        };
+      });
 
       config = { config, lib, pkgs, ... }: {
       # Appliance mode (host nix.enable=false): the container runs with its

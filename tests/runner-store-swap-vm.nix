@@ -24,9 +24,11 @@
 #
 # The pinned nixpkgs' container machinery binds the host's /nix/var/nix/db +
 # daemon-socket only when the HOST has nix enabled (nixos-containers.nix) —
-# on the appliance (host nix.enable=false) those binds are skipped, which is
-# what makes the container startable at all there. The suite proves the
-# container starts and serves builds on BOTH boots.
+# on the appliance (host nix.enable=false) those binds are skipped. The
+# runner module therefore binds the host's lower-store DB into the container
+# itself (read-only, ordered after the slot's lower-DB loader): the clone
+# seed enumerates it and overlay mode's lower-store=local opens it. The suite
+# proves the container starts and serves builds on BOTH boots.
 #
 # Signing is on (signVerify) — the runner host's pulls verify manifests.
 # Needs KVM. Hermetic: the deployer node stages the signed v2 package; the
