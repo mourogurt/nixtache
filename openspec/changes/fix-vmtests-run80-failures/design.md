@@ -226,7 +226,14 @@ two deterministic failures surfaced that earlier host kills had masked:
   host dir; the existing `after nixtache-lower-store-db-load` ordering
   guarantees the records); overlay mode's `lower-store=local` reads the
   same bind. Pinned in tests/runner.nix (bind present on appliance hosts,
-  absent on nix-enabled hosts where nixpkgs provides it).
+  absent on nix-enabled hosts where nixpkgs provides it). Run #114
+  exposed the second layer under the first: with the DB visible again,
+  the seed's read-only open demanded the `20220326-ca-derivations` schema
+  migration ("attempt to write a readonly database") — the loader had
+  written the host DB without `ca-derivations`, while the container's
+  nix is CA-enabled (the fleet's closure is content-addressed). The
+  loader now runs CA-enabled, applying the schema marker into the
+  writable host DB at load time; read-only consumers inherit it.
 
 ## Risks / Trade-offs
 

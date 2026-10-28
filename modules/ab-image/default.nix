@@ -653,7 +653,13 @@ in
           tmp=$(mktemp -d)
           mkdir -p "$tmp/upper" "$tmp/work"
           mount -t overlay overlay -o lowerdir=/nix/store,upperdir="$tmp/upper",workdir="$tmp/work" /nix/store
-          ${lib.getExe' pkgs.nix "nix-store"} --load-db < "$dump"
+          # The load runs CA-enabled: the appliance closure is
+          # content-addressed, and CA-enabled consumers open COPIES of this
+          # DB read-only (the runner container's clone seed) — schema
+          # migrations are writes and can never run on a read-only open, so
+          # the CA schema marker must be applied here, into the writable
+          # host DB, at load time.
+          ${lib.getExe' pkgs.nix "nix-store"} --option experimental-features "ca-derivations" --load-db < "$dump"
         ''}
         echo "$version" > "$marker"
         echo "loaded lower store DB for image version $version"
