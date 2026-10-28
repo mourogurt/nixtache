@@ -67,6 +67,13 @@ let
             enable = true;
             upperDir = "/tank/nix-overlay/upper";
             workDir = "/tank/nix-overlay/work";
+            # The reference-server shape carries ad-hoc installs across slot
+            # cutovers: the module default ("wipe") clears the upper at every
+            # cutover boot — swap AND rollback — and would destroy exactly the
+            # pool-resident consumer state this suite pins. "reconcile" keeps
+            # the upper and repairs only closure paths that vanished with the
+            # old lower; the deployer's nix-serve is the substituter.
+            upperOnUpdate = "reconcile";
           };
 
           # Boot-time probe: services backed by the pool see their state.
@@ -214,6 +221,13 @@ pkgs.testers.runNixOSTest {
     appliance.succeed(
       "mount | grep 'overlay on /nix/store ' | grep -q 'upperdir=/tank/nix-overlay/upper'"
     )
+    # The reconcile policy must have COMPLETED at this cutover (marker
+    # written), not sit pending: an incomplete pass would keep the upper
+    # intact by side effect and pass the vim asserts below without ever
+    # exercising the policy.
+    appliance.wait_until_succeeds(
+      "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=180
+    )
     out = appliance.succeed("${vimPath}/bin/vim --version")
     assert "VIM" in out, f"upper-layer tool lost across the swap ({out!r})"
     appliance.succeed("test -d /nix/store/${helloBasename}")
@@ -238,6 +252,12 @@ pkgs.testers.runNixOSTest {
     assert appliance.succeed("cat /etc/image-version").strip() == "1"
     appliance.succeed("zpool status tank > /dev/null")
     appliance.succeed("test \"$(cat /tank/state.txt)\" = 'v1-state'")
+    # A rollback to a different image version runs the lifecycle policy
+    # again; it must complete here too (option contract: "a rollback to a
+    # different version runs it again").
+    appliance.wait_until_succeeds(
+      "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=180
+    )
     out = appliance.succeed("${vimPath}/bin/vim --version")
     assert "VIM" in out, f"upper-layer tool lost after rollback ({out!r})"
     print("OK: rolled back to v1 — pool still imports, state served, upper intact")
