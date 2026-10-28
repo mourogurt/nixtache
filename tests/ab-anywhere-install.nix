@@ -1,23 +1,17 @@
 # The consumer-style system that tests/ab-ota-anywhere-vm.nix installs onto the
-# bare target disk via nixos-anywhere. A standalone function of the flake
-# inputs so the SAME expression evaluates in two places:
-#   1. on the host — to pre-build toplevel / diskoScript / sysupdate-package /
-#      UKI into the test's store closure (system.extraDependencies);
-#   2. inside the deployer VM — the generated install flake re-evaluates it
-#      during `nixos-anywhere --flake ...`; every input is the identical store
-#      path (path: flake inputs), so the derivations hash-match and the VM's
-#      `nix build` is always a store no-op (the VMs have no internet).
+# bare target disk via nixos-anywhere. The test evaluates this function once
+# on the host to build toplevel / diskoScript / sysupdate-package / UKI, then
+# passes the diskoScript and toplevel store paths to nixos-anywhere; no VM
+# evaluates this configuration.
 #
 # The config is a real consumer wiring: nixtache's deploy-target + ab-image
 # modules (via the fixture's mkAppliance) + a disko A/B layout (ESP + two
 # nix-store slots + ext4 root on one disk) + signature verification ON
 # (publicKeyFile → Transfer.Verify=yes).
 #
-# nixtache is taken apart into nixtachePath (fixture source) + nixtacheModules
-# (the two NixOS modules) so the deployer-VM flake can vendor the needed
-# subtree into its own flake directory — pure flake evaluation forbids
-# referencing absolute store paths, and a path: input would need a narHash
-# the host cannot compute for the dirty worktree.
+# nixtachePath supplies the shared fixture source and nixtacheModules supplies
+# the two NixOS modules without requiring this test fixture to import the
+# entire flake.
 { nixpkgs, nixtachePath, nixtacheModules, disko, system ? "x86_64-linux", appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
 
 let
@@ -58,13 +52,8 @@ fixture.mkAppliance {
 
         networking.hostName = lib.mkForce "abanywhere";
 
-        # The deployer VM re-evaluates this config with nixpkgs as a path:
-        # flake input (no git sourceInfo), while the host pre-build sees the
-        # github-fetched one — versionSuffix/revision would differ
-        # ("...20260804.dfce2e0" vs "...19700101.dirty"), producing different
-        # derivations and forcing a real (offline-doomed) build in the VM.
-        # Pinning both keeps the two evaluations bit-identical (same trick as
-        # nixpkgs' nix-builder profile).
+        # Keep the installed fixture's OS metadata independent of the source
+        # checkout's VCS state.
         system.nixos.versionSuffix = ".test";
         system.nixos.revision = null;
 

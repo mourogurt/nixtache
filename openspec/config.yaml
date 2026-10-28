@@ -13,6 +13,15 @@ context: |
   messages, change artifacts and doc/archive/. Keep failure scenarios only for
   current risks, constraints or recovery; migration/version notes are allowed
   when actionable.
+  Maintained docs (README, doc/**) link to canonical openspec/specs/ artifacts,
+  not active openspec/changes/<name>/ directories. Sync and archive revalidate
+  maintained-doc links after merging specs or moving change artifacts; replace
+  active-change links with canonical spec links or final archived paths.
+
+operations:
+  archive:
+    guidance:
+      - Before archiving and again after moving the change, scan README.md and doc/**/*.md for links into openspec/changes/. Replace active-change links with canonical openspec/specs/ links or final archived paths, then verify that no broken maintained-doc links remain.
 
 # Per-artifact rules (applied when writing that artifact).
 rules:

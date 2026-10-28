@@ -52,6 +52,21 @@ and nightly-smoke schedules. Full inventory:
 `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
 `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
 
+Every `vmTests` suite belongs in the full matrix unless it is explicitly
+parked. A parked suite remains locally buildable, its exclusion site names the
+open change tracking the rework, and it is re-added when that change completes.
+Every non-parked suite must pass a full dispatch.
+
+`ab-ota-anywhere-vm` evaluates the install configuration once on the host and
+passes its pre-built `diskoScript` and `toplevel` to nixos-anywhere with
+`--store-paths` and `--build-on local`. The network-less VMs perform no real
+Nix evaluation or builds. The deployer registers the closure roots in its store
+DB, both closure-copy endpoints enable `ca-derivations`, and nixos-anywhere
+still exercises kexec, disko, closure transfer, `nixos-install` and reboot; the
+`--flake` entrypoint is not covered. A fresh QEMU with OVMF then boots the
+installed UKI before the signed OTA leg. See the
+[`ab-ota` spec](../../openspec/specs/ab-ota/spec.md).
+
 #### vmtests job output contract
 
 Each matrix job (displayed under its bare suite name) keeps its step output

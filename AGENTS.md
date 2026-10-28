@@ -76,6 +76,10 @@ Working rules (enforced by convention + `openspec/config.yaml`):
    `doc/*` section must carry its full scenario explicitly: what breaks,
    on which surface, with what symptom, and only then how it is solved.
    A pointer to a spec/issue may follow, never replace, that statement.
+8. **Stable documentation links.** Maintained docs (`README.md`, `doc/**`)
+   link to canonical specs (`openspec/specs/`), not active change directories
+   (`openspec/changes/<name>/`): archiving moves those artifacts and breaks
+   such links. Historical references may target their final archived path.
 
 Docs structure invariant: every fact lives in exactly ONE file; everything
 else links to it. README = overview/map; user_guide = functional;

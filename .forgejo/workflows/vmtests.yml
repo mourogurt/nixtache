@@ -68,12 +68,7 @@ jobs:
           - ab-ota-e2e-erofs
           - ab-ota-e2e-none
           - ab-ota-e2e-percent
-          # ab-ota-anywhere-vm is PARKED (excluded): its install leg relies
-          # on in-VM nix evaluation hash-matching pre-built host closures,
-          # which is unachievable under content-addressed derivations (CA
-          # flattens store names to rewrite aliases at every derivation
-          # boundary). Rework tracked by the openspec change
-          # redesign-ab-ota-anywhere-hermeticity; re-add on completion.
+          - ab-ota-anywhere-vm
           - ab-deploy
           - ab-vm
           - ab-provision-vm
