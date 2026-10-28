@@ -48,7 +48,7 @@
         `openspec/specs/ab-ota`
   - [x] 7.2 Update `README.md` repository map if the artifact/log layout
         changes what CI produces
-- [ ] 8. Test-surface hygiene from review (design D6/D7)
+- [x] 8. Test-surface hygiene from review (design D6/D7)
   - [x] 8.1 Extract the runner container's forced `experimental-features`
         into a single importable definition under `modules/runner/`
         (exported via the flake); consume it in the runner container
@@ -72,3 +72,13 @@
   - [ ] 9.2 CI: dispatch a full `vmtests` run on a healthy KVM runner;
         confirm bounded parallelism, verdict-only job output, uploaded
         per-suite logs, and green suites for every cluster fixed here
+  - [x] 9.3 Root-cause the run #105 failures (first full-matrix dispatch
+        that completed): `ab-data-pool-vm` predates the wipe-on-cutover
+        default change and must pin its intended policy explicitly
+        (`upperOnUpdate = "reconcile"` — the reference-server contract the
+        suite's assertions describe); `runner-store-swap-clone-vm` broke
+        deterministically at the nixpkgs bump (276dd60): the pinned
+        nixos-containers.nix binds the host's /nix/var/nix/db only when the
+        host has nix enabled, so the appliance-mode container lost the
+        lower-DB — the module binds it read-only itself, pinned in
+        tests/runner.nix

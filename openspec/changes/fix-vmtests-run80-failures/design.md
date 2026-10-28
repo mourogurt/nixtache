@@ -200,6 +200,34 @@ path, so prod functionality never depends on PATH — the symlinks are
 assertion ergonomics, not a module gap, and a prod appliance needs
 nothing of the sort.
 
+### D8 — run #105 verdicts (first full dispatch that completed)
+
+The TCG fallback let every created-machine suite finish for the first time;
+two deterministic failures surfaced that earlier host kills had masked:
+
+- `ab-data-pool-vm`: the v2 boot ran `nixtache-overlay-lifecycle` with the
+  module-default `upperOnUpdate = "wipe"` and cleared the pool-resident
+  upper — exactly the consumer state the suite pins. The suite was born
+  under the old default (`"none"`, trigger-scoped) and was missed by the
+  wipe-on-cutover impact list. Its reference-server contract (ad-hoc
+  installs on a persistent data pool survive slot cutovers, swap AND
+  rollback) is the documented `"reconcile"` policy; the fixture now sets it
+  explicitly and additionally asserts the lifecycle unit COMPLETED at both
+  cutovers (an incomplete pending pass would keep the upper intact without
+  exercising the policy).
+- `runner-store-swap-clone-vm`: the nixpkgs bump (276dd60 → ec23913) made
+  nixos-containers.nix bind the host's /nix/var/nix/db into containers
+  only when the host has nix enabled. On the appliance host the container
+  therefore lost sight of the lower-store DB: the clone seed copied an
+  empty DB (`reserved` only) and `nix copy` retried forever with
+  "database does not exist, and cannot be created in read-only mode" —
+  failed identically in runs #99/#103/#105. The runner module now provides
+  the read-only bind itself on nix-less hosts (tmpfiles guarantees the
+  host dir; the existing `after nixtache-lower-store-db-load` ordering
+  guarantees the records); overlay mode's `lower-store=local` reads the
+  same bind. Pinned in tests/runner.nix (bind present on appliance hosts,
+  absent on nix-enabled hosts where nixpkgs provides it).
+
 ## Risks / Trade-offs
 
 - Verdict extraction depends on suite banners; mitigated by the banners
