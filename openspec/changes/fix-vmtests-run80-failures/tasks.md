@@ -66,12 +66,15 @@
         (units ExecStart absolute store paths — no prod impact)
   - [x] 8.4 Retire the temporary `tests/vde-repro.nix` diagnostic and its
         `probe-vde.yml` dispatch (flake.nix `vmTests` entry included)
-- [ ] 9. Verification
+- [x] 9. Verification
   - [x] 9.1 Local: `nix flake check --show-trace --all-systems` and the
         affected pure-eval suites stay green
-  - [ ] 9.2 CI: dispatch a full `vmtests` run on a healthy KVM runner;
+  - [x] 9.2 CI: dispatch a full `vmtests` run on a healthy KVM runner;
         confirm bounded parallelism, verdict-only job output, uploaded
         per-suite logs, and green suites for every cluster fixed here
+        (run #120 on 8b0ae59: 32/32 green — data-pool reconcile pin,
+        clone lower-DB bind + CA-enabled loader, deploy-self canonical
+        sysupdate unit)
   - [x] 9.3 Root-cause the run #105 failures (first full-matrix dispatch
         that completed): `ab-data-pool-vm` predates the wipe-on-cutover
         default change and must pin its intended policy explicitly
