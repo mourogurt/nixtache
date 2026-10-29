@@ -551,10 +551,17 @@ in
     systemd.sysupdate.enable = true;
     # Signature verification spawns `gpg2` from the service's PATH. nixpkgs
     # only equips the D-Bus `systemd-sysupdated` with gnupg — the plain
-    # `systemd-sysupdate.service` oneshot (what the deploy action triggers via
-    # SSH) has an empty PATH otherwise and every Verify=yes pull fails with a
-    # broken verifier pipe. (Same wiring as deploy-target's ab-provision; the
+    # update oneshot (what the deploy action triggers over SSH) has an empty
+    # PATH otherwise and every Verify=yes pull fails with a broken verifier
+    # pipe. systemd 262 renamed the oneshot to
+    # systemd-sysupdate-update.service and kept the old name as a compat
+    # alias; alias-named drop-ins are ignored, so the path goes on the
+    # canonical name — the old-name entry stays for older pins where it WAS
+    # the canonical unit. (Same wiring as deploy-target's ab-provision; the
     # list option merges if both are active.)
+    systemd.services.systemd-sysupdate-update = mkIf verify {
+      path = [ pkgs.gnupgMinimal ];
+    };
     systemd.services.systemd-sysupdate = mkIf verify {
       path = [ pkgs.gnupgMinimal ];
     };

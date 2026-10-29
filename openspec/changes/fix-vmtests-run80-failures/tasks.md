@@ -82,3 +82,10 @@
         host has nix enabled, so the appliance-mode container lost the
         lower-DB — the module binds it read-only itself, pinned in
         tests/runner.nix
+  - [x] 9.4 Root-cause the remaining run #116/#117 failure
+        (`ab-deploy-self-vm`): systemd 262 renamed the update oneshot to
+        `systemd-sysupdate-update.service` (old name = compat alias;
+        alias-named drop-ins are ignored), so the suite's fail-on-demand
+        wrapper never ran and the gnupg PATH drop-ins in ab-image /
+        ab-provision went inert — wrapper retargeted to the canonical name,
+        gnupg path set on the canonical name in both modules

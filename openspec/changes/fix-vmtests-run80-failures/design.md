@@ -234,6 +234,22 @@ two deterministic failures surfaced that earlier host kills had masked:
   nix is CA-enabled (the fleet's closure is content-addressed). The
   loader now runs CA-enabled, applying the schema marker into the
   writable host DB at load time; read-only consumers inherit it.
+- `ab-deploy-self-vm` (failed #116/#117 on an otherwise green matrix):
+  systemd 262 (same nixpkgs bump) renamed the update oneshot to
+  `systemd-sysupdate-update.service` and kept `systemd-sysupdate.service`
+  only as a compat alias symlink. systemd ignores a drop-in declared under
+  an alias name, so the suite's fail-on-demand wrapper (an ExecStart-reset
+  drop-in on the old name) silently never ran: the stock unit executed,
+  found an empty staging dir ("No update needed"), and the apply retry
+  loop's transient failed states never lined up with the test's
+  `is-failed` poll — timeout at the retry-safe-pending assertion. The
+  wrapper now targets the canonical unit name (production still starts it
+  via the alias; alias resolution reaches the canonical unit where the
+  drop-in applies). The same rename silently disabled the gnupg PATH
+  drop-ins in ab-image and ab-provision — masked on this pin because
+  nixpkgs' own sysupdate module now equips the canonical unit with gnupg;
+  both modules set the path on the canonical name as well (old-name
+  entries stay for older pins where the old name WAS canonical).
 
 ## Risks / Trade-offs
 

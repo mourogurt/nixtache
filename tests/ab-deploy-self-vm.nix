@@ -112,6 +112,12 @@ let
   # (A systemd.units text override CONCATENATES with the package unit via
   # types.lines, and an ExecStart list with a "" reset renders a broken empty
   # line — a full service declaration is the working mechanism.)
+  # The wrapper targets the CANONICAL unit name systemd-sysupdate-update:
+  # systemd 262 renamed the update oneshot and kept systemd-sysupdate.service
+  # only as a compat alias, and systemd ignores a drop-in declared under an
+  # alias name — an override on the old name silently never runs. The
+  # production units still start the unit through the alias; alias resolution
+  # reaches the canonical unit, where this drop-in applies.
   sysupdateWrapper = pkgs.writeShellScript "sysupdate-update-test" ''
     if [ -e /run/sysupdate-fail ]; then
       echo "test wrapper: forced failure (/run/sysupdate-fail present)" >&2
@@ -120,7 +126,7 @@ let
     exec ${pkgs.systemd}/lib/systemd/systemd-sysupdate update
   '';
   noReboot = {
-    systemd.services.systemd-sysupdate = {
+    systemd.services.systemd-sysupdate-update = {
       description = "systemd-sysupdate update (TEST wrapper: fail-on-flag)";
       serviceConfig = {
         Type = "oneshot";
