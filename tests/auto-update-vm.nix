@@ -378,11 +378,14 @@ pkgs.testers.runNixOSTest {
     abreboot.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
     ts_before = boot_ts(abreboot)
     abreboot.succeed("systemctl start --no-block nixtache-auto-update.service", timeout=300)
-    abreboot.wait_until_succeeds(
-      f"test \"$(systemctl show -p ActiveEnterTimestamp multi-user.target)\" != '{ts_before}'",
-      timeout=600
-    )
+    try:
+        abreboot.wait_until_succeeds("test -f ${slotsDir}/abtest_2+*.efi", timeout=300)
+    except BrokenPipeError:
+        pass
+    abreboot.wait_for_shutdown()
+    abreboot.start()
     abreboot.wait_for_unit("multi-user.target")
+    assert boot_ts(abreboot) != ts_before, "completed install must produce a fresh boot"
     abreboot.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
     print("AU-A6 OK: completed install → if-needed rebooted into a fresh boot")
     abreboot.shutdown()
