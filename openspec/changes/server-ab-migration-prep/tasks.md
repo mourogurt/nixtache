@@ -57,7 +57,7 @@ modes and documentation, not another store redesign.
 ## 8. Test and documentation reconciliation (D4, D10)
 
 - [ ] 8.1 Split `ab-data-pool-vm` assertions by concern: pool/state persistence independent of upper policy; explicit `reconcile` + retained substituter for the upper-intact leg; a default-wipe control expecting cleared upper content — verify in KVM CI
-- [ ] 8.2 Update `ab-contract` to current `upperOnUpdate = "wipe" | "reconcile"` and lower-DB semantics, remove missing-module/expected-red fallbacks, register it in `checks` and the self-CI report loop — verify its report in CI
+- [x] 8.2 Update `ab-contract` to current `upperOnUpdate = "wipe" | "reconcile"` and lower-DB semantics, remove missing-module/expected-red fallbacks, register it in `checks` and the self-CI report loop — verify its report in CI
 - [ ] 8.3 Remove stale expected-red/known-red narratives from auto-update and overlay test entry points and make them import implemented modules directly — verify static Nix parsing and the relevant CI suites
 - [x] 8.4 Reconcile all maintained docs with the new sizing, rollback, auto-update and data-pool behavior and with `wipe-on-cutover`; run `openspec validate server-ab-migration-prep --strict` and `openspec validate --specs --strict` without local AB/CA builds
 - [ ] 8.5 Use the existing full KVM CI matrix in task 5.2 for CA-dependent and VM verification; do not require a second local content-addressed world build

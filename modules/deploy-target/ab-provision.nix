@@ -391,7 +391,7 @@ let
     echo "nixtache-ab-provision: A/B slots created on $DISK."
   '';
 
-  recoveryScript = pkgs.writeShellScript "nixtache-ab-recover" ''
+  recoveryScript = pkgs.writeShellScriptBin "nixtache-ab-recover" ''
     export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.util-linux pkgs.gptfdisk pkgs.findutils pkgs.gawk pkgs.gnused pkgs.systemd ]}:$PATH
     set -euo pipefail
 
