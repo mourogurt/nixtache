@@ -776,7 +776,9 @@ self.nixosModules.runner
     checks = {
       hostLowerDaemon = lib.hasInfix "lower-store=daemon" (execOverlayOf hostOverlay);
       hostNoLocal = !(lib.hasInfix "lower-store=local" (execOverlayOf hostOverlay));
-      applianceLowerLocal = lib.hasInfix "lower-store=/run/nixtache-runner-lower" (execOverlayOf hostApplianceOverlay);
+      applianceLowerLocal = lib.hasInfix
+        "lower-store=local%3Froot%3D/run/nixtache-runner-lower%26read-only%3Dtrue"
+        (execOverlayOf hostApplianceOverlay);
       applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
       applianceLowerStoreBind =
         let binds = bindMountsOf hostApplianceOverlay; in

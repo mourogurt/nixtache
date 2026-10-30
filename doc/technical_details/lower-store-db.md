@@ -38,11 +38,12 @@ host the runner container also disables its internal nix module, renders
 `nix.conf` with the preserved settings plus `ca-derivations`, and ships the
 CLI explicitly. Clone mode then enumerates a scratch copy of the real host
 DB. Overlay mode binds the host store and DB read-only under
-`/run/nixtache-runner-lower` and uses that root as `lower-store`. The separate
-path is required because the custom daemon rebinds `/nix` to the merged
-relocated store: a lower rooted at `/nix` would read the upper DB rather than
-the host DB. A daemon lower is not an alternative on appliances because no
-host daemon exists.
+`/run/nixtache-runner-lower` and uses that root as `lower-store` with the local
+store's `read-only=true` setting, so Nix does not try to change ownership or
+open the DB for writing. The separate path is required because the custom
+daemon rebinds `/nix` to the merged relocated store: a lower rooted at `/nix`
+would read the upper DB rather than the host DB. A daemon lower is not an
+alternative on appliances because no host daemon exists.
 
 The rest of this document covers the internals: how the dump is generated,
 how the store is imaged, and why the runtime workarounds exist.

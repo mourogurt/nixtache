@@ -49,10 +49,13 @@ let
   # Appliance containers have no system daemon, so they open a dedicated
   # read-only bind of the host lower. That bind stays outside /nix: the custom
   # daemon rebinds /nix to the merged relocated store, so a lower rooted at
-  # /nix would read the upper DB instead of the host DB. Writes and GC affect
-  # only the upper.
+  # /nix would read the upper DB instead of the host DB. The nested local
+  # store URL enables read-only mode so Nix does not try to change the bind's
+  # ownership or open its DB for writing. Writes and GC affect only the upper.
   applianceLowerRoot = "/run/nixtache-runner-lower";
-  lowerStore = if hostNixDisabled then applianceLowerRoot else "daemon";
+  lowerStore = if hostNixDisabled
+    then "local%3Froot%3D${applianceLowerRoot}%26read-only%3Dtrue"
+    else "daemon";
   lowerStoreDir = if hostNixDisabled then "${applianceLowerRoot}/nix/store" else "/nix/store";
   overlayStoreUrl = "local-overlay://"
     + "?root=${cfg.store.path}"
