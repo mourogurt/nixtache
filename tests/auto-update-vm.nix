@@ -279,7 +279,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     def boot_ts(node):
-        return node.succeed("systemctl show -p ActiveEnterTimestamp multi-user.target")
+        return node.succeed("systemctl show -p ActiveEnterTimestamp multi-user.target").strip()
 
     # -- AU-F1: flake timer → apply unit activates the new toplevel ----------
     # A qemu-vm test node has no /nix/var/nix/profiles/system generation (it
