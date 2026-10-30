@@ -6,7 +6,7 @@
 # `ab.partitions.*` option, then we assert on real sgdisk partition tables.
 #
 # Covers (TEST-SPECS.md sec. 2): P1 init, P2 idempotent, P3 second-disk, S1 size-error,
-# S2 size-wipe, S3 no-space, S4 percent, PR1 protected-label. Needs KVM.
+# S2 size-wipe, S3 no-space, PR1 protected-label. Needs KVM.
 { nixpkgs, self, system ? "x86_64-linux" }:
 
 let
@@ -121,12 +121,6 @@ pkgs.testers.runNixOSTest {
       '';
     };
 
-    # S4: slotSize="10%" on a 2GB disk → each slot ~ 200M.
-    s4_percent = mkNode {
-      disks = [ 2048 ];
-      part-extra = { slotSize = "10%"; autoInit = true; };
-    };
-
     # PR1: protected 'data' partition overlapping the wipe zone → provision must
     # refuse rather than destroy data.
     pr1_protected = mkNode {
@@ -215,15 +209,8 @@ pkgs.testers.runNixOSTest {
     s3_nospace.start()
     s3_nospace.wait_until_succeeds("systemctl is-failed nixtache-ab-provision.service")
     s3_nospace.succeed("journalctl -u nixtache-ab-provision --no-pager | grep -iE 'free space|no space|not enough'")
-    print("S3 OK: no-space case refused with a clear message")
-
-    # -- S4: percent slotSize → each slot ~ 10% of 2G (~200M) --------------
-    s4_percent.start()
-    s4_percent.wait_for_unit("nixtache-ab-provision.service")
-    s4_percent.succeed("sgdisk -p /dev/vdb | grep nix-store_1")
-    s4_percent.succeed("test $(${partSize "/dev/vdb1"}) -gt 150000000")   # >150M
-    s4_percent.succeed("test $(${partSize "/dev/vdb1"}) -lt 260000000")   # <260M
-    print("S4 OK: 10% slotSize resolved to ~200M")
+    s3_nospace.succeed("journalctl -u nixtache-ab-provision --no-pager | grep 'Reduce slotSize'")
+    print("S3 OK: no-space case refused with remedies including slotSize reduction")
 
     # -- PR1: protected 'data' partition → provision refuses, data survives -
     pr1_protected.start()

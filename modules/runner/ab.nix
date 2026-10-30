@@ -99,14 +99,19 @@ in
       type = types.nullOr types.path;
       default = null;
       description = ''
-        Path to the OpenPGP PRIVATE key (ASCII-armored) CI uses to sign each
-        staging `SHA256SUMS` → `SHA256SUMS.gpg` (verified by targets via
-        `Transfer.Verify = yes` against `/etc/systemd/import-pubring.pgp`).
-        systemd-sysupdate verifies OpenPGP/GPG only — age/sops cannot produce
-        the signature it expects — but this key is supplied as a path-based
-        secret, so the consumer typically stores it age-encrypted (sops) like
-        the deploy keys. `null` disables signing (`Transfer.Verify = no` on
-        targets) — only acceptable behind a trusted transport.
+        Path to the OpenPGP PRIVATE key (ASCII-armored) used to sign each
+        staging `SHA256SUMS` → `SHA256SUMS.gpg`, both by in-container deploy
+        jobs and by the host `nixtache-ab-gc.service` after retain cleanup.
+        Both consumers receive it as `sysupdate_signing_key` through systemd
+        `LoadCredential` and read it from `$CREDENTIALS_DIRECTORY`; their
+        scripts do not read this source path. Targets verify the detached
+        signature via `Transfer.Verify = yes` against
+        `/etc/systemd/import-pubring.pgp`. systemd-sysupdate verifies
+        OpenPGP/GPG only — age/sops cannot produce the signature it expects —
+        so the consumer typically stores this path-based secret age-encrypted
+        (sops) like the deploy keys. `null` supplies no signing credential and
+        disables signing (`Transfer.Verify = no` on targets) — only acceptable
+        behind a trusted transport.
       '';
     };
   };
@@ -192,10 +197,10 @@ in
         ++ optional (cfg.signingKeyFile != null) gnupg;
       serviceConfig = {
         Type = "oneshot";
+      } // optionalAttrs (cfg.signingKeyFile != null) {
+        LoadCredential = [ "sysupdate_signing_key:${toString cfg.signingKeyFile}" ];
       };
-      script = let
-        signingKey = toString cfg.signingKeyFile;
-      in ''
+      script = ''
         set -uo pipefail
         stage="${cfg.stagingPath}"
         retain=${toString cfg.retain}
@@ -216,17 +221,12 @@ in
           if ls "$cfgdir"*.nix-store.raw >/dev/null 2>&1; then
             ( cd "$cfgdir" && shopt -s nullglob && sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
             # Re-sign so targets with Transfer.Verify=yes don't reject a stale .gpg.
-            # The signing key is a host-path (sops secret) — accessible from the host.
             ${optionalString (cfg.signingKeyFile != null) ''
-              if [ -f "${signingKey}" ]; then
-                GNUPGHOME=$(mktemp -d); export GNUPGHOME
-                gpg --batch --import "${signingKey}" 2>/dev/null
-                ( cd "$cfgdir" && gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS ) \
-                  || echo "WARNING: GC re-sign failed for $cfgdir — .gpg stale"
-                rm -rf "$GNUPGHOME"
-              else
-                rm -f "$cfgdir/SHA256SUMS.gpg"
-              fi
+              GNUPGHOME=$(mktemp -d); export GNUPGHOME
+              gpg --batch --import "$CREDENTIALS_DIRECTORY/sysupdate_signing_key" 2>/dev/null
+              ( cd "$cfgdir" && gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS ) \
+                || echo "WARNING: GC re-sign failed for $cfgdir — .gpg stale"
+              rm -rf "$GNUPGHOME"
             ''}
             ${optionalString (cfg.signingKeyFile == null) ''
               rm -f "$cfgdir/SHA256SUMS.gpg"

@@ -71,6 +71,30 @@ let
     };
   };
 
+  hostPercent = mkHost {
+    services.nixtache.ab-image = {
+      enable = true;
+      imageId = "h";
+      imageVersion = "1";
+      storeSize = "25%";
+    };
+  };
+  scenarioAbsoluteStoreSize = {
+    name = "storeSize: absolute values flow to both slots; percentages fail evaluation with an actionable message";
+    checks = {
+      absoluteAccepted = hostFixed.config.services.nixtache.ab-image.storeSize == "2G"
+        && pf.nix-store.repartConfig.SizeMinBytes == "2G"
+        && pf.empty.repartConfig.SizeMinBytes == "2G";
+      percentageRefused = !(builtins.tryEval hostPercent.config.system.build.toplevel.outPath).success;
+      actionableMessage = builtins.any
+        (a: !a.assertion
+          && lib.hasInfix "ab-image.storeSize" a.message
+          && lib.hasInfix "absolute" a.message
+          && lib.hasInfix "capacity plan" a.message)
+        hostPercent.config.assertions;
+    };
+  };
+
   # --- scenario 2: MAX-DISK mode (diskSize set) --------------------------------
   hostMax = mkHost {
     services.nixtache.ab-image = {
@@ -219,6 +243,7 @@ let
 
   scenarios = [
     scenarioFixed
+    scenarioAbsoluteStoreSize
     scenarioMaxDisk
     scenarioSigned
     scenarioVersionFile

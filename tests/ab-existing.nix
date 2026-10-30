@@ -20,6 +20,7 @@ let
   lib = nixpkgs.lib;
   pkgs = nixpkgs.legacyPackages.${system};
   dummySecret = /dev/null;
+  dummySigningKey = /run/nixtache-test-secrets/ab-signing-key;
 
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
@@ -111,7 +112,7 @@ let
       enable = true;
       runnerHost = "bincache.test";
       retain = 3;
-      signingKeyFile = dummySecret;
+      signingKeyFile = dummySigningKey;
     };
   };
   gcScript = hostRetain.config.systemd.services."nixtache-ab-gc".script;
@@ -122,9 +123,11 @@ let
       sortsDesc = lib.hasInfix "sort -rn" gcScript;
       regenSums = lib.hasInfix "sha256sum" gcScript && lib.hasInfix "SHA256SUMS" gcScript;
       removesRawAndEfi = lib.hasInfix ".nix-store.raw" gcScript && lib.hasInfix ".efi" gcScript;
-      # sec. 11.1 fix: with signingKeyFile set, GC re-signs SHA256SUMS.gpg (host-path
-      # sops key, readable on the host) so Verify=yes targets don't reject a stale .gpg.
       reSignsWhenKey = lib.hasInfix "gpg --batch --yes --detach-sign" gcScript;
+      hostCredential = hostRetain.config.systemd.services.nixtache-ab-gc.serviceConfig.LoadCredential or [ ]
+        == [ "sysupdate_signing_key:${toString dummySigningKey}" ];
+      importsCredential = lib.hasInfix "$CREDENTIALS_DIRECTORY/sysupdate_signing_key" gcScript;
+      originalPathAbsent = !(lib.hasInfix (toString dummySigningKey) gcScript);
       gnupgInPath =
         builtins.any (p: lib.hasInfix "gnupg" (p.name or ""))
           hostRetain.config.systemd.services."nixtache-ab-gc".path;
@@ -147,6 +150,7 @@ let
     checks = {
       noDetachSign = !(lib.hasInfix "detach-sign" gcScriptNoKey);
       dropsGpg = lib.hasInfix "SHA256SUMS.gpg" gcScriptNoKey;
+      hostNoCredential = hostRetainNoKey.config.systemd.services.nixtache-ab-gc.serviceConfig.LoadCredential or [ ] == [ ];
       noGnupgInPath =
         !(builtins.any (p: lib.hasInfix "gnupg" (p.name or ""))
           hostRetainNoKey.config.systemd.services."nixtache-ab-gc".path);

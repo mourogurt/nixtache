@@ -632,8 +632,23 @@ self.nixosModules.runner
       # gnupg available in the container (the action signs SHA256SUMS with it)
       gnupgInContainer = lib.any (p: lib.hasInfix "gnupg" (p.name or ""))
         (containerCfg hostAb).environment.systemPackages;
-      # GPG signing key exposed via LoadCredential on the runner service
-      hasSigningCred = hasCredPrefix "sysupdate_signing_key:" (loadCred (servicesOf hostAb));
+      containerSigningCred = lib.elem "sysupdate_signing_key:/dev/null" (loadCred (servicesOf hostAb));
+      hostSigningCred = hostAb.config.systemd.services.nixtache-ab-gc.serviceConfig.LoadCredential or [ ]
+        == [ "sysupdate_signing_key:/dev/null" ];
+    };
+  };
+
+  hostAbNoKey = mkHost "/srv" {
+    services.nixtache.runner.deploy.ab = {
+      enable = true;
+      runnerHost = "bincache.test";
+    };
+  };
+  scenarioAbStageNoKey = {
+    name = "deploy.ab signingKeyFile=null → no host or container signing credential";
+    checks = {
+      containerNoSigningCred = !(hasCredPrefix "sysupdate_signing_key:" (loadCred (servicesOf hostAbNoKey)));
+      hostNoSigningCred = hostAbNoKey.config.systemd.services.nixtache-ab-gc.serviceConfig.LoadCredential or [ ] == [ ];
     };
   };
 
@@ -895,6 +910,7 @@ self.nixosModules.runner
     scenarioMapContract
     scenarioAarch64
     scenarioAbStage
+    scenarioAbStageNoKey
     scenarioForgejoPort
     scenarioAbBasenameAssert
     scenarioApplianceClone

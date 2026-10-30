@@ -6,13 +6,6 @@
 #   - modules/overlay-nix/default.nix         → services.nixtache.overlay-nix.*  (+ flake.nix nixosModules.overlay-nix)
 #   - store.mode option in modules/runner/store.nix
 #
-# Graceful degradation:
-#   - wiring scenarios (contract*) flag a named `moduleImplemented=false` check
-#     when the module eval refuses — instead of crashing the whole suite;
-#   - assert scenarios (assertContract*) are GATED by a `modulePresent` probe so
-#     they cannot falsely pass while a module is missing (an absent option
-#     refuses just like a firing assertion would).
-#
 # Fast, no KVM. Exposed via checks.<system>.ab-contract.
 {
   nixpkgs,
@@ -46,22 +39,18 @@ let
       ((nixpkgs.lib.nixosSystem { inherit system modules; }).config.system.build.toplevel.outPath)
     ).success;
   evalCfg = modules: (nixpkgs.lib.nixosSystem { inherit system modules; }).config;
+  failedAssertions = modules:
+    map (a: a.message)
+      (builtins.filter (a: !a.assertion) (evalCfg modules).assertions);
 
-  # wiring contract: green checks if eval OK, else moduleImplemented=false (red, named)
-  contract = name: modules: checksFn:
-    let ok = probeOK modules; in
-    {
-      inherit name;
-      checks = if ok then checksFn (evalCfg modules) else { moduleImplemented = false; };
-    };
-
-  # assert contract: green only when module is present AND the bad config refuses
-  assertContract = name: modulePresent: badModules: {
+  contract = name: modules: checksFn: {
     inherit name;
-    checks = {
-      inherit modulePresent;
-      badConfigRefused = !(probeOK badModules);
-    };
+    checks = checksFn (evalCfg modules);
+  };
+
+  assertContract = name: badModules: {
+    inherit name;
+    checks.badConfigRefused = !(probeOK badModules);
   };
 
   runnerBase = { lib, ... }: {
@@ -82,10 +71,7 @@ let
     };
   };
 
-  # overlay-nix module attr is absent until implemented → fall back to an empty
-  # module so an OPTION-missing error (caught by `contract`) is what surfaces,
-  # rather than an attrset-missing crash.
-  overlayMod = self.nixosModules.overlay-nix or ({ ... }: { });
+  overlayMod = self.nixosModules.overlay-nix;
 
   # ========================================================================
   # ab.partitions contract (modules/deploy-target/ab-provision.nix)
@@ -117,8 +103,6 @@ let
       };
     };
   };
-
-  abPartPresent = probeOK [ self.nixosModules.deploy-target (abPartCfg { }) ];
 
   scenarioPartWiring = contract
     "ab.partitions: enable=true → nixtache-ab-provision oneshot before sysupdate (P1)"
@@ -185,14 +169,12 @@ let
 
   scenarioPartAssertTypeMismatch = assertContract
     "ab.partitions assert: slot_a.type≠slot_b.type → eval refuses (A1)"
-    abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg {
         slot_b = { type = "regular-file"; storage = "/x"; };
       }) ];
 
   scenarioPartAssertSizeMismatch = assertContract
     "ab.partitions assert: storeSize≠slotSize (absolute) → eval refuses (A2)"
-    abPartPresent
     [
       self.nixosModules.deploy-target
       self.nixosModules.ab-image
@@ -200,9 +182,71 @@ let
       { services.nixtache.ab-image = { enable = true; imageId = "h"; storeSize = "2G"; }; }
     ];
 
+  abPercentModules = [
+    self.nixosModules.deploy-target
+    (abPartCfg { slotSize = lib.mkForce "25%"; })
+  ];
+  scenarioPartAssertPercentage = {
+    name = "ab.partitions assert: percentage slotSize fails evaluation with an actionable absolute-size message";
+    checks = {
+      badConfigRefused = !(probeOK abPercentModules);
+      actionableMessage = builtins.any
+        (m: lib.hasInfix "partitions.slotSize" m
+          && lib.hasInfix "absolute" m
+          && lib.hasInfix "capacity plan" m)
+        (failedAssertions abPercentModules);
+    };
+  };
+
+  scenarioPartAbsoluteCoImport = contract
+    "ab.partitions + ab-image: equal absolute sizes configure identical image and provision capacities"
+    [
+      self.nixosModules.deploy-target
+      self.nixosModules.ab-image
+      (abPartCfg { })
+      {
+        users.allowNoPasswordLogin = true;
+        services.nixtache.ab-image = {
+          enable = true;
+          imageId = "h";
+          imageVersion = "1";
+          storeSize = "512M";
+        };
+      }
+    ]
+    (cfg: {
+      acceptedAbsolute = cfg.services.nixtache.deploy-target.ab.partitions.slotSize == "512M"
+        && cfg.services.nixtache.ab-image.storeSize == "512M";
+      imageSlotsMatch = cfg.image.repart.partitions.nix-store.repartConfig.SizeMinBytes == "512M"
+        && cfg.image.repart.partitions.empty.repartConfig.SizeMinBytes == "512M";
+    });
+
+  recoveryModules = [
+    self.nixosModules.deploy-target
+    self.nixosModules.ab-image
+    (abPartCfg { enable = lib.mkForce false; })
+    {
+      users.allowNoPasswordLogin = true;
+      services.nixtache.ab-image = {
+        enable = true;
+        imageId = "h";
+        imageVersion = "1";
+        storeSize = "512M";
+      };
+    }
+  ];
+  scenarioRecoveryCommand = contract
+    "post-rollback recovery: ab-image appliance without provisioned partitions receives nixtache-ab-recover"
+    recoveryModules
+    (cfg: {
+      partitionsDisabled = !cfg.services.nixtache.deploy-target.ab.partitions.enable;
+      recoveryInstalled = builtins.any
+        (p: (p.name or "") == "nixtache-ab-recover")
+        cfg.environment.systemPackages;
+    });
+
   scenarioPartAssertAutoInitRegularFile = assertContract
     "ab.partitions assert: autoInit=true + type=regular-file → eval refuses (A3)"
-    abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg {
         slotSize = lib.mkForce "512M";
         autoInit = true;
@@ -212,7 +256,6 @@ let
 
   scenarioPartAssertBadStorage = assertContract
     "ab.partitions assert: partition + storage not /dev/.../auto → eval refuses (A4)"
-    abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg {
         slot_a = { type = "partition"; storage = "/srv/foo"; label = "nix-store_1"; };
       }) ];
@@ -249,12 +292,10 @@ let
 
   scenarioPartAssertVerifyNoKey = assertContract
     "ab.partitions assert: verify=true без публичного ключа → eval refuses (A5)"
-    abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg { verify = true; }) ];
 
   scenarioPartAssertBothKeys = assertContract
     "ab.partitions assert: publicKeyFile+publicKey вместе → eval refuses (A6)"
-    abPartPresent
     [ self.nixosModules.deploy-target (abPartCfg {
         publicKeyFile = dummyPubkey;
         publicKey = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
@@ -284,8 +325,6 @@ let
       workDir = "/var/lib/nix-overlay/work";
     };
   };
-  overlayPresent = probeOK [ overlayMod overlayCfg ];
-
   scenarioOverlayWiring = contract
     "overlay-nix: enable=true → overlay daemon/mount service + tmpfiles for upper/work (O1)"
     [ overlayMod overlayCfg ]
@@ -453,7 +492,6 @@ let
 
   scenarioOverlayLifecycleAssertBadMode = assertContract
     "overlay-nix assert: upperOnUpdate outside the enum → eval refuses"
-    overlayPresent
     [ overlayMod (lib.recursiveUpdate overlayCfg {
         services.nixtache.overlay-nix.upperOnUpdate = "bogus";
       }) ];
@@ -462,8 +500,6 @@ let
   # runner.store.mode contract (option in modules/runner/store.nix)
   # ========================================================================
   storeModeCfg = mode: { services.nixtache.runner.store.mode = mode; };
-  storeModePresent = probeOK [ self.nixosModules.runner runnerBase (storeModeCfg "overlay") ];
-
   scenarioStoreModeOverlay = contract
     "runner.store.mode=\"overlay\" → container has overlay-mount service, NO clone storage (RO1, read-only+overlay)"
     [ self.nixosModules.runner runnerBase (storeModeCfg "overlay") ]
@@ -530,6 +566,9 @@ let
     scenarioPartRegularFile
     scenarioPartAssertTypeMismatch
     scenarioPartAssertSizeMismatch
+    scenarioPartAssertPercentage
+    scenarioPartAbsoluteCoImport
+    scenarioRecoveryCommand
     scenarioPartAssertAutoInitRegularFile
     scenarioPartAssertBadStorage
     scenarioPartSourceUrl
@@ -590,6 +629,7 @@ pkgs.runCommand "ab-contract-test"
     # unit re-arms the mask every boot) + fail + unmask hint.
     grep -q 'systemctl mask --runtime systemd-sysupdate.service' "$src" || script_fail="$script_fail no-mask"
     grep -q 'systemctl unmask --runtime systemd-sysupdate.service' "$src" || script_fail="$script_fail no-unmask-hint"
+    grep -q 'Reduce slotSize to an explicit absolute size' "$src" || script_fail="$script_fail no-low-space-slot-size-remedy"
 
     if [ -n "$script_fail" ]; then
       echo "FAIL: provision script text:$script_fail"

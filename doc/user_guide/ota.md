@@ -118,7 +118,7 @@ services.nixtache.deploy-target.ab = {
   partitions = {
     enable = true;
     autoInit = true;
-    slotSize = "2G";                      # absolute, or "10%" of the disk
+    slotSize = "2G";                      # absolute size of each slot
     imageId = "myhost";
     source = "https://runner.example.com/ab-stage/myhost/";
     slot_a = { type = "partition"; storage = "/dev/nvme0n1"; };  # labels default
@@ -128,6 +128,12 @@ services.nixtache.deploy-target.ab = {
 };
 boot.loader.systemd-boot.bootCounting.enable = true;
 ```
+
+`slotSize` and `ab-image.storeSize` accept absolute sizes only, so one
+configuration produces the same layout on every disk. Before upgrading,
+replace any percentage values in an existing configuration with an explicit
+size chosen from the disk capacity plan. When both modules are enabled their
+values must match; an omitted `storeSize` inherits `slotSize`.
 
 `onSizeMismatch` governs existing slots of the wrong size: `"error"` stops
 updates (sysupdate masked) until you fix `slotSize` and unmask. `"wipe"`
@@ -199,6 +205,13 @@ The machine running the Actions runner cannot reboot mid-job: set
 all runners report idle (Forgejo API), then `nixtache-ab-apply` triggers
 sysupdate + reboot. The auto-update poll is a deliberate no-op there.
 
+The runner's relocated store remains usable across the slot swap. In `clone`
+mode, the boot-time re-clone is additive: existing build outputs remain in the
+persistent store and paths introduced by the new lower are added. In `overlay`
+mode, the merged store remounts over the new lower while retaining its
+persistent upper. Both modes continue to serve builds after reboot; see the
+[runner requirements](../../openspec/specs/runner/spec.md).
+
 ## CI wiring
 
 On the runner host, mark the target `method = "ab-image"` in the deploy map
@@ -228,12 +241,39 @@ write; the runner host cutover is idle-gated.
 | scenario | behaviour |
 |---|---|
 | healthy update | inactive slot written → reboot → boot counting blesses |
-| new boot broken | tries exhaust (default 3) → previous blessed entry boots; the machine stays stable and update-aware (Tier-0). ⚠ From a rolled-back state the running slot is the OLDEST instance, so a straight higher-version update can target it (version-driven selection). Remove the failed version while preserving the running slot before updating; `systemd-sysupdate vacuum` removes partial instances but does not selectively identify a fully installed boot-failed version |
+| new boot broken | tries exhaust (default 3) → previous blessed entry boots; the machine stays stable and update-aware (Tier-0). Before another update, run the [post-rollback recovery](#post-rollback-recovery) so version-driven selection cannot target the running oldest slot |
 | same version staged | no-op: nothing written, trigger green |
 | interrupted update | the active slot is never the write target; the half-written slot never boots; re-install is refused until `systemd-sysupdate vacuum` removes the partial instance, then the next update rewrites the slot |
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
 | tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |
 | timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls + reboots per `rebootPolicy` — see [`auto-update.md`](auto-update.md) |
+
+### Post-rollback recovery
+
+After a boot-failed update rolls back, the running slot is the oldest complete
+instance. A higher-version update can then select that running slot unless the
+failed complete instance is removed first. Bare `systemd-sysupdate vacuum` is
+not a substitute: it handles partial instances and retention, not deletion of
+an operator-selected complete version.
+
+Identify the running and failed versions, then remove only the failed one:
+
+```bash
+. /etc/os-release
+printf 'running version: %s\n' "$IMAGE_VERSION"
+systemd-sysupdate list
+nixtache-ab-recover <failed-version>
+```
+
+The recovery command refuses to remove the running version, a missing or
+ambiguous slot, or ambiguous UKI artifacts. For partition-backed slots it
+relabels only the failed partition to `_empty`; for regular-file slots it
+removes only the failed store file. It also removes that version's UKI and
+lower-store-DB artifact while preserving the running slot. Once it succeeds,
+stage a fixed newer image and start the sysupdate unit appropriate for the
+host's systemd version (`systemd-sysupdate-update.service` on 262 and newer,
+`systemd-sysupdate.service` on older releases). The fixed image is written only
+to the inactive slot and can then boot and be blessed.
 
 ### Expected journal noise: `gpg: WARNING: Using untrusted key!`
 
@@ -254,3 +294,11 @@ Appliances can still install packages at runtime via
 [`overlay-nix.md`](overlay-nix.md) — including an explicit policy for what
 happens to the writable upper layer across these updates
 (`upperOnUpdate = "wipe" | "reconcile"`).
+
+Storage outside the A/B slots, such as a ZFS pool holding service state, is
+not rewritten by an update and must remain importable on either slot and after
+rollback. That persistence is independent of the overlay upper policy: the
+default `"wipe"` clears ad-hoc upper content at cutover, while `"reconcile"`
+preserves and repairs it when a substituter retains the old closure. Mount
+ordering and the external-upper contract are documented in
+[`overlay-nix.md`](overlay-nix.md).

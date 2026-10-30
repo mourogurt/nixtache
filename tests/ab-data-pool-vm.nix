@@ -18,19 +18,20 @@
 #        nix-serve; hermetic LAN).
 #     2. v2 staged signed → sysupdate writes slot B → reboot into v2:
 #        the pool imports (zpool.cache lives on the persistent root), state
-#        reads, the probe unit is active, vim still runs from the upper, and
-#        v2's hello marker is visible through the merged store.
+#        reads, the probe unit is active, and v2's hello marker is visible
+#        through the merged store. Reconcile and default-wipe variants assert
+#        their respective upper outcomes independently of pool persistence.
 #     3. Rollback leg: rename the blessed v1 UKI to sort newest (simulates
 #        falling back to the previous slot; the boot-counting fallback itself
-#        is ab-ota-rollback-vm's domain) → v1 boots, the pool still imports
-#        (no zpool upgrade anywhere — slot version drift must not wedge data)
-#        and the upper still serves vim.
+#        is ab-ota-rollback-vm's domain) → v1 boots and the pool still imports
+#        (no zpool upgrade anywhere — slot version drift must not wedge data).
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test LAN.
 { nixpkgs
 , self
 , system ? "x86_64-linux"
 , appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, upperOnUpdate ? "reconcile"
 }:
 
 let
@@ -67,13 +68,8 @@ let
             enable = true;
             upperDir = "/tank/nix-overlay/upper";
             workDir = "/tank/nix-overlay/work";
-            # The reference-server shape carries ad-hoc installs across slot
-            # cutovers: the module default ("wipe") clears the upper at every
-            # cutover boot — swap AND rollback — and would destroy exactly the
-            # pool-resident consumer state this suite pins. "reconcile" keeps
-            # the upper and repairs only closure paths that vanished with the
-            # old lower; the deployer's nix-serve is the substituter.
-            upperOnUpdate = "reconcile";
+          } // lib.optionalAttrs (upperOnUpdate != null) {
+            inherit upperOnUpdate;
           };
 
           # Boot-time probe: services backed by the pool see their state.
@@ -120,7 +116,7 @@ let
   };
 in
 pkgs.testers.runNixOSTest {
-  name = "ab-data-pool";
+  name = "ab-data-pool-${if upperOnUpdate == null then "default-wipe" else upperOnUpdate}";
   globalTimeout = 5400;
 
   nodes.deployer = otaLib.deployerNode { extraDependencies = [ v2Pkg pkgs.vim ]; };
@@ -221,17 +217,22 @@ pkgs.testers.runNixOSTest {
     appliance.succeed(
       "mount | grep 'overlay on /nix/store ' | grep -q 'upperdir=/tank/nix-overlay/upper'"
     )
-    # The reconcile policy must have COMPLETED at this cutover (marker
-    # written), not sit pending: an incomplete pass would keep the upper
-    # intact by side effect and pass the vim asserts below without ever
-    # exercising the policy.
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=180
     )
-    out = appliance.succeed("${vimPath}/bin/vim --version")
-    assert "VIM" in out, f"upper-layer tool lost across the swap ({out!r})"
     appliance.succeed("test -d /nix/store/${helloBasename}")
-    print("OK: v2 booted — pool imported, state served, upper intact, new lower visible")
+    print("OK: v2 booted — pool imported, state served, new lower visible")
+  '' + (
+    if upperOnUpdate == null then ''
+      appliance.fail("test -e /tank/nix-overlay/upper/${vimBasename}")
+      appliance.fail("${vimPath}/bin/vim --version")
+      print("OK: default wipe cleared the pool-resident upper across the swap")
+    '' else ''
+      out = appliance.succeed("${vimPath}/bin/vim --version")
+      assert "VIM" in out, f"upper-layer tool lost across the swap ({out!r})"
+      print("OK: reconcile preserved and repaired the pool-resident upper")
+    ''
+  ) + ''
 
     # -- Rollback leg: the previous slot must still import the pool ----------
     # Simulate the rollback with a Type#1 entry booting v1's blessed UKI:
@@ -252,16 +253,22 @@ pkgs.testers.runNixOSTest {
     assert appliance.succeed("cat /etc/image-version").strip() == "1"
     appliance.succeed("zpool status tank > /dev/null")
     appliance.succeed("test \"$(cat /tank/state.txt)\" = 'v1-state'")
-    # A rollback to a different image version runs the lifecycle policy
-    # again; it must complete here too (option contract: "a rollback to a
-    # different version runs it again").
+    appliance.succeed("systemctl is-active --quiet tank-probe.service")
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=180
     )
-    out = appliance.succeed("${vimPath}/bin/vim --version")
-    assert "VIM" in out, f"upper-layer tool lost after rollback ({out!r})"
-    print("OK: rolled back to v1 — pool still imports, state served, upper intact")
-
-    print("PASS: data pool + overlay-upper-on-ZFS across swap and rollback")
+    print("OK: rolled back to v1 — pool still imports and serves state")
+  '' + (
+    if upperOnUpdate == null then ''
+      appliance.fail("test -e /tank/nix-overlay/upper/${vimBasename}")
+      appliance.fail("${vimPath}/bin/vim --version")
+      print("OK: default wipe kept the upper cleared after rollback")
+    '' else ''
+      out = appliance.succeed("${vimPath}/bin/vim --version")
+      assert "VIM" in out, f"upper-layer tool lost after rollback ({out!r})"
+      print("OK: reconcile kept the upper working after rollback")
+    ''
+  ) + ''
+    print("PASS: data pool persistence + ${if upperOnUpdate == null then "default-wipe" else upperOnUpdate} upper policy across swap and rollback")
   '';
 }

@@ -2,10 +2,6 @@
 # `services.nixtache.auto-update.*`), implementing the pure-eval cases AU-1...AU-25
 # of doc/archive/specs/direct-deploy/TEST-SPECS-AUTO-UPDATE.md.
 #
-# Wiring scenarios degrade to a named `moduleImplemented=false` check and
-# assert scenarios are gated on a `modulePresent` probe when the module is
-# absent — the graceful-degradation pattern of ab-contract.nix.
-#
 # Fast, no KVM. Exposed via checks.<system>.auto-update.
 {
   nixpkgs,
@@ -22,9 +18,7 @@ let
   # breaks nullOr str options under the deep toplevel probe).
   dummySecret = "/dev/null";
 
-  # Empty-module fallback when the module is absent, so an OPTION-missing
-  # error (caught by the probes) is what surfaces, not an attrset-missing crash.
-  autoMod = self.nixosModules.auto-update or ({ ... }: { });
+  autoMod = self.nixosModules.auto-update;
 
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
@@ -103,39 +97,22 @@ let
     ).success;
   evalCfg = modules: (nixpkgs.lib.nixosSystem { inherit system modules; }).config;
 
-  # Green once the module exists and a minimal flake-path host evaluates.
-  modulePresent = probeOK (flakeMods { });
+  contract = name: modules: checksFn: {
+    inherit name;
+    checks = checksFn (evalCfg modules);
+  };
 
-  # Wiring contract: green checks if eval OK, else moduleImplemented=false
-  # (red, clearly named) instead of crashing the suite.
-  contract = name: modules: checksFn:
-    let ok = probeOK modules; in
-    {
-      inherit name;
-      checks = if ok then checksFn (evalCfg modules) else { moduleImplemented = false; };
-    };
-
-  # Failed-assertion messages of a bad config; [ ] when it refuses to even
-  # evaluate (e.g. module still missing) — tryEval keeps the suite graceful.
   failedAssertions = modules:
-    let
-      msgs = map (a: a.message)
-        (builtins.filter (a: !a.assertion) (evalCfg modules).assertions);
-      r = builtins.tryEval (builtins.deepSeq msgs msgs);
-    in
-    if r.success then r.value else [ ];
+    map (a: a.message)
+      (builtins.filter (a: !a.assertion) (evalCfg modules).assertions);
 
-  # Assert contract (A1-A8): green only when the module is present AND the bad
-  # config refuses toplevel eval AND some failed assertion mentions one of the
-  # hints — distinguishing a firing assertion from an attribute-missing crash
-  # (test-spec sec. 2, the A2 boundary).
   assertContract = name: modules: hints: {
     inherit name;
     checks = {
-      inherit modulePresent;
       badConfigRefused = !(probeOK modules);
-      assertMessage = modulePresent
-        && builtins.any (m: builtins.any (h: lib.hasInfix h m) hints) (failedAssertions modules);
+      assertMessage = builtins.any
+        (m: builtins.any (h: lib.hasInfix h m) hints)
+        (failedAssertions modules);
     };
   };
 
@@ -248,10 +225,24 @@ let
     (cfg:
       let script = auScript cfg; in
       {
-        abPath = lib.hasInfix "systemctl start systemd-sysupdate.service" script;
+        abPath = lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" script;
         noBuild = !(lib.hasInfix "nix build" script);
         journalDetect = lib.hasInfix "journalctl -u systemd-sysupdate" script;
       });
+
+  scenarioAu9Systemd261 = contract "AU-9/systemd 261: A/B poll waits on the pre-rename sysupdate unit"
+    (abMods { } ++ [
+      {
+        systemd.package = appliancePkgs.systemd.overrideAttrs (_: {
+          version = "261";
+          __intentionallyOverridingVersion = true;
+        });
+      }
+    ])
+    (cfg: {
+      legacyUnit = lib.hasInfix "systemctl start --wait systemd-sysupdate.service" (auScript cfg);
+      noRenamedUnit = !(lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" (auScript cfg));
+    });
 
   scenarioAu10 = contract "AU-10: method auto → ab-image (via ab-image.enable, second indicator)"
     [
@@ -337,6 +328,7 @@ let
         noDirectReboot = !(lib.hasInfix "systemctl reboot" script);
         rebootTimerPresent = cfg.systemd.timers ? "nixtache-auto-update-reboot";
         rebootTimerCalendar = rtmr.timerConfig.OnCalendar or null == "02:00";
+        rebootTimerPersistent = rtmr.timerConfig.Persistent or false;
         rebootTimerWanted = lib.elem "timers.target" (rtmr.wantedBy or [ ]);
       });
 
@@ -352,8 +344,8 @@ let
         # no-op branch altogether (a comment/echo-only mention is tolerated by
         # the spec but not distinguishable here).
         pollDerivedFalse = lib.hasInfix "ci-driven" script
-          && !(lib.hasInfix "systemctl start systemd-sysupdate.service" script);
-        explicitPollTrue = lib.hasInfix "systemctl start systemd-sysupdate.service" scriptPoll;
+          && !(lib.hasInfix "systemctl start --wait" script);
+        explicitPollTrue = lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" scriptPoll;
       });
 
   # =========================================================================
@@ -425,7 +417,7 @@ let
     (abMods { } ++ [ { systemd.sysupdate.transfers."10-nix-store".Transfer.Reboot = "yes"; } ])
     (cfg: {
       hostEvals = true;
-      abPathActive = lib.hasInfix "systemctl start systemd-sysupdate.service" (auScript cfg);
+      abPathActive = lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" (auScript cfg);
     });
 
   scenarioAu22 = assertContract "AU-22/A8: explicit method=ab-image with no ab indicators → eval refuses"
@@ -465,6 +457,84 @@ let
         noDirectWrite = !(lib.hasInfix "> /var/lib/nixtache/pending-system" script);
       });
 
+  windowRebootScript = name: start: end:
+    pkgs.writeText name
+      (evalCfg (abMods {
+        rebootPolicy = "window";
+        rebootWindow = { inherit start end; };
+      })).systemd.services.nixtache-auto-update-reboot.script;
+  normalWindowScript = windowRebootScript "auto-update-normal-window" "02:00" "05:00";
+  wrappingWindowScript = windowRebootScript "auto-update-wrapping-window" "23:00" "02:00";
+
+  rebootWindowBehaviorCheck = pkgs.runCommand "auto-update-window-behavior" {
+    inherit normalWindowScript wrappingWindowScript;
+  } ''
+    : > "$out"
+    mkdir -p "$TMPDIR/bin"
+    cat > "$TMPDIR/bin/date" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' "$FAKE_NOW"
+    STUB
+    cat > "$TMPDIR/bin/systemctl" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' "$*" >> "$REBOOT_LOG"
+    STUB
+    chmod +x "$TMPDIR/bin/date" "$TMPDIR/bin/systemctl"
+    export PATH="$TMPDIR/bin:$PATH"
+    export REBOOT_LOG="$TMPDIR/reboots"
+    sed "s|/var/lib/nixtache/reboot-pending|$TMPDIR/reboot-pending|g" \
+      "$normalWindowScript" > "$TMPDIR/normal-window"
+    sed "s|/var/lib/nixtache/reboot-pending|$TMPDIR/reboot-pending|g" \
+      "$wrappingWindowScript" > "$TMPDIR/wrapping-window"
+
+    run_case() {
+      script="$1"
+      now="$2"
+      expected="$3"
+      label="$4"
+      rm -f "$TMPDIR/reboot-pending" "$REBOOT_LOG"
+      touch "$TMPDIR/reboot-pending"
+      FAKE_NOW="$now" bash "$script" || {
+        echo "FAIL: $label at $now exited non-zero" >&2
+        exit 1
+      }
+      if [ "$expected" = reboot ]; then
+        [ -f "$REBOOT_LOG" ] && [ "$(< "$REBOOT_LOG")" = reboot ] || {
+          echo "FAIL: $label at $now did not reboot exactly once" >&2
+          exit 1
+        }
+        [ ! -e "$TMPDIR/reboot-pending" ] || {
+          echo "FAIL: $label at $now left the pending marker" >&2
+          exit 1
+        }
+      else
+        [ ! -e "$REBOOT_LOG" ] || {
+          echo "FAIL: $label at $now unexpectedly rebooted" >&2
+          exit 1
+        }
+        [ -f "$TMPDIR/reboot-pending" ] || {
+          echo "FAIL: $label at $now consumed the pending marker" >&2
+          exit 1
+        }
+      fi
+      printf 'ok  %s at %s -> %s\n' "$label" "$now" "$expected" >> "$out"
+    }
+
+    run_case "$TMPDIR/normal-window" 01:59 wait before
+    run_case "$TMPDIR/normal-window" 02:00 reboot start
+    run_case "$TMPDIR/normal-window" 03:00 reboot inside
+    run_case "$TMPDIR/normal-window" 05:00 wait end
+    run_case "$TMPDIR/normal-window" 06:00 wait after
+    run_case "$TMPDIR/normal-window" 03:30 reboot persistent-catch-up-inside
+    run_case "$TMPDIR/normal-window" 06:30 wait persistent-catch-up-outside
+    run_case "$TMPDIR/wrapping-window" 22:59 wait wrapping-before
+    run_case "$TMPDIR/wrapping-window" 23:00 reboot wrapping-start
+    run_case "$TMPDIR/wrapping-window" 00:00 reboot wrapping-after-midnight
+    run_case "$TMPDIR/wrapping-window" 01:59 reboot wrapping-inside
+    run_case "$TMPDIR/wrapping-window" 02:00 wait wrapping-end
+    run_case "$TMPDIR/wrapping-window" 12:00 wait wrapping-daytime
+  '';
+
   scenarios = [
     scenarioAu1
     scenarioAu2
@@ -475,6 +545,7 @@ let
     scenarioAu7
     scenarioAu8
     scenarioAu9
+    scenarioAu9Systemd261
     scenarioAu10
     scenarioAu11a
     scenarioAu11b
@@ -507,15 +578,19 @@ let
         (builtins.attrNames s.checks)))
     scenarios));
   failMsg = lib.optionalString (!allOk)
-    "FAILED (auto-update contracts not yet implemented are expected red): ${lib.concatStringsSep ", " failed}";
+    "FAILED: ${lib.concatStringsSep ", " failed}";
 in
 pkgs.runCommand "auto-update-test"
   {
-    inherit report failMsg;
+    inherit report failMsg rebootWindowBehaviorCheck;
     passAsFile = [ "report" "failMsg" ];
   }
   ''
     cat "$reportPath"
     cp "$reportPath" "$out"
     if [ -s "$failMsgPath" ]; then echo; cat "$failMsgPath"; printf '\n%s\n' "$(<$failMsgPath)" >> "$out"; exit 1; fi
+    printf '\n'
+    printf '\n' >> "$out"
+    cat "$rebootWindowBehaviorCheck"
+    cat "$rebootWindowBehaviorCheck" >> "$out"
   ''

@@ -67,7 +67,6 @@ jobs:
           - ab-ota-e2e
           - ab-ota-e2e-erofs
           - ab-ota-e2e-none
-          - ab-ota-e2e-percent
           - ab-ota-anywhere-vm
           - ab-deploy
           - ab-vm
@@ -84,6 +83,7 @@ jobs:
           - ab-ota-migrate-boot-vm
           - ab-ota-migrate-boot-override-vm
           - ab-data-pool-vm
+          - ab-data-pool-wipe-vm
           # runner-store-swap-{clone,overlay}-vm: the runner's relocated store
           # across a real appliance swap — green since the lower-store-db
           # change (the image ships the lower DB; the container runs in

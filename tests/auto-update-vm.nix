@@ -3,8 +3,6 @@
 # AU-A1...A5 (ab path). AU-F5 (kernel-change reboot) stays a manual runbook —
 # see the comment block at the bottom of this file.
 #
-# When the auto-update module is absent the suite degrades to a clearly-named
-# failing placeholder derivation instead of an attrset-missing eval crash.
 # KVM: runNixOSTest carries
 # requiredSystemFeatures = [ "kvm" "nixos-test" ] itself (as ab-deploy-self-vm).
 #
@@ -33,7 +31,7 @@ let
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
 
-  autoMod = self.nixosModules.auto-update or null;
+  autoMod = self.nixosModules.auto-update;
 
   # -- flake-path fixture ----------------------------------------------------
   hostName = "autest";
@@ -220,14 +218,6 @@ let
     };
   };
 in
-if autoMod == null then
-  pkgs.runCommand "auto-update-vm-module-missing"
-    { requiredSystemFeatures = [ "kvm" ]; }
-    ''
-      echo "nixosModules.auto-update is missing from this flake — cannot build the auto-update VM conformance suite" >&2
-      exit 1
-    ''
-else
 pkgs.testers.runNixOSTest {
   name = "auto-update-vm";
 
@@ -253,6 +243,16 @@ pkgs.testers.runNixOSTest {
     abidle = { ... }: {
       imports = [ abCommon ];
       services.nixtache.auto-update.rebootPolicy = "if-needed";
+    };
+
+    abreboot = { ... }: {
+      imports = [ abCommon ];
+      services.nixtache.auto-update.rebootPolicy = "if-needed";
+    };
+
+    abwindow = { ... }: {
+      imports = [ abCommon ];
+      services.nixtache.auto-update.rebootPolicy = "window";
     };
 
     # AU-A3: gating host → auto-update is a ci-driven no-op (ab.poll derived false).
@@ -371,6 +371,40 @@ pkgs.testers.runNixOSTest {
     assert boot_ts(abidle) == ts_before, "no new image → no reboot even with rebootPolicy=if-needed"
     print("AU-A2 OK: nothing newer → clean no-op, if-needed did not reboot")
     abidle.shutdown()
+
+    abreboot.start()
+    abreboot.wait_for_unit("nixtache-ab-provision.service")
+    abreboot.wait_for_unit("multi-user.target")
+    abreboot.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
+    ts_before = boot_ts(abreboot)
+    abreboot.succeed("systemctl start nixtache-auto-update.service", timeout=300)
+    abreboot.wait_until_succeeds(
+      f"test \"$(systemctl show -p ActiveEnterTimestamp multi-user.target)\" != '{ts_before}'",
+      timeout=600
+    )
+    abreboot.wait_for_unit("multi-user.target")
+    abreboot.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
+    print("AU-A6 OK: completed install → if-needed rebooted into a fresh boot")
+    abreboot.shutdown()
+
+    abwindow.start()
+    abwindow.wait_for_unit("nixtache-ab-provision.service")
+    abwindow.wait_for_unit("multi-user.target")
+    abwindow.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
+    ts_before = boot_ts(abwindow)
+    abwindow.succeed("systemctl start nixtache-auto-update.service", timeout=300)
+    abwindow.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
+    abwindow.succeed("test -f /var/lib/nixtache/reboot-pending")
+    assert boot_ts(abwindow) == ts_before, "window policy must defer the reboot"
+    abwindow.succeed("${otaLib.assertSysupdateInstalled}")
+    print("AU-A7 OK: completed install → window marker set, reboot deferred")
+
+    abwindow.succeed("rm /var/lib/nixtache/reboot-pending")
+    abwindow.succeed("systemctl start nixtache-auto-update.service", timeout=300)
+    abwindow.succeed("test ! -f /var/lib/nixtache/reboot-pending")
+    assert boot_ts(abwindow) == ts_before, "no-op result must not reboot under window policy"
+    print("AU-A8 OK: no new image → no window marker and no reboot")
+    abwindow.shutdown()
 
     # -- AU-A3: gating host → ci-driven no-op, sysupdate untouched -----------
     abgating.start()

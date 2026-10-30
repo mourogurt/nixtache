@@ -56,20 +56,14 @@ let
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
 
   # Compression-matrix knobs. Defaults reproduce the base variant
-  # (squashfs + zstd); the flake registers
-  # erofs / tool-default-compression / percent-slotSize variants as separate
-  # vmTests keys.
+  # (squashfs + zstd); the flake registers erofs and tool-default-compression
+  # variants as separate vmTests keys.
   vCfg = {
     storeFs = "squashfs";
     storeCompression = "zstd";
     storeCompressionLevel = null;
     slotSize = "512M";
   } // variant;
-  # The IMAGE store size must stay absolute (repart percents are relative to
-  # the build-time image disk, not the target disk); only the TARGET-side
-  # partitions.slotSize may be a percent (resolved against /dev/vdb).
-  imageStoreSize = if lib.hasSuffix "%" vCfg.slotSize then "512M" else vCfg.slotSize;
-
   # FS-aware store-slot hello check (squashfs → unsquashfs; erofs → ro-mount
   # via the kernel erofs driver — unsquashfs cannot read erofs images, and the
   # erofs image root IS the store dir itself, no /nix/store prefix).
@@ -95,7 +89,7 @@ let
     signVerify = false;
     dataPartition = false;
     stagingPath = "http://deployer/ab-stage/abtest-remote";
-    storeSize = imageStoreSize;
+    storeSize = vCfg.slotSize;
     inherit (vCfg) storeFs storeCompression storeCompressionLevel;
   };
   v1SysupdatePkg = v1Config.config.system.build.sysupdate-package;
@@ -107,7 +101,7 @@ let
     signVerify = false;
     dataPartition = false;
     stagingPath = "http://deployer/ab-stage/abtest-remote";
-    storeSize = imageStoreSize;
+    storeSize = vCfg.slotSize;
     inherit (vCfg) storeFs storeCompression storeCompressionLevel;
     extraPackages = [ pkgs.hello ];
   };
@@ -275,7 +269,6 @@ pkgs.testers.runNixOSTest {
       ab.gating = false;
       ab.partitions = {
         enable = true;
-        # Variant-controlled (A5: "25%" of the 2 GB test disk ~ the 512M image).
         slotSize = vCfg.slotSize;
         autoInit = true;
         imageId = "abtest";

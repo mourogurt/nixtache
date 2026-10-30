@@ -57,6 +57,10 @@ let
     else "flake";
   isFlake = effectiveMethod == "flake";
   isAb = effectiveMethod == "ab-image";
+  sysupdateService =
+    if versionAtLeast config.systemd.package.version "262"
+    then "systemd-sysupdate-update.service"
+    else "systemd-sysupdate.service";
 
   stateDir = "/var/lib/nixtache";
   pendingFile = "${stateDir}/pending-system";
@@ -151,16 +155,12 @@ let
     ${markerFn}
     t0=$(date '+%Y-%m-%d %H:%M:%S')
     marker "triggered sysupdate"
-    # The stock update unit is Type=simple: a bare `systemctl start` returns
-    # once the process forked — poll for real completion so the install
-    # evidence below cannot race a still-running transfer.
-    if ! systemctl start systemd-sysupdate.service; then
+    if ! systemctl start --wait ${sysupdateService}; then
       marker "systemd-sysupdate failed to start"
       exit 1
     fi
-    while systemctl is-active --quiet systemd-sysupdate.service; do sleep 2; done
     sleep 1  # let journald flush the update run's final messages
-    if systemctl is-failed --quiet systemd-sysupdate.service; then
+    if systemctl is-failed --quiet ${sysupdateService}; then
       marker "systemd-sysupdate run failed"
       exit 1
     fi
@@ -498,7 +498,7 @@ in
           end="${cfg.rebootWindow.end}"
           if [ "$start" \< "$end" ]; then
             inside=0
-            { [ "$now" \< "$start" ] || [ "$now" = "$start" ]; } && { [ "$now" \< "$end" ]; } && inside=1
+            { [ "$now" \> "$start" ] || [ "$now" = "$start" ]; } && { [ "$now" \< "$end" ]; } && inside=1
           else
             inside=0
             { [ "$now" \> "$start" ] || [ "$now" = "$start" ] || [ "$now" \< "$end" ]; } && inside=1

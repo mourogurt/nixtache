@@ -17,9 +17,12 @@ One module, two mechanisms chosen per system type:
   exactly as to CI deploys — including the apply-unit disk-space guard: a
   machine below `services.nixtache.deploy-target.minFreeBytes` refuses the
   activation (unit red, GC hint in the journal) until space is freed.
-- **ab-image** (OTA): the poll service triggers `systemd-sysupdate` and owns
-  only the trigger + reboot policy; the runner host self-updates through the
-  idle-gated `nixtache-ab-apply` unit.
+- **ab-image** (OTA): the poll service starts the sysupdate unit appropriate
+  for the host's systemd version and waits for installation to finish before
+  inspecting its result. Only a completed new-image install can set a reboot
+  marker or trigger a reboot; a no-new-image result does neither. The runner
+  host self-updates through the idle-gated `nixtache-ab-apply` unit. See the
+  [A/B OTA requirements](../../openspec/specs/ab-ota/spec.md).
 
 ## Contract
 
@@ -43,9 +46,12 @@ services.nixtache.auto-update = {
   A/B setup is present (`deploy-target.ab.enable` or `ab-image.enable`),
   otherwise `"flake"`. An explicit value is the escape hatch (e.g. an A/B
   transition period) — the same assertions validate it either way.
-- `rebootPolicy`: `never` — never reboot; `if-needed` — reboot when the
-  booted kernel differs from the freshly activated one; `window` — defer the
-  reboot to a timer inside `rebootWindow`.
+- `rebootPolicy`: `never` — never reboot; `if-needed` — on the flake path,
+  reboot when the booted kernel differs from the freshly activated one, and on
+  the A/B path, reboot after a completed new-image install; `window` — defer
+  the reboot to a timer inside `rebootWindow`. Windows are start-inclusive and
+  end-exclusive. A window whose start is later than its end wraps over
+  midnight, and persistent-timer catch-up applies the same bounds.
 - The flake path requires `nixosModules.deploy-target` to be imported (the
   activation goes through `nixtache-apply.service`); the ab path requires a
   resolvable sysupdate source. Violations are eval-time assertions, not

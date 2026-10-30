@@ -211,6 +211,15 @@ let
     };
   };
 
+  recoverySlotType = if partitions.enable then slotA.type else "partition";
+  recoveryStorageA = if partitions.enable then slotA.storage else "auto";
+  recoveryStorageB = if partitions.enable then slotB.storage else "auto";
+  recoveryBootDir =
+    if partitions.enable && !abImageActive && partitions.bootTarget != "auto"
+    then partitions.bootTarget
+    else "/boot/EFI/Linux";
+  recoveryImageId = if partitions.enable then imageId' else imageId;
+
   # The provision script — bash, run as a oneshot BEFORE systemd-sysupdate.
   # Implements stateless detection (derive the slot layout from GPT labels,
   # never from a state file) + migration/wipe per `onSizeMismatch`.
@@ -240,15 +249,10 @@ let
       fi
     }
 
-    # -- parse size to bytes; percent needs the disk as $2 -------------------
+    # -- parse an absolute size to bytes -------------------------------------
     size_to_bytes() {
-      local size="$1" disk="''${2:-}"
-      if [[ "$size" == *% ]]; then
-        local pct="''${size%%%}"
-        local disk_bytes
-        disk_bytes=$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)
-        echo $(( disk_bytes * pct / 100 ))
-      elif [[ "$size" =~ ^([0-9]+)([KMGTP]i?B?|[KMGTP]?)$ ]]; then
+      local size="$1"
+      if [[ "$size" =~ ^([0-9]+)([KMGTP]i?B?|[KMGTP]?)$ ]]; then
         local num="''${BASH_REMATCH[1]}"
         local unit="''${BASH_REMATCH[2]}"
         # strip optional iB / B suffix → keep just the letter
@@ -282,7 +286,7 @@ let
 
     # -- Normal state → size check -------------------------------------------
     if [ "$has_slots" -ge 1 ]; then
-      expected_bytes=$(size_to_bytes "$SLOT_SIZE" "$DISK")
+      expected_bytes=$(size_to_bytes "$SLOT_SIZE")
       # Find the actual size of the first slot partition via lsblk.
       # `-bno SIZE,PARTLABEL`: -b bytes, -n no header, -o columns; awk picks
       # the SIZE (col 1) of the first row whose PARTLABEL marks an A/B slot
@@ -334,7 +338,7 @@ let
         [ -z "$next_part" ] && next_part=1
         # Resolve slotSize to a sgdisk-compatible +<n>M argument (sgdisk --new
         # does NOT accept percentages — only sectors, K, M, G, T, P).
-        size_arg="+$(( $(size_to_bytes "$SLOT_SIZE" "$DISK") / 1048576 ))M"
+        size_arg="+$(( $(size_to_bytes "$SLOT_SIZE") / 1048576 ))M"
         sgdisk --new="$next_part":0:"$size_arg" --typecode="$next_part":8300 --change-name="$next_part":"$LABEL_A" "$DISK" \
           || { echo "nixtache-ab-provision: failed to create $LABEL_A" >&2; exit 1; }
         sgdisk --new="$((next_part+1))":0:"$size_arg" --typecode="$((next_part+1))":8300 --change-name="$((next_part+1))":"$LABEL_B" "$DISK" \
@@ -361,29 +365,175 @@ let
     disk_end=$(blockdev --getsz "$DISK" 2>/dev/null || echo 0)
     free_sectors=$(( disk_end - last_end ))
     free_bytes=$(( free_sectors * 512 ))
-    slot_bytes=$(size_to_bytes "$SLOT_SIZE" "$DISK")
+    slot_bytes=$(size_to_bytes "$SLOT_SIZE")
     needed_bytes=$(( slot_bytes * 2 ))
 
     echo "nixtache-ab-provision: free space = $free_bytes bytes, needed = $needed_bytes (2 x $SLOT_SIZE)"
     if [ "$free_bytes" -lt "$needed_bytes" ]; then
       echo "nixtache-ab-provision: Not enough free space for A/B slots: need $needed_bytes bytes (2 x $SLOT_SIZE = $SLOT_SIZE each), have $free_bytes bytes." >&2
       echo "  Options:" >&2
-      echo "    1. Shrink root manually (ext4: resize2fs offline; btrfs: btrfs filesystem resize online; xfs/zfs: impossible)." >&2
-      echo "    2. Use nixos-anywhere for a full wipe-and-reinstall (by SSH, no physical access)." >&2
-      echo "    3. Add a second disk and put A/B slots there (slot_a.storage = \"/dev/nvme1n1\")." >&2
-      echo "    4. Set autoInit = false and provision manually." >&2
+      echo "    1. Reduce slotSize to an explicit absolute size that fits the capacity plan." >&2
+      echo "    2. Shrink root manually (ext4: resize2fs offline; btrfs: btrfs filesystem resize online; xfs/zfs: impossible)." >&2
+      echo "    3. Use nixos-anywhere for a full wipe-and-reinstall (by SSH, no physical access)." >&2
+      echo "    4. Add a second disk and put A/B slots there (slot_a.storage = \"/dev/nvme1n1\")." >&2
+      echo "    5. Set autoInit = false and provision manually." >&2
       exit 1
     fi
 
     # Create the two slots. Resolve slotSize to +<n>M (sgdisk has no % support).
     next_part=$(sgdisk -p "$DISK" 2>/dev/null | awk '/^ *[0-9]/{n=$1+1} END{print n}')
     [ -z "$next_part" ] && next_part=1
-    size_arg="+$(( $(size_to_bytes "$SLOT_SIZE" "$DISK") / 1048576 ))M"
+    size_arg="+$(( $(size_to_bytes "$SLOT_SIZE") / 1048576 ))M"
     echo "nixtache-ab-provision: creating $LABEL_A (slot A) + $LABEL_B (slot B) at $size_arg each."
     sgdisk --new="$next_part":0:"$size_arg" --typecode="$next_part":8300 --change-name="$next_part":"$LABEL_A" "$DISK"
     sgdisk --new="$((next_part+1))":0:"$size_arg" --typecode="$((next_part+1))":8300 --change-name="$((next_part+1))":"$LABEL_B" "$DISK"
     udevadm settle 2>/dev/null || true
     echo "nixtache-ab-provision: A/B slots created on $DISK."
+  '';
+
+  recoveryScript = pkgs.writeShellScript "nixtache-ab-recover" ''
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.util-linux pkgs.gptfdisk pkgs.findutils pkgs.gawk pkgs.gnused pkgs.systemd ]}:$PATH
+    set -euo pipefail
+
+    IMAGE_ID="${recoveryImageId}"
+    SLOT_TYPE="${recoverySlotType}"
+    DISK_A="${recoveryStorageA}"
+    DISK_B="${recoveryStorageB}"
+    BOOT_DIR="${recoveryBootDir}"
+    LOWER_DB_DIR="/boot/EFI/nixtache"
+
+    if [ "$#" -ne 1 ]; then
+      echo "usage: nixtache-ab-recover <failed-version>" >&2
+      exit 2
+    fi
+    FAILED_VERSION="$1"
+    if [[ ! "$FAILED_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+      echo "nixtache-ab-recover: invalid version '$FAILED_VERSION'" >&2
+      exit 2
+    fi
+
+    . /etc/os-release
+    RUNNING_VERSION="''${IMAGE_VERSION:-}"
+    if [ -z "$RUNNING_VERSION" ]; then
+      echo "nixtache-ab-recover: IMAGE_VERSION is missing from /etc/os-release" >&2
+      exit 1
+    fi
+    if [ "$FAILED_VERSION" = "$RUNNING_VERSION" ]; then
+      echo "nixtache-ab-recover: refusing to remove running version $RUNNING_VERSION" >&2
+      exit 1
+    fi
+    if systemctl is-active --quiet systemd-sysupdate-update.service || systemctl is-active --quiet systemd-sysupdate.service; then
+      echo "nixtache-ab-recover: sysupdate is active; wait for it to finish before recovery" >&2
+      exit 1
+    fi
+
+    count_lines() {
+      awk 'NF { n++ } END { print n+0 }' <<< "$1"
+    }
+
+    UKI_MATCHES=""
+    if [ -d "$BOOT_DIR" ]; then
+      UKI_MATCHES=$(find "$BOOT_DIR" -maxdepth 1 -type f -name "''${IMAGE_ID}_''${FAILED_VERSION}+*.efi" -print)
+    fi
+    UKI_COUNT=$(count_lines "$UKI_MATCHES")
+    if [ "$UKI_COUNT" -gt 1 ]; then
+      echo "nixtache-ab-recover: refusing ambiguous deletion; multiple UKIs match version $FAILED_VERSION" >&2
+      exit 1
+    fi
+    LOWER_DB="$LOWER_DB_DIR/''${IMAGE_ID}_''${FAILED_VERSION}.lower-db"
+
+    remove_artifacts() {
+      if [ "$UKI_COUNT" -eq 1 ]; then
+        rm -f -- "$UKI_MATCHES"
+      fi
+      rm -f -- "$LOWER_DB"
+    }
+
+    resolve_disk() {
+      local d="$1"
+      if [ "$d" = "auto" ]; then
+        findmnt -n -o SOURCE / | sed -E 's/p?[0-9]+$//'
+      else
+        echo "$d"
+      fi
+    }
+
+    if [ "$SLOT_TYPE" = "partition" ]; then
+      DISK_A=$(resolve_disk "$DISK_A")
+      DISK_B=$(resolve_disk "$DISK_B")
+      DISKS=("$DISK_A")
+      if [ "$DISK_B" != "$DISK_A" ]; then
+        DISKS+=("$DISK_B")
+      fi
+
+      slot_partition_matches() {
+        local label="nix-store_$1" disk
+        for disk in "''${DISKS[@]}"; do
+          lsblk -rpn -o NAME,PARTLABEL "$disk" 2>/dev/null \
+            | awk -v disk="$disk" -v label="$label" '$2 == label { print $1, disk }'
+        done
+      }
+
+      RUNNING_MATCHES=$(slot_partition_matches "$RUNNING_VERSION")
+      FAILED_MATCHES=$(slot_partition_matches "$FAILED_VERSION")
+      if [ "$(count_lines "$RUNNING_MATCHES")" -ne 1 ]; then
+        echo "nixtache-ab-recover: expected exactly one running slot for $RUNNING_VERSION; refusing to continue" >&2
+        exit 1
+      fi
+      if [ "$(count_lines "$FAILED_MATCHES")" -ne 1 ]; then
+        echo "nixtache-ab-recover: expected exactly one failed slot for $FAILED_VERSION; refusing ambiguous deletion" >&2
+        exit 1
+      fi
+      RUNNING_NODE=$(awk 'NR == 1 { print $1 }' <<< "$RUNNING_MATCHES")
+      FAILED_NODE=$(awk 'NR == 1 { print $1 }' <<< "$FAILED_MATCHES")
+      FAILED_DISK=$(awk 'NR == 1 { print $2 }' <<< "$FAILED_MATCHES")
+      FAILED_PART=$(lsblk -no PARTN "$FAILED_NODE")
+      if [ -z "$FAILED_PART" ] || [ "$FAILED_NODE" = "$RUNNING_NODE" ]; then
+        echo "nixtache-ab-recover: failed and running slots are not distinct; refusing to continue" >&2
+        exit 1
+      fi
+
+      sgdisk --change-name="$FAILED_PART":_empty "$FAILED_DISK" || exit 1
+      udevadm settle 2>/dev/null || true
+      if [ "$(lsblk -no PARTLABEL "$FAILED_NODE")" != "_empty" ]; then
+        echo "nixtache-ab-recover: failed to mark $FAILED_NODE empty" >&2
+        exit 1
+      fi
+      if [ "$(lsblk -no PARTLABEL "$RUNNING_NODE")" != "nix-store_$RUNNING_VERSION" ]; then
+        echo "nixtache-ab-recover: running slot changed unexpectedly; aborting artifact cleanup" >&2
+        exit 1
+      fi
+      remove_artifacts
+      echo "nixtache-ab-recover: removed $FAILED_VERSION; running slot $RUNNING_NODE preserved and inactive slot is empty"
+      exit 0
+    fi
+
+    if [ "$SLOT_TYPE" = "regular-file" ]; then
+      STORE_DIRS=("$DISK_A")
+      if [ "$DISK_B" != "$DISK_A" ]; then
+        STORE_DIRS+=("$DISK_B")
+      fi
+      slot_file_matches() {
+        find "''${STORE_DIRS[@]}" -maxdepth 1 -type f -name "''${IMAGE_ID}_$1.nix-store.raw" -print 2>/dev/null
+      }
+      RUNNING_MATCHES=$(slot_file_matches "$RUNNING_VERSION")
+      FAILED_MATCHES=$(slot_file_matches "$FAILED_VERSION")
+      if [ "$(count_lines "$RUNNING_MATCHES")" -ne 1 ] || [ "$(count_lines "$FAILED_MATCHES")" -ne 1 ]; then
+        echo "nixtache-ab-recover: running and failed versions must each identify exactly one store file" >&2
+        exit 1
+      fi
+      rm -f -- "$FAILED_MATCHES"
+      if [ ! -f "$RUNNING_MATCHES" ] || [ -e "$FAILED_MATCHES" ]; then
+        echo "nixtache-ab-recover: failed to restore a safe inactive-slot state" >&2
+        exit 1
+      fi
+      remove_artifacts
+      echo "nixtache-ab-recover: removed $FAILED_VERSION; running store file $RUNNING_MATCHES preserved"
+      exit 0
+    fi
+
+    echo "nixtache-ab-recover: unsupported slot type '$SLOT_TYPE'" >&2
+    exit 1
   '';
 in
 {
@@ -429,11 +579,10 @@ in
       type = types.str;
       example = "2G";
       description = ''
-        Size of EACH A/B slot (A and B are equal — squashFS/erofs constraint).
-        Accepts absolute sizes (`"2G"`, `"512M"`, `"1024"` bytes) or percentages
-        (`"10%"` — resolved at runtime by the provision script against the disk
-        size). MUST match `services.nixtache.ab-image.storeSize` when both are
-        absolute (asserted; percentages skip the check).
+        Absolute size of EACH A/B slot (A and B are equal — squashFS/erofs
+        constraint), such as `"2G"`, `"512M"`, or `"1024"` bytes. Explicit
+        sizes produce the same layout on every disk. MUST match
+        `services.nixtache.ab-image.storeSize` when both modules are enabled.
       '';
     };
 
@@ -566,7 +715,8 @@ in
     };
   };
 
-  config = mkIf (cfg.enable && ab.enable && partitions.enable) {
+  config = mkMerge [
+    (mkIf (cfg.enable && ab.enable && partitions.enable) {
     # The remote A/B update/reboot sequence reads IMAGE_VERSION from
     # os-release to assess the booted version; a host
     # without it makes that trigger exit 1 silently. nixpkgs defaults the
@@ -591,19 +741,26 @@ in
           Target.Type. Set both to "partition" or both to "regular-file".
         '';
       }
-      # slotSize must match ab-image.storeSize when both are absolute.
+      {
+        assertion = !hasSuffix "%" partitions.slotSize;
+        message = ''
+          services.nixtache.deploy-target.ab.partitions.slotSize must be an
+          explicit absolute size such as "2G", "512M", or a byte count, not
+          "${partitions.slotSize}". Percentages make the partition layout
+          depend on the attached disk; choose an absolute size from the
+          capacity plan before provisioning.
+        '';
+      }
       {
         assertion =
-          hasSuffix "%" partitions.slotSize
-          || !abImagePresent
+          !abImagePresent
           || !abImage.enable or false
           || abImage.storeSize or partitions.slotSize == partitions.slotSize;
         message = ''
           services.nixtache.deploy-target.ab.partitions.slotSize (${partitions.slotSize})
-          != services.nixtache.ab-image.storeSize (${abImage.storeSize or "?"}). Must match.
-          Note: slotSize as percentage ("10%") skips this check — repart
-          (build-time) needs absolute; provision (runtime) resolves % from
-          disk size. If using %, ensure storeSize is large enough in practice.
+          != services.nixtache.ab-image.storeSize (${abImage.storeSize or "?"}). The
+          absolute sizes must match so the built image and provisioned slots
+          have the same capacity.
         '';
       }
       # autoInit = true requires type = "partition".
@@ -709,5 +866,9 @@ in
     systemd.services.systemd-sysupdate-reboot = mkIf verifyEffective {
       path = [ pkgs.gnupgMinimal ];
     };
-  };
+    })
+    (mkIf (cfg.enable && ab.enable && (partitions.enable || abImageActive)) {
+      environment.systemPackages = [ recoveryScript ];
+    })
+  ];
 }

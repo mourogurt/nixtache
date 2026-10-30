@@ -219,11 +219,10 @@ in
         module is co-imported and enabled, otherwise `"2G"`.
       '';
       description = ''
-        nix-store slot size. Slot A and the reserved slot B are each this big.
-        Accepts absolute sizes ("2G", "512M") or percentages ("10%").
-        Percentages are resolved at runtime by the provision module against
-        the target disk size; repart (build-time) needs absolute — if a
-        percentage is passed, it defaults to "2G" for the image build.
+        Absolute nix-store slot size, such as "2G" or "512M". Slot A and the
+        reserved slot B are each this big, so the layout is deterministic
+        across disks. Must match deploy-target.ab.partitions.slotSize when
+        both modules are enabled.
       '';
     };
 
@@ -300,8 +299,7 @@ in
         (SizeMinBytes = SizeMaxBytes) — the appliance is a minimal image of exactly
         the sum of its partitions (the nixcademy pattern). The A/B nix-store slots
         are ALWAYS fixed-equal regardless (they must hold the same squashfs image).
-        Note: repart SizeMin/Max take only bytes+KMG (no `%`); percentage inputs
-        are resolved at runtime by the provision module instead.
+        repart SizeMin/Max take absolute byte/K/M/G/T/P sizes.
       '';
     };
 
@@ -368,19 +366,30 @@ in
     # the consumer must select in its nixpkgs import. The evaluating machine
     # also needs ca-derivations in system nix.conf: after connecting to a
     # daemon, client-side feature overrides cannot enable it (NixOS/nix#9090).
-    assertions = [{
-      assertion = pkgs.config.contentAddressedByDefault or false;
-      message = ''
-        services.nixtache.ab-image requires a content-addressed evaluation:
-        set `nixpkgs.config.contentAddressedByDefault = true;` on the
-        nixpkgs import for this appliance target, and enable the
-        `ca-derivations` experimental feature in the system nix.conf of
-        every machine that evaluates/builds it. The shipped lower store DB
-        is the closure's registered validity records, which are only
-        content-true for content-addressed paths — see
-        doc/technical_details/lower-store-db.md.
-      '';
-    }];
+    assertions = [
+      {
+        assertion = pkgs.config.contentAddressedByDefault or false;
+        message = ''
+          services.nixtache.ab-image requires a content-addressed evaluation:
+          set `nixpkgs.config.contentAddressedByDefault = true;` on the
+          nixpkgs import for this appliance target, and enable the
+          `ca-derivations` experimental feature in the system nix.conf of
+          every machine that evaluates/builds it. The shipped lower store DB
+          is the closure's registered validity records, which are only
+          content-true for content-addressed paths — see
+          doc/technical_details/lower-store-db.md.
+        '';
+      }
+      {
+        assertion = !hasSuffix "%" cfg.storeSize;
+        message = ''
+          services.nixtache.ab-image.storeSize must be an explicit absolute
+          size such as "2G" or "512M", not "${cfg.storeSize}". Percentages
+          make the partition layout depend on the attached disk; choose an
+          absolute size from the capacity plan before evaluating the image.
+        '';
+      }
+    ];
 
     system.image.id = cfg.imageId;
     system.image.version = cfg.imageVersion;
@@ -466,9 +475,8 @@ in
               # Shrink the split image to its contents; target slot sizes
               # are independently fixed by provisioning.
               Minimize = "on";
-              # Percentages → fallback for build-time (provision resolves at runtime).
-              SizeMinBytes = if (hasSuffix "%" cfg.storeSize) then "2G" else cfg.storeSize;
-              SizeMaxBytes = if (hasSuffix "%" cfg.storeSize) then "2G" else cfg.storeSize;
+              SizeMinBytes = cfg.storeSize;
+              SizeMaxBytes = cfg.storeSize;
               Format = cfg.storeFs; ReadOnly = "yes"; SplitName = "nix-store";
             }
             # Compression keys (systemd >=257): same key names for squashfs and erofs,
@@ -485,8 +493,8 @@ in
         # Must match nix-store partition size (same slotSize).
         empty.repartConfig = {
           Type = "linux-generic"; Label = "_empty"; Minimize = "off";
-          SizeMinBytes = if (hasSuffix "%" cfg.storeSize) then "2G" else cfg.storeSize;
-          SizeMaxBytes = if (hasSuffix "%" cfg.storeSize) then "2G" else cfg.storeSize;
+          SizeMinBytes = cfg.storeSize;
+          SizeMaxBytes = cfg.storeSize;
           SplitName = "-";
         };
         root.repartConfig = mkMerge [

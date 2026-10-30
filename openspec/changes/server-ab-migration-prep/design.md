@@ -206,9 +206,12 @@ examples from maintained docs and suite inventories.
 
 ### D8 — Auto-update acts on completed sysupdate results
 
-Change the A/B poll to `systemctl start --wait systemd-sysupdate.service`
-before reading the journal and setting `installed` or the deferred-reboot
-marker. Keep the idle-gated runner-host path unchanged.
+Change the A/B poll to wait for the version-appropriate sysupdate unit before
+reading the journal and setting `installed` or the deferred-reboot marker:
+`systemd-sysupdate-update.service` on systemd 262 and newer, and
+`systemd-sysupdate.service` on older releases. Select the unit from the
+configured systemd package version and invoke it with `systemctl start --wait`.
+Keep the idle-gated runner-host path unchanged.
 
 For `start < end`, the reboot-window predicate is `now >= start && now < end`;
 for `start >= end`, it is `now >= start || now < end`. Cover the exact start,

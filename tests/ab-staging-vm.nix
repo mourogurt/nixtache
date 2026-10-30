@@ -1,15 +1,15 @@
 # QEMU (runNixOSTest) REAL-RUN test of the A/B staging retain-GC (spec 06 sec. "retain",
 # review sec. 11.1). Complements the pure-eval script-text checks in ab-existing.nix
 # (V1) by actually RUNNING `nixtache-ab-gc` against a populated staging dir and
-# verifying the post-GC state end-to-end — including that the re-signed
-# SHA256SUMS.gpg GPG-verifies against the public keyring (the exact thing the
-# old "leave .gpg stale" bug broke on Verify=yes targets).
+# verifying the post-GC state end-to-end — including that the unit exposes
+# sysupdate_signing_key only through its credentials directory and that the
+# re-signed SHA256SUMS.gpg verifies against the public keyring.
 #
 # Two nodes:
 #   withkey — signingKeyFile set    → GC deletes old version + RE-SIGNS manifest
 #   nokey   — signingKeyFile = null → GC removes the (stale) .gpg
 #
-# Targets EXISTING code (modules/runner/ab.nix GC) → green on a KVM box.
+# Needs KVM.
 { nixpkgs
 , self
 , system ? "x86_64-linux"
@@ -52,6 +52,13 @@ let
     services.nginx.virtualHosts."localhost".enableACME = lib.mkForce false;
     environment.systemPackages = with pkgs; [ gnupg coreutils diffutils ];
 
+    systemd.services.nixtache-ab-gc = lib.mkIf (signingKey != null) {
+      serviceConfig.ExecStartPre = pkgs.writeShellScript "assert-ab-gc-signing-credential" ''
+        set -eu
+        test -s "$CREDENTIALS_DIRECTORY/sysupdate_signing_key"
+      '';
+    };
+
     # Pre-populate the staging dir with 3 versioned artifacts + a signed manifest.
     systemd.services.ab-pre-stage = {
       description = "Pre-populate ab-stage with versioned artifacts + signed manifest";
@@ -89,7 +96,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    # -- withkey: GC deletes v1 + RE-SIGNS the manifest (key readable on host) -
+    # -- withkey: GC deletes v1 + re-signs through its unit credential -------
     withkey.start()
     withkey.wait_for_unit("ab-pre-stage.service")
     # initial state: 3 versions + a signed manifest

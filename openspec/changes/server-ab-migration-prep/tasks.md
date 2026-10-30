@@ -42,14 +42,14 @@ modes and documentation, not another store redesign.
 
 ## 6. Deterministic absolute slot sizing (D7)
 
-- [ ] 6.1 Make `ab-image.storeSize` and `deploy-target.ab.partitions.slotSize` reject percentages at evaluation with an actionable absolute-size message; delete the image-build `2G` percentage fallback, assertion bypass and provision-time percentage resolver while preserving absolute parsing and co-import equality checks — add pure-eval cases for both rejected options, accepted absolute values and mismatched co-imported sizes
-- [ ] 6.2 Remove `ab-ota-e2e-percent`, the S4 percentage leg in `ab-provision-vm`, percent-only branches in `ab-ota-e2e.nix`, and their `flake.nix` / `vmtests.yml` entries — verify no maintained test or matrix entry relies on percentage sizing
-- [ ] 6.3 Update `doc/user_guide/ota.md`, option descriptions and `doc/technical_details/testing.md` for absolute-only sizing, including an actionable upgrade note for existing percentage configurations — verify links and OpenSpec deltas without local CA builds
+- [x] 6.1 Make `ab-image.storeSize` and `deploy-target.ab.partitions.slotSize` reject percentages at evaluation with an actionable absolute-size message; delete the image-build `2G` percentage fallback, assertion bypass and provision-time percentage resolver while preserving absolute parsing and co-import equality checks — add pure-eval cases for both rejected options, accepted absolute values and mismatched co-imported sizes
+- [x] 6.2 Remove `ab-ota-e2e-percent`, the S4 percentage leg in `ab-provision-vm`, percent-only branches in `ab-ota-e2e.nix`, and their `flake.nix` / `vmtests.yml` entries — verify no maintained test or matrix entry relies on percentage sizing
+- [x] 6.3 Update `doc/user_guide/ota.md`, option descriptions and `doc/technical_details/testing.md` for absolute-only sizing, including an actionable upgrade note for existing percentage configurations — verify links and OpenSpec deltas without local CA builds
 
 ## 7. Auto-update, provisioning and rollback correctness (D8, D9)
 
-- [ ] 7.1 Change the A/B auto-update poll to `systemctl start --wait systemd-sysupdate.service` before journal inspection; add positive staged-image coverage for `if-needed` and `window`, plus a no-new-image control — verify in the existing CI auto-update suite, not a local CA rebuild
-- [ ] 7.2 Correct non-cross-midnight reboot-window comparison to `now >= start && now < end`, retain the wrapping predicate for cross-midnight windows, and add cheap scripted cases for before/start/inside/end/after and persistent catch-up with a controlled clock and reboot stub
+- [ ] 7.1 Change the A/B auto-update poll to `systemctl start --wait` on `systemd-sysupdate-update.service` (systemd ≥ 262) or `systemd-sysupdate.service` (older releases) before journal inspection; add positive staged-image coverage for `if-needed` and `window`, plus a no-new-image control — verify in the existing CI auto-update suite, not a local CA rebuild
+- [x] 7.2 Correct non-cross-midnight reboot-window comparison to `now >= start && now < end`, retain the wrapping predicate for cross-midnight windows, and add cheap scripted cases for before/start/inside/end/after and persistent catch-up with a controlled clock and reboot stub
 - [ ] 7.3 Add `slotSize` reduction to the low-space provisioning remedies and assert the message in the provision contract — verify through the CI provision coverage
 - [ ] 7.4 Implement the D9 post-rollback recovery path after checking for a sysupdate-supported complete-instance removal operation; preserve the running slot, refuse ambiguous deletion and never rely on bare vacuum for a boot-failed complete version
 - [ ] 7.5 Extend `ab-ota-rollback-vm` to execute that recovery and install a fixed higher version, asserting the running slot is never overwritten and the fixed image boots; document the tested procedure in `doc/user_guide/ota.md` — run the suite in KVM CI
@@ -59,14 +59,14 @@ modes and documentation, not another store redesign.
 - [ ] 8.1 Split `ab-data-pool-vm` assertions by concern: pool/state persistence independent of upper policy; explicit `reconcile` + retained substituter for the upper-intact leg; a default-wipe control expecting cleared upper content — verify in KVM CI
 - [ ] 8.2 Update `ab-contract` to current `upperOnUpdate = "wipe" | "reconcile"` and lower-DB semantics, remove missing-module/expected-red fallbacks, register it in `checks` and the self-CI report loop — verify its report in CI
 - [ ] 8.3 Remove stale expected-red/known-red narratives from auto-update and overlay test entry points and make them import implemented modules directly — verify static Nix parsing and the relevant CI suites
-- [ ] 8.4 Reconcile all maintained docs with the new sizing, rollback, auto-update and data-pool behavior and with `wipe-on-cutover`; run `openspec validate server-ab-migration-prep --strict` and `openspec validate --specs --strict` without local AB/CA builds
+- [x] 8.4 Reconcile all maintained docs with the new sizing, rollback, auto-update and data-pool behavior and with `wipe-on-cutover`; run `openspec validate server-ab-migration-prep --strict` and `openspec validate --specs --strict` without local AB/CA builds
 - [ ] 8.5 Use the existing full KVM CI matrix in task 5.2 for CA-dependent and VM verification; do not require a second local content-addressed world build
 
 ## 9. Credential-only A/B manifest signing (D11)
 
-- [ ] 9.1 Add conditional `LoadCredential = sysupdate_signing_key:<signingKeyFile>` to host `nixtache-ab-gc.service` and change its GPG import to `$CREDENTIALS_DIRECTORY/sysupdate_signing_key`; keep null-key signature cleanup and fail unit setup when a configured source is unreadable — extend `tests/runner.nix` and `tests/ab-existing.nix` to pin host/container credentials and reject the original path in the GC script
+- [x] 9.1 Add conditional `LoadCredential = sysupdate_signing_key:<signingKeyFile>` to host `nixtache-ab-gc.service` and change its GPG import to `$CREDENTIALS_DIRECTORY/sysupdate_signing_key`; keep null-key signature cleanup and fail unit setup when a configured source is unreadable — extend `tests/runner.nix` and `tests/ab-existing.nix` to pin host/container credentials and reject the original path in the GC script
 - [ ] 9.2 Verify `ab-staging-vm` in KVM CI: retain-GC deletes old versions, regenerates and re-signs `SHA256SUMS`, and the detached signature verifies using only the unit credential; assert the service exposes `sysupdate_signing_key` in its credentials directory
-- [ ] 9.3 Update the `signingKeyFile` option description and `doc/technical_details/module-ci-wiring.md` with the host-GC and CI consumers, linked to `openspec/specs/runner/spec.md` — verify no maintained text describes direct host-path reads as the contract
+- [x] 9.3 Update the `signingKeyFile` option description and `doc/technical_details/module-ci-wiring.md` with the host-GC and CI consumers, linked to `openspec/specs/runner/spec.md` — verify no maintained text describes direct host-path reads as the contract
 
 ## Workflow follow-up
 

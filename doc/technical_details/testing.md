@@ -42,12 +42,13 @@ KVM-capable runner (label `kvm`): manual full/smoke dispatch plus weekly-full
 and nightly-smoke schedules. Full inventory:
 
 `ab-deploy`, `ab-ota-e2e`, `ab-ota-e2e-erofs`, `ab-ota-e2e-none`,
-`ab-ota-e2e-percent`, `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
+`ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
 `overlay-nix-vm`, `overlay-nix-install-vm`, `overlay-nix-ab-swap-vm`,
 `overlay-nix-ota-invalid-vm` (+ `-wipe`/`-reconcile`/`-reconcile-degraded`/
 `-tmpfs` variants), `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
 `ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `ab-ota-migrate-boot-vm` (+
-`-override` variant), `ab-data-pool-vm`, `runner-store-mode-vm`,
+`-override` variant), `ab-data-pool-vm`, `ab-data-pool-wipe-vm`,
+`runner-store-mode-vm`,
 `runner-store-swap-clone-vm`, `runner-store-swap-overlay-vm`,
 `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
 `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.

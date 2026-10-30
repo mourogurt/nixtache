@@ -111,16 +111,14 @@
         ab-deploy = import ./tests/ab-deploy.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
         # ab-ota-e2e: full combat OTA scenario via runNixOSTest (deployer+target VMs,
         # action.yml parsed → sysupdate writes slot B). Base variant = squashfs +
-        # zstd; the erofs / tool-default / percent-slotSize variants below cover
-        # the remaining matrix through the same OTA path (the build-side
-        # compression matrix lives in ab-compression-vm).
+        # zstd; the erofs / tool-default variants below cover the remaining
+        # matrix through the same OTA path (the build-side compression matrix
+        # lives in ab-compression-vm).
         ab-ota-e2e = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
         # A3: erofs store images.
         ab-ota-e2e-erofs = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; variant = { storeFs = "erofs"; storeCompression = "zstd"; }; };
         # A4: no explicit compression (mkfs tool defaults).
         ab-ota-e2e-none = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; variant = { storeCompression = null; }; };
-        # A5: percent slotSize resolved against the target disk (25% of 2 GiB).
-        ab-ota-e2e-percent = import ./tests/ab-ota-e2e.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; variant = { slotSize = "25%"; }; };
         # ab-ota-anywhere-vm: full OTA lifecycle in one test — nixos-anywhere
         # install (kexec → disko A/B → UKI boot from the installed disk) then
         # a signed v2 sysupdate onto slot B. Heaviest suite.
@@ -201,7 +199,8 @@
         # a ZFS pool on a second disk imports and serves state on v1 → v2 →
         # rollback; the overlay-nix upper lives on the pool (OverlayFS-on-ZFS
         # pin). Signed staging.
-        ab-data-pool-vm = import ./tests/ab-data-pool-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
+        ab-data-pool-vm = import ./tests/ab-data-pool-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; upperOnUpdate = "reconcile"; };
+        ab-data-pool-wipe-vm = import ./tests/ab-data-pool-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; upperOnUpdate = null; };
         # runner-store-swap-vm: R4 un-skipped — the runner's relocated store
         # (clone / overlay) on a REAL appliance across a slot swap: container
         # up on both boots, build works pre/post swap, clone additive,

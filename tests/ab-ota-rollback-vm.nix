@@ -47,12 +47,14 @@ let
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
   v2 = otaLib.mkAppliance { version = "2"; extraModules = brokenBootModules; };
   v2Pkg = v2.config.system.build.sysupdate-package;
+  v3 = otaLib.mkAppliance { version = "3"; extraPackages = [ pkgs.hello ]; };
+  v3Pkg = v3.config.system.build.sysupdate-package;
 in
 pkgs.testers.runNixOSTest {
   name = "ab-ota-rollback";
   globalTimeout = 5400;
 
-  nodes.deployer = otaLib.deployerNode { extraDependencies = [ v2Pkg ]; };
+  nodes.deployer = otaLib.deployerNode { extraDependencies = [ v2Pkg v3Pkg ]; };
 
   testScript = ''
     def create_ab_machine(**kwargs):
@@ -114,18 +116,47 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("systemctl is-active --quiet sshd.service")
     print("ROLLBACK OK: exhausted v2 (+0 tries left) skipped, blessed v1 boots")
 
-    # -- Post-rollback OTA state: machine stable, update machinery live -----
-    # OBSERVED (systemd 257-era sysupdate): instance selection is purely
-    # version-driven — after a rollback the RUNNING slot is the oldest, so a
-    # fresh higher-version update would target and overwrite the RUNNING
-    # squashfs (EIO cascade). A straight post-rollback update is therefore
-    # NOT asserted here; the hazard + the operator procedure are documented
-    # in doc/user_guide/ota.md. What IS asserted: the machine is stable on
-    # the rolled-back version and the update machinery still functions.
     appliance.succeed("systemctl is-active --quiet sshd.service")
     appliance.succeed("systemctl is-active --quiet systemd-sysupdate.timer")
     appliance.succeed("systemd-sysupdate list > /dev/null")
     appliance.succeed("sgdisk -p /dev/vda | grep nix-store_1")
-    print("PASS: boot-counting rollback (broken image skipped, blessed v1 boots)")
+    running_hash = appliance.succeed("sha256sum /dev/disk/by-partlabel/nix-store_1")
+
+    appliance.fail("nixtache-ab-recover 1")
+    appliance.succeed(
+      "cp /boot/EFI/Linux/abtest_2+0*.efi "
+      "/boot/EFI/Linux/abtest_2+0-duplicate.efi"
+    )
+    appliance.fail("nixtache-ab-recover 2")
+    appliance.succeed("sgdisk -p /dev/vda | grep nix-store_2")
+    appliance.succeed("rm /boot/EFI/Linux/abtest_2+0-duplicate.efi")
+    print("OK: recovery refuses the running version and ambiguous artifact deletion")
+
+    appliance.succeed("nixtache-ab-recover 2")
+    appliance.fail("sgdisk -p /dev/vda | grep nix-store_2")
+    appliance.succeed("sgdisk -p /dev/vda | grep _empty")
+    appliance.fail("ls /boot/EFI/Linux/abtest_2+*.efi > /dev/null")
+    appliance.fail("ls /boot/EFI/nixtache/abtest_2.lower-db > /dev/null")
+    assert appliance.succeed("sha256sum /dev/disk/by-partlabel/nix-store_1") == running_hash
+    print("RECOVERY OK: failed v2 removed, inactive slot empty, running v1 preserved")
+
+    deployer.succeed(
+      "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+      "cp ${v3Pkg}/* /var/lib/nixtache/ab-stage/abtest/"
+    )
+    appliance.succeed("systemctl start --wait systemd-sysupdate-update.service", timeout=900)
+    appliance.succeed("sgdisk -p /dev/vda | grep nix-store_3")
+    appliance.succeed("test -f /boot/EFI/Linux/abtest_3+*.efi")
+    assert appliance.succeed("sha256sum /dev/disk/by-partlabel/nix-store_1") == running_hash
+    print("OK: fixed v3 installed only into the inactive slot")
+
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target")
+    assert appliance.succeed("cat /etc/image-version").strip() == "3"
+    appliance.succeed("hello")
+    appliance.wait_until_succeeds(
+      "systemctl is-active --quiet boot-complete.target", timeout=300
+    )
+    print("PASS: rollback → explicit recovery → fixed v3 boots and is blessed; running v1 was never overwritten")
   '';
 }

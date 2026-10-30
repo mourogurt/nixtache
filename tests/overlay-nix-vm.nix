@@ -35,7 +35,7 @@ let
         self.nixosModules.deploy-target
         self.nixosModules.ab-image
         # --- overlay-nix module (code under test) -------------------------------
-        (self.nixosModules.overlay-nix or ({ ... }: { }))
+        self.nixosModules.overlay-nix
 
         # --- thin consumer settings -------------------------------------------
         (

@@ -157,9 +157,11 @@ enabled, their absolute sizes MUST match.
 
 ### Requirement: Timer-driven OTA observes completed installs and correct reboot windows
 
-The A/B auto-update poll MUST wait for `systemd-sysupdate.service` to finish
-before deciding whether an image installed. Reboot markers and reboot actions
-MUST be based on that completed result. A non-cross-midnight reboot window is
+The A/B auto-update poll MUST wait for the version-appropriate sysupdate unit
+to finish before deciding whether an image installed:
+`systemd-sysupdate-update.service` on systemd 262 and newer, and
+`systemd-sysupdate.service` on older releases. Reboot markers and reboot
+actions MUST be based on that completed result. A non-cross-midnight reboot window is
 start-inclusive and end-exclusive; a cross-midnight window wraps over midnight,
 including for persistent timer catch-up.
 

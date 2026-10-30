@@ -54,11 +54,7 @@ let
   # nixpkgs registry. `upperDir`/`workDir` come from the caller (persistent
   # root FS vs tmpfs — O5 vs O6).
   mkApplianceNode = { upperDir, workDir }: {
-    imports = [
-      # Empty-module fallback when the module is absent (graceful degradation
-      # instead of an attrset-missing eval crash).
-      (self.nixosModules.overlay-nix or ({ ... }: { }))
-    ];
+    imports = [ self.nixosModules.overlay-nix ];
     # The module re-enables nix with mkOverride 99 (overriding the appliance
     # profile without mkForce) and points the daemon at the local overlay.
     services.nixtache.overlay-nix = {

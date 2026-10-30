@@ -15,6 +15,7 @@ not just docker), and the bot SSH keys via systemd **`LoadCredential`**:
 | `gitHost.hostNames[0]` | `NIXTACHE_GIT_SSH_HOST` | push host for `update-flake.yml` guard/push and first entry of the derived `ssh-setup` host list (mechanics: [workflow-mechanics.md](workflow-mechanics.md)); `GITHUB_SERVER_URL` is HTTP-only — its port is the HTTP port, not SSH |
 | `gitHost` + `extraKnownHosts` | container known_hosts | must cover **every** hostname nix contacts over SSH: workflows derive the `ssh-setup` host list from `NIXTACHE_GIT_SSH_HOST` plus the `ssh://`/`git+ssh://` hosts in the caller's `flake.lock`, and a derived host without a matching known-host key fails verification |
 | `deploy.targets` | `NIXTACHE_DEPLOY_TARGETS` (JSON, secret paths stripped to `hasKey` bools) + `deploy_ssh_<name>[.pub]` LoadCredential | `deploy-target` action → pairs configs and targets by attribute name |
+| `deploy.ab.signingKeyFile` | `sysupdate_signing_key` LoadCredential | `deploy-target` action and host `nixtache-ab-gc.service` import the private key from `$CREDENTIALS_DIRECTORY` when signing/regenerating `SHA256SUMS.gpg` |
 | `enableSandbox` | `HAS_SANDBOX_CAP` (mirrors the option; build steps do not consume it — see [sandboxing.md](sandboxing.md)) | — (build steps use `SANDBOX_OK`) |
 
 Mechanics, file by file:
@@ -28,6 +29,13 @@ Mechanics, file by file:
   option is non-null.
 - `modules/runner/deploy.nix` does the same for per-target deploy keys at
   `/var/secrets/runner/deploy/<name>/id_ed25519[.pub]`.
+- `modules/runner/ab.nix` conditionally adds `sysupdate_signing_key` to every
+  in-container `forgejo-runner-<name>` service and to the host
+  `nixtache-ab-gc.service`. The deploy action and host GC read that credential,
+  never the configured source path. A configured but unreadable source fails
+  unit setup; `signingKeyFile = null` supplies no credential and host GC removes
+  stale detached signatures. See the
+  [runner requirements](../../openspec/specs/runner/spec.md).
 
 ## Transport user vs bot account
 

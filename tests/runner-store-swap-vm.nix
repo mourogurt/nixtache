@@ -107,7 +107,7 @@ pkgs.testers.runNixOSTest {
 
     # Build a trivial derivation through the relocated store's custom daemon
     # socket (in-container). Returns the last output line (the out path).
-    def build_proof():
+    def build_proof(phase):
         builder = crun("readlink -f /bin/sh").strip()
         out = crun(
             "nix --extra-experimental-features nix-command "
@@ -115,11 +115,11 @@ pkgs.testers.runNixOSTest {
             "--store unix:///srv/nix/var/nix/daemon-socket/socket "
             "--option sandbox false --option substitute false "
             "--option build-users-group \"\" "
-            "--expr 'derivation { name = \"runner-swap-proof\"; "
+            "--expr 'derivation { name = \"runner-swap-proof-" + phase + "\"; "
             "system = \"${system}\"; builder = \"" + builder + "\"; "
-            "args = [ \"-c\" \"echo ok > $out\" ]; }' 2>&1"
+            "args = [ \"-c\" \"echo " + phase + " > $out\" ]; }' 2>&1"
         ).strip().splitlines()[-1]
-        assert "runner-swap-proof" in out, f"unexpected build output: {out!r}"
+        assert "runner-swap-proof-" + phase in out, f"unexpected build output: {out!r}"
         return out
 
     deployer.start()
@@ -177,8 +177,9 @@ pkgs.testers.runNixOSTest {
     print("OK: runner container + custom daemon up on the appliance")
 
     # -- A CI build through the relocated store works pre-swap ---------------
+    crun("test ! -e /srv/nix/store/${helloBasename}")
     try:
-        proof_v1 = build_proof()
+        proof_v1 = build_proof("v1")
     except Exception:
         print("DIAG nix-daemon-custom journal:")
         print(crun("journalctl -u nix-daemon-custom -n 60 --no-pager 2>&1 || true"))
@@ -219,10 +220,15 @@ pkgs.testers.runNixOSTest {
         timeout=900
       )
       # The pre-swap build output survived (old paths kept)...
-      proof_out = crun("ls -d /srv/nix/store/*-runner-swap-proof")
+      proof_v1_name = proof_v1.rsplit("/", 1)[-1]
+      assert crun("cat /srv/nix/store/" + proof_v1_name).strip() == "v1"
       # ...and the re-clone pulled the NEW lower's content (hello, baked only
-      # into v2's squashfs) into the clone.
-      crun("ls -d /srv/nix/store/${helloBasename} >/dev/null")
+      # into v2's squashfs) into the clone and registered it in the store DB.
+      crun(
+        "nix --extra-experimental-features nix-command path-info "
+        "--store unix:///srv/nix/var/nix/daemon-socket/socket "
+        "/nix/store/${helloBasename} >/dev/null"
+      )
       print("OK: clone is additive — old build output kept, new lower content arrived")
     '' else ''
       # -- overlay: remount over the new lower, upper intact -----------------
@@ -235,14 +241,22 @@ pkgs.testers.runNixOSTest {
         timeout=600
       )
       # The pre-swap build output (upper, no lower refs) is still visible...
-      crun("ls -d /srv/nix/store/*-runner-swap-proof >/dev/null")
-      # ...and the NEW lower's hello is visible through the merged view.
-      crun("ls -d /srv/nix/store/${helloBasename} >/dev/null")
+      proof_v1_name = proof_v1.rsplit("/", 1)[-1]
+      assert crun("cat /srv/nix/store/" + proof_v1_name).strip() == "v1"
+      # ...and the NEW lower's hello is valid through the merged view.
+      crun(
+        "nix --extra-experimental-features nix-command path-info "
+        "--store unix:///srv/nix/var/nix/daemon-socket/socket "
+        "/nix/store/${helloBasename} >/dev/null"
+      )
       print("OK: overlay coherent post-swap — upper intact, new lower visible")
     ''
   ) + ''
     # -- A CI build works post-swap (both modes) -----------------------------
-    proof_v2 = build_proof()
+    proof_v2 = build_proof("v2")
+    assert proof_v2 != proof_v1
+    proof_v2_name = proof_v2.rsplit("/", 1)[-1]
+    assert crun("cat /srv/nix/store/" + proof_v2_name).strip() == "v2"
     print(f"OK: post-swap build through the relocated store: {proof_v2}")
 
     print("PASS: runner store (${storeMode}) serves CI builds across an OTA swap")
