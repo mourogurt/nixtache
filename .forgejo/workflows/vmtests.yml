@@ -13,11 +13,11 @@
 # only the suite's own verdict (test-driver output when the test ran, or
 # "build never reached the test" + the closing build error); the complete
 # `nix build -L` transcript lands in artifacts/<suite>/full.log and is
-# uploaded on every outcome. Smoke-subset membership is filtered INSIDE the
-# run step (a matrix `include:` merging extra keys spawns never-starting
-# duplicate jobs on this runner — observed as permanently "waiting" jobs
-# holding the whole run open), so every matrix job — skipped ones included —
-# produces a full.log and the upload step can require it.
+# uploaded on every outcome. Smoke and single-suite selection is filtered
+# INSIDE the run step (a matrix `include:` merging extra keys spawns
+# never-starting duplicate jobs on this runner — observed as permanently
+# "waiting" jobs holding the whole run open), so every matrix job — skipped
+# ones included — produces a full.log and the upload step can require it.
 name: vmtests
 
 on:
@@ -31,6 +31,11 @@ on:
         options:
           - full
           - smoke
+      suite:
+        description: "Optional single vmTests suite name; overrides subset"
+        required: false
+        default: ""
+        type: string
   schedule:
     # nightly smoke (03:15 UTC); the full matrix runs weekly (03:30 Sunday)
     - cron: "15 3 * * *"
@@ -113,11 +118,19 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
           SUBSET: ${{ inputs.subset }}
+          REQUESTED_SUITE: ${{ inputs.suite }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           set -uo pipefail
           log="artifacts/$SUITE/full.log"
           mkdir -p "artifacts/$SUITE"
+
+          # Single-suite dispatch overrides subset. Non-matching jobs still
+          # write full.log so the upload step remains meaningful.
+          if [ -n "$REQUESTED_SUITE" ] && [ "$SUITE" != "$REQUESTED_SUITE" ]; then
+            echo "single-suite dispatch ($REQUESTED_SUITE): $SUITE skipped" | tee "$log"
+            exit 0
+          fi
 
           # Smoke-subset filtering: nightly schedule (15 3 * * *) and
           # dispatch(subset=smoke) run only SMOKE_SUITES members; everything

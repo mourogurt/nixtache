@@ -39,7 +39,9 @@ not by `nix flake check`.
 VM suites carry `requiredSystemFeatures = [ "kvm" ]` and run in CI via
 [`.forgejo/workflows/vmtests.yml`](../../.forgejo/workflows/vmtests.yml) on a
 KVM-capable runner (label `kvm`): manual full/smoke dispatch plus weekly-full
-and nightly-smoke schedules. Full inventory:
+and nightly-smoke schedules. A manual dispatch may instead set `suite` to one
+exact suite name from the inventory below; non-matching matrix jobs skip
+without building, and `suite` overrides `subset`. Full inventory:
 
 `ab-deploy`, `ab-ota-e2e`, `ab-ota-e2e-erofs`, `ab-ota-e2e-none`,
 `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
@@ -84,8 +86,8 @@ in [`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spe
   `build never reached the test`, when the build fails before any test
   executes;
 - `Upload suite logs` (`if: always()`) uploads `artifacts/<suite>/` with
-  `if-no-files-found: error` — every job leaves a `full.log`, smoke-skipped
-  ones included (their log states the skip);
+  `if-no-files-found: error` — every job leaves a `full.log`, skipped ones
+  included (their log states the skip);
 - a full-matrix dispatch runs at most `strategy.max-parallel` suites
   concurrently (3): an unbounded dispatch (~30 concurrent KVM suites on one
   runner host) turns unrelated suites into host-level kills — QEMU/build
