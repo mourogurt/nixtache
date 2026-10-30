@@ -182,12 +182,9 @@ in
     nixSettings = mkOption {
       type = types.attrs;
       default = {
-        hashed-mirrors = [ "https://ustc.edu.cn" ];
         substituters = [
+          "https://cache.nixos.kz/"
           "https://cache.nixos.org/"
-          "https://mirror.sjtu.edu.cn/nix-channels/store"
-          "https://mirrors.ustc.edu.cn/nix-channels/store"
-          "https://mirrors.cernet.edu.cn/nix-channels/store"
         ];
         trusted-public-keys = [
           "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
