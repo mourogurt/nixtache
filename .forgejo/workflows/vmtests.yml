@@ -85,9 +85,8 @@ jobs:
           - ab-data-pool-vm
           - ab-data-pool-wipe-vm
           # runner-store-swap-{clone,overlay}-vm: the runner's relocated store
-          # across a real appliance swap — green since the lower-store-db
-          # change (the image ships the lower DB; the container runs in
-          # appliance mode). Both modes in the matrix.
+          # across a real appliance swap, with the image's lower DB and the
+          # container in appliance mode. Both modes in the matrix.
           - runner-store-swap-clone-vm
           - runner-store-swap-overlay-vm
           - auto-update-vm

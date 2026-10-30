@@ -25,8 +25,8 @@ runner-container wiring. The suite exists (`tests/runner-store-swap-vm.nix`,
 wired into `flake.nix` `vmTests`); what remains here is verification of both
 modes and documentation, not another store redesign.
 
-- [ ] 3.1 Finish `tests/runner-store-swap-vm.nix`: `mkAppliance` embedding the runner container closure and a trivial build through the relocated store on v1 — verify the pre-swap build succeeds in CI
-- [ ] 3.2 Clone variant: swap, reboot → assert the re-clone is additive and a post-swap build succeeds (the nspawn bind-path guarantee already landed; the container appliance-mode wiring is `lower-store-db`'s group 3) — verify suite leg green and `nix flake check` passes
+- [x] 3.1 Finish `tests/runner-store-swap-vm.nix`: `mkAppliance` embedding the runner container closure and a trivial build through the relocated store on v1 — verify the pre-swap build succeeds in CI
+- [x] 3.2 Clone variant: swap, reboot → assert the re-clone is additive and a post-swap build succeeds (the nspawn bind-path guarantee already landed; the container appliance-mode wiring is `lower-store-db`'s group 3) — verify suite leg green and `nix flake check` passes
 - [ ] 3.3 Overlay variant: swap, reboot → assert the merged view is coherent and a post-swap build succeeds — verify suite leg green
 - [ ] 3.4 After `lower-store-db` wires the matrix: verify both suite modes report PASS in the full-matrix job log; note the runner-store-across-swaps behaviour under `doc/user_guide/ota.md` route 3 (gated self-update) with a link to `openspec/specs/runner/spec.md`; add the testing.md row — verify docs render
 
@@ -50,13 +50,13 @@ modes and documentation, not another store redesign.
 
 - [ ] 7.1 Change the A/B auto-update poll to `systemctl start --wait` on `systemd-sysupdate-update.service` (systemd ≥ 262) or `systemd-sysupdate.service` (older releases) before journal inspection; add positive staged-image coverage for `if-needed` and `window`, plus a no-new-image control — verify in the existing CI auto-update suite, not a local CA rebuild
 - [x] 7.2 Correct non-cross-midnight reboot-window comparison to `now >= start && now < end`, retain the wrapping predicate for cross-midnight windows, and add cheap scripted cases for before/start/inside/end/after and persistent catch-up with a controlled clock and reboot stub
-- [ ] 7.3 Add `slotSize` reduction to the low-space provisioning remedies and assert the message in the provision contract — verify through the CI provision coverage
-- [ ] 7.4 Implement the D9 post-rollback recovery path after checking for a sysupdate-supported complete-instance removal operation; preserve the running slot, refuse ambiguous deletion and never rely on bare vacuum for a boot-failed complete version
-- [ ] 7.5 Extend `ab-ota-rollback-vm` to execute that recovery and install a fixed higher version, asserting the running slot is never overwritten and the fixed image boots; document the tested procedure in `doc/user_guide/ota.md` — run the suite in KVM CI
+- [x] 7.3 Add `slotSize` reduction to the low-space provisioning remedies and assert the message in the provision contract — verify through the CI provision coverage
+- [x] 7.4 Implement the D9 post-rollback recovery path after checking for a sysupdate-supported complete-instance removal operation; preserve the running slot, refuse ambiguous deletion and never rely on bare vacuum for a boot-failed complete version
+- [x] 7.5 Extend `ab-ota-rollback-vm` to execute that recovery and install a fixed higher version, asserting the running slot is never overwritten and the fixed image boots; document the tested procedure in `doc/user_guide/ota.md` — run the suite in KVM CI
 
 ## 8. Test and documentation reconciliation (D4, D10)
 
-- [ ] 8.1 Split `ab-data-pool-vm` assertions by concern: pool/state persistence independent of upper policy; explicit `reconcile` + retained substituter for the upper-intact leg; a default-wipe control expecting cleared upper content — verify in KVM CI
+- [x] 8.1 Split `ab-data-pool-vm` assertions by concern: pool/state persistence independent of upper policy; explicit `reconcile` + retained substituter for the upper-intact leg; a default-wipe control expecting cleared upper content — verify in KVM CI
 - [x] 8.2 Update `ab-contract` to current `upperOnUpdate = "wipe" | "reconcile"` and lower-DB semantics, remove missing-module/expected-red fallbacks, register it in `checks` and the self-CI report loop — verify its report in CI
 - [ ] 8.3 Remove stale expected-red/known-red narratives from auto-update and overlay test entry points and make them import implemented modules directly — verify static Nix parsing and the relevant CI suites
 - [x] 8.4 Reconcile all maintained docs with the new sizing, rollback, auto-update and data-pool behavior and with `wipe-on-cutover`; run `openspec validate server-ab-migration-prep --strict` and `openspec validate --specs --strict` without local AB/CA builds
@@ -65,7 +65,7 @@ modes and documentation, not another store redesign.
 ## 9. Credential-only A/B manifest signing (D11)
 
 - [x] 9.1 Add conditional `LoadCredential = sysupdate_signing_key:<signingKeyFile>` to host `nixtache-ab-gc.service` and change its GPG import to `$CREDENTIALS_DIRECTORY/sysupdate_signing_key`; keep null-key signature cleanup and fail unit setup when a configured source is unreadable — extend `tests/runner.nix` and `tests/ab-existing.nix` to pin host/container credentials and reject the original path in the GC script
-- [ ] 9.2 Verify `ab-staging-vm` in KVM CI: retain-GC deletes old versions, regenerates and re-signs `SHA256SUMS`, and the detached signature verifies using only the unit credential; assert the service exposes `sysupdate_signing_key` in its credentials directory
+- [x] 9.2 Verify `ab-staging-vm` in KVM CI: retain-GC deletes old versions, regenerates and re-signs `SHA256SUMS`, and the detached signature verifies using only the unit credential; assert the service exposes `sysupdate_signing_key` in its credentials directory
 - [x] 9.3 Update the `signingKeyFile` option description and `doc/technical_details/module-ci-wiring.md` with the host-GC and CI consumers, linked to `openspec/specs/runner/spec.md` — verify no maintained text describes direct host-path reads as the contract
 
 ## Workflow follow-up

@@ -377,7 +377,7 @@ pkgs.testers.runNixOSTest {
     abreboot.wait_for_unit("multi-user.target")
     abreboot.succeed("cp ${v2SysupdatePkg}/* ${stageDir}/")
     ts_before = boot_ts(abreboot)
-    abreboot.succeed("systemctl start nixtache-auto-update.service", timeout=300)
+    abreboot.succeed("systemctl start --no-block nixtache-auto-update.service", timeout=300)
     abreboot.wait_until_succeeds(
       f"test \"$(systemctl show -p ActiveEnterTimestamp multi-user.target)\" != '{ts_before}'",
       timeout=600

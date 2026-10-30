@@ -46,12 +46,17 @@ let
   bindPath = "${cfg.store.path}/nix:/nix";
 
   # Nix-enabled containers use their system daemon for lower validity.
-  # Appliance containers have no system daemon, so they open the read-only
-  # host DB as a local lower; a daemon lower would recursively connect the
-  # custom daemon to its own socket. Writes and GC affect only the upper.
+  # Appliance containers have no system daemon, so they open a dedicated
+  # read-only bind of the host lower. That bind stays outside /nix: the custom
+  # daemon rebinds /nix to the merged relocated store, so a lower rooted at
+  # /nix would read the upper DB instead of the host DB. Writes and GC affect
+  # only the upper.
+  applianceLowerRoot = "/run/nixtache-runner-lower";
+  lowerStore = if hostNixDisabled then applianceLowerRoot else "daemon";
+  lowerStoreDir = if hostNixDisabled then "${applianceLowerRoot}/nix/store" else "/nix/store";
   overlayStoreUrl = "local-overlay://"
     + "?root=${cfg.store.path}"
-    + "&lower-store=${if hostNixDisabled then "local" else "daemon"}"
+    + "&lower-store=${lowerStore}"
     + "&upper-layer=${cfg.store.path}/overlay/upper"
     + "&ignore-gc-delete-failure=true";
 in
@@ -155,9 +160,10 @@ in
     ];
 
     # Nixpkgs binds the host DB only when host Nix is enabled. Appliance
-    # mode adds the bind explicitly for the clone's scratch copy and the
-    # overlay's local lower; container ordering makes both modes' first read
-    # follow the loader's completion.
+    # mode adds the bind explicitly for the clone's scratch copy; overlay
+    # additionally binds the lower store and DB outside /nix so the custom
+    # daemon's relocated-/nix bind cannot shadow them. Container ordering
+    # makes both modes' first read follow the loader's completion.
     systemd.services."container@${cfg.containerName}" =
       mkIf (config.services.nixtache.ab-image.enable or false) {
         after = [ "nixtache-lower-store-db-load.service" ];
@@ -173,6 +179,17 @@ in
       }) // (optionalAttrs hostNixDisabled {
         "host-nix-db" = {
           mountPoint = "/nix/var/nix/db";
+          hostPath = "/nix/var/nix/db";
+          isReadOnly = true;
+        };
+      }) // (optionalAttrs (hostNixDisabled && useOverlay) {
+        "host-nix-lower-store" = {
+          mountPoint = "${applianceLowerRoot}/nix/store";
+          hostPath = "/nix/store";
+          isReadOnly = true;
+        };
+        "host-nix-lower-db" = {
+          mountPoint = "${applianceLowerRoot}/nix/var/nix/db";
           hostPath = "/nix/var/nix/db";
           isReadOnly = true;
         };
@@ -386,7 +403,7 @@ in
                   exit 0
                 fi
                 mount -t overlay overlay \
-                  -o lowerdir=/nix/store \
+                  -o lowerdir=${lowerStoreDir} \
                   -o upperdir=${cfg.store.path}/overlay/upper \
                   -o workdir=${cfg.store.path}/overlay/work \
                   ${cfg.store.path}/nix/store

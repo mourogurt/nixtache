@@ -683,7 +683,8 @@ self.nixosModules.runner
   # (nixpkgs asserts they need nix), the module renders nix.conf itself with
   # the same settings content (CI keeps system-features/substituters/
   # trusted-users), and the nix CLI ships explicitly. Clone seeds standalone
-  # from a scratch copy of the host's (now real) store DB (sec. 11.3).
+  # from a scratch copy of the host's (now real) store DB (sec. 11.3);
+  # overlay uses the separate lower binds asserted below.
   hostApplianceClone = mkHost "/srv" {
     services.nixtache.runner.enableSandbox = false;
     nix.enable = false;
@@ -694,10 +695,9 @@ self.nixosModules.runner
   # --- scenario: appliance HOST (nix.enable=false) — host lower-DB bind ------
   # The pinned nixpkgs' container start binds the host's /nix/var/nix/db into
   # the container only when the host has nix enabled; on a nix-less appliance
-  # that bind is skipped, so the module must provide it itself (read-only) —
-  # the container's store machinery reads the host's lower-store DB (clone
-  # seed enumerates it, overlay's lower-store=local opens it). The host dir is
-  # guaranteed via tmpfiles: nspawn refuses to bind-mount a missing hostPath.
+  # that bind is skipped, so the module must provide it itself (read-only)
+  # for the clone seed to enumerate. The host dir is guaranteed via tmpfiles:
+  # nspawn refuses to bind-mount a missing hostPath.
   hostApplianceHost = mkHost "/srv" {
     services.nixtache.runner.enableSandbox = false;
     nix.enable = false;
@@ -752,10 +752,11 @@ self.nixosModules.runner
   };
 
   # --- scenario: overlay mode lower-store provider — host-dependent ----------
-  # nix-enabled host: the container's system nix-daemon provides the lower
+  # Nix-enabled host: the container's system nix-daemon provides the lower
   # (lower-store=daemon). Appliance host: no system daemon can exist, so the
-  # overlay reads the RO-bound host DB directly (lower-store=local) — the
-  # daemon URL would self-reference and fork-loop otherwise.
+  # overlay reads a dedicated RO bind outside /nix. The custom daemon rebinds
+  # /nix to the merged relocated store; keeping the lower there would make it
+  # read the upper DB and hide validity records introduced by a slot swap.
   hostOverlay = mkHost "/srv" {
     services.nixtache.runner = {
       enableSandbox = false;
@@ -771,12 +772,24 @@ self.nixosModules.runner
   };
   execOverlayOf = host: (servicesOf host)."nix-daemon-custom".serviceConfig.ExecStart or "";
   scenarioOverlayLower = {
-    name = "overlay mode: lower-store=daemon on nix-enabled hosts, lower-store=local on appliance hosts";
+    name = "overlay mode: daemon lower on nix-enabled hosts, dedicated local lower on appliance hosts";
     checks = {
       hostLowerDaemon = lib.hasInfix "lower-store=daemon" (execOverlayOf hostOverlay);
       hostNoLocal = !(lib.hasInfix "lower-store=local" (execOverlayOf hostOverlay));
-      applianceLowerLocal = lib.hasInfix "lower-store=local" (execOverlayOf hostApplianceOverlay);
+      applianceLowerLocal = lib.hasInfix "lower-store=/run/nixtache-runner-lower" (execOverlayOf hostApplianceOverlay);
       applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
+      applianceLowerStoreBind =
+        let binds = bindMountsOf hostApplianceOverlay; in
+        binds ? "host-nix-lower-store"
+        && binds."host-nix-lower-store".hostPath == "/nix/store"
+        && binds."host-nix-lower-store".mountPoint == "/run/nixtache-runner-lower/nix/store"
+        && binds."host-nix-lower-store".isReadOnly;
+      applianceLowerDbBind =
+        let binds = bindMountsOf hostApplianceOverlay; in
+        binds ? "host-nix-lower-db"
+        && binds."host-nix-lower-db".hostPath == "/nix/var/nix/db"
+        && binds."host-nix-lower-db".mountPoint == "/run/nixtache-runner-lower/nix/var/nix/db"
+        && binds."host-nix-lower-db".isReadOnly;
       # Appliance overlay: no storage oneshot (the overlay mount replaces it).
       applianceNoStorage = !(has (servicesOf hostApplianceOverlay) "nix-daemon-storage");
       applianceOverlayMount = has (servicesOf hostApplianceOverlay) "nix-daemon-overlay-mount";
@@ -949,6 +962,7 @@ self.nixosModules.runner
   # (/srv), letting nix reconstruct the /nix suffix. ExecStart is a derivation
   # (writeShellScript), so its content is verified at build time below.
   storageExecSrv = svcSrv."nix-daemon-storage".serviceConfig.ExecStart;
+  overlayMountExecAppliance = (servicesOf hostApplianceOverlay)."nix-daemon-overlay-mount".serviceConfig.ExecStart;
 
   # The REAL deploy-target action script, extracted from action.yml at build
   # time (same technique as the ab-deploy VM suites — the YAML is the single
@@ -967,8 +981,8 @@ pkgs.runCommand "runner-module-test"
     deployMap = contractMapEnv;
     actionYmlFileSrc = actionYmlFile;
     passAsFile = [ "report" "failMsg" "deployMap" ];
-    # Force the script into the store so the builder can inspect its text.
-    deps = [ storageExecSrv ];
+    # Force the scripts into the store so the builder can inspect their text.
+    deps = [ storageExecSrv overlayMountExecAppliance ];
   }
   ''
     # Report to stdout (visible in build logs) and into $out (CI prints $out,
@@ -985,6 +999,11 @@ pkgs.runCommand "runner-module-test"
     if ! grep -q -- '--to /srv ' "${storageExecSrv}"; then
       echo "FAIL: nix-daemon-storage ExecStart does not target the store base (/srv)"
       echo "FAIL: nix-daemon-storage ExecStart does not target the store base (/srv)" >> "$out"
+      exit 1
+    fi
+    if ! grep -q -- 'lowerdir=/run/nixtache-runner-lower/nix/store' "${overlayMountExecAppliance}"; then
+      echo "FAIL: appliance overlay does not mount the dedicated host lower store"
+      echo "FAIL: appliance overlay does not mount the dedicated host lower store" >> "$out"
       exit 1
     fi
 
