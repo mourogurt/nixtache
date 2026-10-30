@@ -62,9 +62,8 @@ let
       script = ''
         set -euo pipefail
         mkdir -p ${stage}
-        # 3 versions (retain=2 will drop v1); each version = .raw + .efi +
-        # .lower-db (the slot's lower store DB dump ships with the update
-        # artifact — the lower-store-db change).
+        # 3 versions (retain=2 drops v1); each complete artifact set contains
+        # .raw, .efi, and the slot's .lower-db dump.
         for v in 1 2 3; do
           head -c $((100*1024)) /dev/urandom > ${stage}/abtest_''${v}.nix-store.raw
           head -c $(( 50*1024)) /dev/urandom > ${stage}/abtest_''${v}.efi

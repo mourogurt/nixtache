@@ -1,16 +1,10 @@
-# Builds the slot's lower store DB dump: the toplevel closure's REGISTERED
-# validity records (`nix-store --load-db`-compatible), straight from
-# `pkgs.closureInfo`. Registered narHashes are content-true because the
-# appliance evaluation is content-addressed (`ca:fixed:r:` binds the path
-# hash to the content hash) — modules/ab-image asserts
-# `nixpkgs.config.contentAddressedByDefault`. One derivation per toplevel,
-# so image rebuilds with an unchanged closure reuse it. Top-level symlink
-# closure paths ship faithfully via the store tree (store-tree.nix) —
-# their records describe the symlink itself, which is what the image
-# carries.
+# Builds the slot closure's `nix-store --load-db` dump from closureInfo's
+# registration. The content-addressed evaluation asserted by ab-image makes
+# those records describe the shipped bytes; the store tree preserves symlink
+# paths so their records match the image. One derivation per toplevel is
+# reused when the closure is unchanged.
 #
-# Used by modules/ab-image (the ESP dump) and by tests/ab-image.nix (the
-# pure-eval pin rebuilds this exact derivation to assert identity).
+# Consumed by the ESP image and by tests/ab-image.nix's identity pin.
 { pkgs, toplevel }:
 
 let

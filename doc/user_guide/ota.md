@@ -57,8 +57,8 @@ deploy-map entry.
 ## The shipped lower store database
 
 Every image carries its slot closure's *store DB dump* — the validity
-records (path, narHash, narSize, references per store path) that make the
-read-only lower store a first-class readable nix store. A boot-time loader
+records (path, narHash, narSize, deriver, references per store path) that
+make the read-only lower store a first-class readable nix store. A boot-time loader
 (`nixtache-lower-store-db-load.service`) seeds `/nix/var/nix/db` from it:
 
 | moment | what happens |
@@ -66,6 +66,7 @@ read-only lower store a first-class readable nix store. A boot-time loader
 | image build | the dump is the closure's registered validity records — content-true because the appliance evaluation is content-addressed ([`lower-store-db.md`](../technical_details/lower-store-db.md)) |
 | update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` (old slot's dump vacuumed with its UKI) |
 | first boot | the DB is missing → the dump loads, the image version is recorded in a marker |
+| same-slot reboot | the DB exists and its version marker matches → no import; the DB remains unchanged |
 | slot swap | the new slot's records merge in **additively**; stale old-slot records are left for `nix-store --verify` to report and the overlay reconcile pass to heal |
 | cutover boot with `upperOnUpdate = "wipe"` | upper-owned state is cleared before the loader, which re-seeds the DB from the running slot's dump during that same boot |
 

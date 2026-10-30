@@ -62,6 +62,7 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 
 | Layer | Audience | Content |
 |---|---|---|
+| [`ROADMAP.md`](ROADMAP.md) | everyone | planned directions, dependency order and research gates — not current feature guarantees |
 | [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, OTA (A/B updates), overlay-nix, auto-update, secrets, docs generation — linking maintained capability specs where they exist |
 | [`doc/technical_details/`](doc/technical_details/) | contributors | architecture, module→CI wiring, sandboxing, workflow mechanics, resources, binary-cache availability, lower-store-db, testing |
 | [`doc/GLOSSARY.md`](doc/GLOSSARY.md) | everyone | the canonical domain vocabulary (terms, not facts) |
@@ -89,6 +90,8 @@ nix build .#vmTests.x86_64-linux.<suite>     # KVM host only
 ```
 
 Contributor notes (style, testing rules, openspec workflow):
-[`AGENTS.md`](AGENTS.md). Repository-infrastructure constraints (git object
-format) are documented in the workspace-level `AGENTS.md` one directory above
-this repo.
+[`AGENTS.md`](AGENTS.md).
+
+## License
+
+nixtache is licensed under the [Apache License 2.0](LICENSE).

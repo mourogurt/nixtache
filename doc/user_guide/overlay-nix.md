@@ -27,12 +27,11 @@ nix.settings.substituters = [ "https://<runner-host>:5000" ];
 nix.settings.trusted-public-keys = [ "<cache public key>" ];
 ```
 
-## The shipped lower DB (world A)
+## The shipped lower DB
 
 Every nixtache appliance image ships its slot closure's store DB dump and
-seeds `/nix/var/nix/db` at boot (see [`ota.md`](ota.md)) — the read-only
-lower store is a first-class readable nix store, which is the
-upstream-intended overlay design ("world A"):
+seeds `/nix/var/nix/db` at boot (see [`ota.md`](ota.md)), making the
+read-only lower store a first-class readable nix store:
 
 - runtime installs are a **delta**: realizing a path whose closure is
   already valid in the lower downloads only the missing paths into the
@@ -86,8 +85,9 @@ The two persistent-upper policies are:
   gc-root and user-profile targets live from their persistent links. Run
   `nix-store --verify` to invalidate records whose files vanished, then
   `nix-store --repair-path` for only the missing closure paths of those roots;
-  present paths are not reinstalled. If the substituter cannot serve a path,
-  the unit reports it and fails without blocking the boot or deleting
+  present paths are not reinstalled. Recorded profile installables are then
+  replayed, so their user-facing tools run again. If the substituter cannot
+  serve a path, the unit reports it and fails without blocking the boot or deleting
   unrelated upper content. The lifecycle marker remains pending, so the pass
   retries on the next boot or after
   `systemctl start nixtache-overlay-lifecycle.service` once the cache is
@@ -120,19 +120,15 @@ a path that is also valid in the lower, the module's configured
 `remount-hook` rebuilds the overlay mount so the merged view stays coherent —
 no unhandled "needs remounting" warnings.
 
-## Operating notes (world A)
+## Content-addressing
 
-- **Delta installs**: a path already valid in the lower is never copied
-  into the upper — only missing paths land there (pinned by the
-  `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` suites).
-- **Stale records across swaps**: DB loading is additive, so old-slot
-  records accumulate until healed — `nix-store --verify` reports them, the
-  `reconcile` pass repairs what the substituter still serves.
-- **Content-addressed world**: the lower closure is built
-  content-addressed, and the module adds `ca-derivations` to the daemon's
-  experimental features so runtime evaluation (e.g. `nix-env`) works over
-  it — see [`ota.md`](ota.md) for the evaluation-side requirement.
+The lower closure is built content-addressed, and the module adds
+`ca-derivations` to the daemon's experimental features so runtime evaluation
+(e.g. `nix-env`) works over it — see [`ota.md`](ota.md) for the
+evaluation-side requirement.
 
 How the OTA route stages and installs updates:
 [`ota.md`](ota.md). Test inventory:
 [`doc/technical_details/testing.md`](../technical_details/testing.md).
+Historical lifecycle design:
+[`wipe-on-cutover`](../../openspec/changes/archive/2026-10-30-wipe-on-cutover/design.md).

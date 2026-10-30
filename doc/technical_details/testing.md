@@ -65,7 +65,9 @@ DB, both closure-copy endpoints enable `ca-derivations`, and nixos-anywhere
 still exercises kexec, disko, closure transfer, `nixos-install` and reboot; the
 `--flake` entrypoint is not covered. A fresh QEMU with OVMF then boots the
 installed UKI before the signed OTA leg. See the
-[`ab-ota` spec](../../openspec/specs/ab-ota/spec.md).
+[`ab-ota` spec](../../openspec/specs/ab-ota/spec.md); the CA-alias rationale
+and transport design are recorded in the
+[`hermeticity change`](../../openspec/changes/archive/2026-10-30-redesign-ab-ota-anywhere-hermeticity/design.md).
 
 #### vmtests job output contract
 

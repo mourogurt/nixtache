@@ -99,8 +99,8 @@ binary-cache NAR retention required for overlay repair.
 _Avoid_: upload, publish step
 
 **UKI**:
-Unified Kernel Image — the signed kernel+initrd+cmdline EFI executable the
-boot loader starts; its filename carries the image version and boot-counting
+Unified Kernel Image — the kernel+initrd+cmdline EFI executable the boot
+loader starts; its filename carries the image version and boot-counting
 tries.
 _Avoid_: boot image (ambiguous with the store image), efi bundle
 
@@ -125,7 +125,8 @@ _Avoid_: base store, ro store
 
 **Upper layer**:
 The writable directory overlay-nix layers over the lower; runtime installs
-land here and its location decides persistence across reboots and updates.
+land here only when their paths are not already valid in the lower. Its
+location and lifecycle policy decide persistence across reboots and updates.
 _Avoid_: writable store, delta dir
 
 **Merged store**:
@@ -134,9 +135,9 @@ every nix command on the appliance sees.
 _Avoid_: combined store, overlay view
 
 **Lower store database**:
-The validity records (path, narHash, narSize, references) shipped inside
-the appliance image and seeded into `/nix/var/nix/db` at boot; what makes
-the read-only lower layer a first-class readable nix store.
+The validity records (path, narHash, narSize, deriver, references) shipped
+inside the appliance image and seeded into `/nix/var/nix/db` at boot; what
+makes the read-only lower layer a first-class readable nix store.
 _Avoid_: store dump (that is the carrier file on the ESP), nix db (any
 db.sqlite qualifies)
 

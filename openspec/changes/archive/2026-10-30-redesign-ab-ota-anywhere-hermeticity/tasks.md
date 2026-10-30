@@ -19,9 +19,9 @@
   - [x] 2.4 Rewrite the suite header's hermeticity paragraph to the new
         contract ("no in-VM nix evaluation/build; wire steps over
         pre-built paths") and drop the stale hash-match rationale
-- [ ] 3. Verify and un-park
+- [x] 3. Verify and un-park
   - [x] 3.1 Full local run green (build + all assertions)
-  - [ ] 3.2 Re-add `ab-ota-anywhere-vm` to the matrix; CI dispatch green
+  - [x] 3.2 Re-add `ab-ota-anywhere-vm` to the matrix; CI dispatch green
 - [x] 4. Documentation (per repo rule)
   - [x] 4.1 Update `doc/technical_details/testing.md`: the suite's
         post-rework mechanics and the matrix parking policy, linking

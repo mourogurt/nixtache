@@ -4,9 +4,7 @@ Reusable, vendor-agnostic NixOS CI/CD flake: the Forgejo Actions runner
 module, reusable workflows + composite actions, direct deploy, auto-update.
 The consumer-facing overview and repository map live in
 [`README.md`](README.md) — this file is for agents and humans **working on**
-the repo. Workspace-level conventions (shared style, cross-repo layout,
-git-infrastructure constraints incl. the sha1 object-format rule) live in
-`../AGENTS.md` and are not repeated here.
+the repo.
 
 ## Repository layout
 
@@ -55,8 +53,7 @@ Working rules (enforced by convention + `openspec/config.yaml`):
    `doc/user_guide/` / `doc/technical_details/` documents, with links to the
    relevant openspec specs (`openspec/specs/`).
 2. **English.** All documentation, specs and change artifacts are written in
-   English (frozen `doc/archive/` content and the not-yet-translated
-   `direct-deploy` / `deploy-user` specs are the only exceptions).
+   English (frozen `doc/archive/` content is the only exception).
 3. **Self-documenting comments** (see below).
 4. **Document current behavior, not development progress.** Maintained docs,
    option descriptions and canonical specs MUST describe present contracts,
@@ -90,16 +87,14 @@ doc/archive = frozen history.
 
 ### Nix style
 
-Follows the workspace conventions (`../AGENTS.md`): 2-space indent,
-kebab-case files, camelCase vars, `{ config, lib, pkgs, ... }:` signature,
-`mkIf`/`mkMerge`/`mkOption` with `defaultText`, `lib.literalMD`/
-`lib.literalExpression` for non-trivial defaults.
+Use 2-space indent, kebab-case files, camelCase vars,
+`{ config, lib, pkgs, ... }:` signature, `mkIf`/`mkMerge`/`mkOption` with
+`defaultText`, `lib.literalMD`/`lib.literalExpression` for non-trivial defaults.
 
 **No changelog comments in code** (Nix, YAML workflows/actions, bash alike).
 Explanations of *why a line was added / removed / changed* go in the commit
 message, never inline; inline comments document non-obvious *logic* only, and
-a deletion stays a deletion. See workspace `AGENTS.md` → "Comments & commit
-messages".
+a deletion stays a deletion.
 
 ### Comments must be self-documenting
 
@@ -175,5 +170,3 @@ live in the [README repository map](README.md#repository-map).
   `modules/secrets.nix` and `doc/user_guide/secrets.md`. Concrete provider
   modules (`ssh`, `forgejo`, `vault` as primary, `systemd`) land
   incrementally, each just appending to `vars`.
-- Translation of the remaining Russian specs (`direct-deploy`, `deploy-user`)
-  to English.

@@ -4,8 +4,7 @@ schema: spec-driven
 context: |
   Working language: English. All documentation (README, doc/**), specs and
   change artifacts are written in English. Frozen historical material under
-  doc/archive/ and the not-yet-translated specs (direct-deploy, deploy-user)
-  are the only exceptions. The canonical requirement corpus is
+  doc/archive/ is the only exception. The canonical requirement corpus is
   openspec/specs/ (capabilities); doc/archive/ holds frozen legacy specs.
   Maintained docs, option descriptions and canonical specs describe current
   behavior, invariants and operational risks, not implementation chronology,

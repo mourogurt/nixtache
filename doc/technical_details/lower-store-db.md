@@ -3,27 +3,29 @@
 How the A/B appliance image ships a nix store database for its read-only
 slot closure, and why the dump's hashes are computed the way they are.
 Functional behaviour (what loads when, lifecycle across swaps) lives in
-[`doc/user_guide/ota.md`](../user_guide/ota.md); canonical requirements in
-[`openspec/specs/ab-ota/spec.md`](../../openspec/specs/ab-ota/spec.md).
-This document is for contributors and owns the internals.
+[`doc/user_guide/ota.md`](../user_guide/ota.md). Canonical requirements:
+[`ab-ota`](../../openspec/specs/ab-ota/spec.md),
+[`overlay-nix`](../../openspec/specs/overlay-nix/spec.md), and
+[`runner`](../../openspec/specs/runner/spec.md). This document is for
+contributors and owns the internals.
 
 ## The problem, stated in full
 
 An appliance slot is a squashFS/erofs image: `/nix/store` is a read-only
 mount populated with the system closure, and the image-based-appliance
 profile disables nix entirely (`nix.enable = false` — appliances are not
-rebuilt in place). Consequently nothing ever creates `/nix/var/nix/db`,
-the database that tells nix which paths exist and what their contents'
-hashes are. Three consumer surfaces break on such a store:
+rebuilt in place). Without the shipped dump and loader described below,
+nothing creates `/nix/var/nix/db`, the database that tells nix which paths
+exist and what their contents' hashes are. Three consumer surfaces break on
+such a store:
 
 - **Runner container, clone mode** (`services.nixtache.runner.store.mode =
   "clone"`): the storage seeder enumerates "all valid paths" through the
   host's database — with no database the enumeration is empty, and the
   clone copies nothing.
-- **Runner container, overlay mode**: the overlay store URL pointed the
-  lower layer at `lower-store=daemon`, but no system nix daemon exists on
-  a nix-less host — the custom daemon's workers connect to their own
-  socket and fork-loop.
+- **Runner container, overlay mode**: a `lower-store=daemon` URL needs a
+  system nix daemon, which a nix-less host does not have — the custom
+  daemon's workers connect to their own socket and fork-loop.
 - **Runtime installs through overlay-nix**: nix must realize the closure of
   whatever is installed — with no validity records for the lower store it
   cannot know that most of that closure already ships in the image, so it
@@ -31,9 +33,15 @@ hashes are. Three consumer surfaces break on such a store:
 
 The image therefore ships the closure's validity records (path, narHash,
 narSize, deriver, references per store path) as a dump on the ESP, and a
-boot-time loader seeds `/nix/var/nix/db` from it. The rest of this
-document covers the internals: how the dump is generated, how the store is
-imaged, and why the runtime workarounds exist.
+boot-time loader seeds `/nix/var/nix/db` from it. On a nix-less appliance
+host the runner container also disables its internal nix module, renders
+`nix.conf` with the preserved settings plus `ca-derivations`, and ships the
+CLI explicitly. Clone mode then enumerates a scratch copy of the real host
+DB; overlay mode opens that DB through `lower-store=local` instead of
+connecting to a nonexistent daemon.
+
+The rest of this document covers the internals: how the dump is generated,
+how the store is imaged, and why the runtime workarounds exist.
 
 ## Dump generation: registered records, content-true via content-addressing
 
@@ -105,6 +113,11 @@ the independent symlink constraint:
   need it in their system configuration. Legacy `nix-instantiate` never
   opens a store connection and is unaffected.
 
+One `nix-serve` cache can serve input-addressed and content-addressed paths
+side by side: their store paths differ, so no conversion is needed. CA paths
+enter the cache from CA-enabled builds; old input-addressed paths disappear
+through ordinary retention as their references age out.
+
 ## Carrier constraints (why the dump lives on the ESP)
 
 - **Not `environment.etc`, not any toplevel-referenced store path**: the
@@ -174,6 +187,9 @@ re-check these constraints when changing Nix versions.
 - **Prebuilt `db.sqlite`**: merging a binary DB at runtime needs
   schema-aware tooling on the appliance; the records format is nix's own
   stable import format and merges additively by construction.
+
+Historical design record:
+[`lower-store-db`](../../openspec/changes/archive/2026-10-30-lower-store-db/design.md).
 
 Test coverage: the dump, loader and store-tree wiring are pinned by
 `checks.<system>.ab-image` (pure-eval; the store tree is also BUILT for

@@ -14,7 +14,7 @@
 #   nixosModules.deploy-target  →  this module
 #   options: services.nixtache.deploy-target.{enable, criticalUnits,
 #             healthCheckTimeout, deployUser}
-#             services.nixtache.deploy-target.ab.*   (ab-image targets, Batch E)
+#             services.nixtache.deploy-target.ab.*   (ab-image targets)
 {
   ...
 }:

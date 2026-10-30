@@ -9,11 +9,11 @@
 
 ## 2. VM pins
 
-- [ ] 2.1 `tests/overlay-nix-ota-invalid-vm.nix` persistent-wipe variant, new pre-swap leg: with the tool realized into the upper, run `systemd-sysupdate` with NOTHING staged → assert the upper is intact and the tool still runs; add the same-version plain-reboot control with the same assertion — verify `overlay-nix-ota-invalid-wipe-vm` in KVM CI
-- [ ] 2.2 Same suite, rejected-update leg (wipe variant): stage a tampered payload (one byte flipped in the .raw) → sysupdate fails mid-install → assert the upper is intact and the machine runs the current slot; vacuum the partial instance before the normal flow resumes — verify the wipe variant passes
-- [ ] 2.3 Rework reconcile trigger pins for the unified mechanism: the pass runs at cutover boot after the lower-DB loader; the degraded variant retries through the unwritten lifecycle marker even after the loader wrote `lower-db-version` — verify `overlay-nix-ota-invalid-reconcile-vm` and `-reconcile-degraded-vm` in KVM CI
-- [ ] 2.4 Add a tmpfs same-version reboot leg: install a path, reboot, and assert stale DB/state is gone, the current lower DB is reseeded despite an unchanged image version, the merged store works, and the path can be realized again — verify `overlay-nix-ota-invalid-tmpfs-vm` in KVM CI
-- [ ] 2.5 Run the current `overlay-nix-ota-invalid` matrix (`-wipe`, `-reconcile`, `-reconcile-degraded`, `-tmpfs`) plus `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` in CI — verify all green without a local CA rebuild
+- [x] 2.1 `tests/overlay-nix-ota-invalid-vm.nix` persistent-wipe variant, new pre-swap leg: with the tool realized into the upper, run `systemd-sysupdate` with NOTHING staged → assert the upper is intact and the tool still runs; add the same-version plain-reboot control with the same assertion — verify `overlay-nix-ota-invalid-wipe-vm` in KVM CI
+- [x] 2.2 Same suite, rejected-update leg (wipe variant): stage a tampered payload (one byte flipped in the .raw) → sysupdate fails mid-install → assert the upper is intact and the machine runs the current slot; vacuum the partial instance before the normal flow resumes — verify the wipe variant passes
+- [x] 2.3 Rework reconcile trigger pins for the unified mechanism: the pass runs at cutover boot after the lower-DB loader; the degraded variant retries through the unwritten lifecycle marker even after the loader wrote `lower-db-version` — verify `overlay-nix-ota-invalid-reconcile-vm` and `-reconcile-degraded-vm` in KVM CI
+- [x] 2.4 Add a tmpfs same-version reboot leg: install a path, reboot, and assert stale DB/state is gone, the current lower DB is reseeded despite an unchanged image version, the merged store works, and the path can be realized again — verify `overlay-nix-ota-invalid-tmpfs-vm` in KVM CI
+- [x] 2.5 Run the current `overlay-nix-ota-invalid` matrix (`-wipe`, `-reconcile`, `-reconcile-degraded`, `-tmpfs`) plus `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` in CI — verify all green without a local CA rebuild
 
 ## 3. Docs + integration
 

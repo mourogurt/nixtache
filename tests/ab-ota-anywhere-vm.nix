@@ -52,9 +52,9 @@
 #     are out-of-band update partitions (nixos-anywhere installs a closure —
 #     it cannot dd raw image slots; the sysupdate slot flow itself is fully
 #     real). Documented in tests/ab-anywhere-install.nix.
-#   - The action's trigger REALLY reboots the installed machine after v2
-#     lands (QEMU resets in place; boot counting may then boot the v2 UKI —
-#     exercised end-to-end; slot-state assertions hold from either slot).
+#   - The action's trigger really reboots after v2 lands. QEMU exits on the
+#     guest reboot and the driver restarts it on the installed disk; the
+#     slot-state assertions hold from either selected slot.
 { nixpkgs
 , self
 , system ? "x86_64-linux"
@@ -552,10 +552,9 @@ pkgs.testers.runNixOSTest {
         # The reboot leg follows the .efi within seconds; a poll iteration
         # can straddle QEMU's exit — the exit itself is expected here.
         pass
-    # The reboot leg restarts the machine (2 > booted 1); with -no-reboot
-    # the reboot manifests as QEMU exiting — wait it out and boot the same
-    # disk again (boot counting may bring up the v2 UKI; the slot-state
-    # assertions below hold from either slot).
+    # With -no-reboot the guest reboot exits QEMU. Wait for that exit and
+    # start the same disk again; the slot-state assertions below hold from
+    # either selected slot.
     installed.wait_for_shutdown()
     installed.start()
     installed.wait_for_unit("multi-user.target")

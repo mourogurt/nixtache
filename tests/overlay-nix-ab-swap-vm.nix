@@ -1,7 +1,5 @@
-# overlay-nix-ab-swap-vm — O9 (TEST-SPECS sec. 5.10): overlay-nix across an A/B
-# slot swap, on the shipped world A (the image carries the lower store DB —
-# the lower-store-db change). A faithful 2-boot run against REAL appliance
-# images.
+# overlay-nix-ab-swap-vm — overlay-nix across an A/B slot swap using the
+# shipped lower-store DB, in a two-boot run against real appliance images.
 #
 #   1. Boot the v1 A/B appliance (real repart image: ESP + nix-store_1 slot +
 #      _empty slot + shared ext4 root) in QEMU via a driver-created machine
@@ -18,8 +16,8 @@
 #   3. The deployer stages the v2 sysupdate-package over HTTP (nginx);
 #      `systemctl start systemd-sysupdate.service` on the appliance writes
 #      slot B (relabelled nix-store_2) + drops abtest_2+*.efi on the ESP.
-#      The module-default lifecycle policy ("wipe") clears the upper and the
-#      store DB state before the slot write.
+#      The default wipe policy runs at the first boot into v2, before the
+#      lower DB is reseeded and the overlay mounts — not during this write.
 #   4. `machine.reboot()` (ctrl-alt-delete via QMP; allow_reboot=True keeps
 #      QEMU's `-no-reboot` off). loader.conf has no `default` pin, so
 #      systemd-boot picks the highest-version entry → abtest_2+*.efi → v2.

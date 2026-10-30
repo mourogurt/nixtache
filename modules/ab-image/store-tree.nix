@@ -2,27 +2,16 @@
 # closure path materialised directly under $out, with top-level symlink
 # paths recreated as symlinks.
 #
-# Why a store tree (faithful imaging): systemd-repart's CopyFiles opens
-# each copy source via chase_and_open, which RESOLVES symlinks — handing it
-# one source per closure path (what nixpkgs' `storePaths` option does via
-# its amend script) ships a symlink path as its target's content,
-# contradicting the path's database record. Such paths are standard
-# (nixpkgs' nix.man/nix.doc outputs are symlinks into nix-manual, and the
-# appliance ships pkgs.nix), so the image must support them, for
-# input-addressed and content-addressed closures alike. Handing repart ONE
-# source — this tree — sidesteps the dereference: only the tree itself is
-# resolved, while every entry inside is copied type-faithfully (systemd
-# copy.c: fd_copy_symlink recreates symlinks). The bytes come straight from
-# the build host's store, matching the records closureInfo registered.
+# Repart resolves every top-level CopyFiles source. Copying closure paths
+# individually therefore turns a symlink path into its target's contents and
+# contradicts its database record. One tree makes repart preserve the types
+# of entries inside it, including symlinks, for input- and content-addressed
+# closures alike; the bytes still match closureInfo's registered records.
 #
-# The closure list is read at BUILD time from closureInfo's store-paths
-# output — no import-from-derivation: this derivation's outPath is known at
-# eval time. `--reflink=auto` degrades to a full copy where the filesystem
-# lacks reflink support; hardlinks cannot be used at all (the build sandbox
-# binds /nix/store read-only and link(2) on a read-only inode is EPERM).
-# Ownership is deliberately not preserved: the image builder applies its
-# own uid/gid when staging the filesystem, and preserving it would fail for
-# the unprivileged build user anyway. Modes and timestamps are preserved.
+# The closure list is read at build time, avoiding IFD. Reflinks fall back to
+# copies; hardlinks are unavailable from the read-only sandbox store.
+# Ownership is left to image staging (and cannot be preserved by an
+# unprivileged builder), while modes and timestamps are preserved.
 { pkgs, toplevel }:
 
 let

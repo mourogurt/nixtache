@@ -10,8 +10,8 @@
 # `store.mode` selects how the relocated store is populated:
 #   - `clone`  (default): `nix copy --all` into `<path>/nix` (full writable copy).
 #   - `overlay`: OverlayFS mount (lower=/nix/store ro, upper=<path>/overlay/upper)
-#               served as a `local-overlay://` store — instant (no copy), proper
-#               GC, but requires Nix >= 2.19 + CAP_SYS_ADMIN on the container.
+#               served as a `local-overlay://` store — no full copy; GC reaps
+#               upper paths only. Requires Nix >= 2.19 + CAP_SYS_ADMIN.
 {
   config,
   lib,
@@ -28,24 +28,16 @@ let
   # relocated-store BindPaths + custom-daemon dependency when customStore.
   enabledInstances = filterAttrs (_: i: i.enable) cfg.instances;
 
-  # Whether the nix store is relocated away from the native /nix. The store
-  # lives at <path>/nix, so it is native iff path == "/". When false we reuse
-  # the container's system nix-daemon and skip the custom daemon + storage
-  # oneshot + BindPaths injection.
+  # A non-/ store.path requires relocation to <path>/nix with a custom
+  # daemon, storage setup, and service binds; / reuses the system daemon.
   customStore = cfg.store.path != "/";
 
-  # Appliance mode: the HOST has nix disabled (an A/B appliance image). The
-  # container then runs with its own nix module disabled (the container's
-  # nix-daemon cannot exist — its socket dir is a read-only host bind), the
-  # module renders nix.conf directly, and the standalone branches below
-  # activate (clone: no nix-daemon.service requirement, scratch-DB copy of the
-  # host's real DB; overlay: lower-store=local).
+  # On a nix-less appliance host the container also disables its Nix module
+  # and renders nix.conf directly. Standalone store branches then use a
+  # scratch-DB local clone or a local lower instead of the system daemon.
   hostNixDisabled = !config.nix.enable;
 
-  # In overlay mode the writable layer is an OverlayFS mount instead of a full
-  # `nix copy --all` clone. Both modes share the same container wiring (bind
-  # mount, BindPaths, custom daemon socket); only the SEEDING mechanism + the
-  # daemon's store URL differ.
+  # Clone and overlay share daemon/bind wiring but differ in storage setup.
   useOverlay = customStore && cfg.store.mode == "overlay";
   useClone = customStore && cfg.store.mode == "clone";
 
@@ -53,18 +45,10 @@ let
   # at /nix. nix itself reconstructs the /nix suffix for `nix copy --to <path>`.
   bindPath = "${cfg.store.path}/nix:/nix";
 
-  # local-overlay store URL the custom daemon serves in overlay mode. The
-  # lower-store provider depends on the host:
-  #   - nix-enabled host: `lower-store=daemon` — the container's system
-  #     nix-daemon (reading the container's ro /nix/store bind) provides the
-  #     lower layer's validity.
-  #   - appliance host (nix disabled): `lower-store=local` — the RO-bound host
-  #     DB is real (the slot image ships it) and opens read-only. `daemon`
-  #     would self-reference here (no system daemon exists inside the
-  #     container): the custom daemon's workers reconnect to their own socket
-  #     and fork-loop.
-  # Writes land in the upper layer; GC reaps upper paths and ignores delete
-  # failures on the read-only lower.
+  # Nix-enabled containers use their system daemon for lower validity.
+  # Appliance containers have no system daemon, so they open the read-only
+  # host DB as a local lower; a daemon lower would recursively connect the
+  # custom daemon to its own socket. Writes and GC affect only the upper.
   overlayStoreUrl = "local-overlay://"
     + "?root=${cfg.store.path}"
     + "&lower-store=${if hostNixDisabled then "local" else "daemon"}"
@@ -160,33 +144,20 @@ in
       }
     ];
 
-    # One container literal: the (optional) srv-nix mount + the custom
-    # nix-daemon/storage machinery. Single use of the dynamic key
-    # `${cfg.containerName}` (Nix forbids two path-assignments sharing a
-    # dynamic prefix inside one literal).
-    #
-    # The host backup dir must exist before the container starts — systemd-
-    # nspawn refuses to bind-mount a missing hostPath. Create it declaratively.
+    # nspawn requires every bind source to exist before container startup.
+    # The lower-DB loader populates the appliance DB directory after boot.
     systemd.tmpfiles.rules = mkMerge [      (mkIf customStore [
         "d ${cfg.store.hostBackup} 0755 root root -"
       ])
-      # The host DB dir must exist before the container starts — systemd-
-      # nspawn refuses to bind-mount a missing hostPath (the host-db bind is
-      # declared below in containers.<name>.bindMounts). Create it
-      # declaratively; the slot's lower-DB loader fills it at boot.
       (mkIf hostNixDisabled [
         "d /nix/var/nix/db 0755 root root -"
       ])
     ];
 
-    # The pinned nixpkgs' container start binds the host's /nix/var/nix/db
-    # into the container ONLY when the host has nix enabled
-    # (nixos-containers.nix: optionalString config.nix.enable …). An
-    # appliance host (nix.enable=false) must provide that bind itself: the
-    # container's store machinery reads the host's lower-store DB — clone
-    # mode's seed enumerates it via a scratch copy, overlay mode's
-    # lower-store=local opens it read-only. Without the bind the seed
-    # copies an empty DB and the clone retries forever.
+    # Nixpkgs binds the host DB only when host Nix is enabled. Appliance
+    # mode adds the bind explicitly for the clone's scratch copy and the
+    # overlay's local lower; container ordering makes both modes' first read
+    # follow the loader's completion.
     systemd.services."container@${cfg.containerName}" =
       mkIf (config.services.nixtache.ab-image.enable or false) {
         after = [ "nixtache-lower-store-db-load.service" ];
@@ -253,12 +224,8 @@ in
             serviceConfig.BindPaths = [ bindPath ];
           };
 
-          # Look on my Works, ye Mighty, and despair!
-          # Custom nix-daemon bound to the relocated store. Only enabled
-          # when the store is relocated (store.path != "/"). In clone mode it
-          # requires `nix-daemon-storage` (the seeder) and serves a plain local
-          # store; in overlay mode it requires `nix-daemon-overlay-mount` and
-          # serves a `local-overlay://` store over the merged OverlayFS view.
+          # The custom daemon uses the clone seeder and a plain local store,
+          # or the overlay mount and a local-overlay store, according to mode.
           nix-daemon-custom = mkIf customStore (
             let
               # Absent when the container disables nix (appliance-style
@@ -379,11 +346,8 @@ in
                   ${lib.getExe' pkgs.coreutils "echo"} "clone seed: scratch DB holds $(${lib.getExe' pkgs.nix "nix"} --extra-experimental-features 'nix-command read-only-local-store' path-info --all --store 'local?root=/&state=/run/nix-clone-state&read-only=true' | ${lib.getExe' pkgs.coreutils "wc"} -l) valid paths"
                 ''}
                 ${lib.getExe' pkgs.coreutils "echo"} "Starting nix copy loop as root..."
-                # tee: progress (and any recurring failure) lands in the unit
-                # journal — a silent multi-minute copy and an infinite retry
-                # loop are indistinguishable without it. The log file stays
-                # for post-mortem. pipefail (set above) keeps the loop
-                # condition on nix's exit code, not tee's.
+                # tee exposes progress and failures in the journal and log;
+                # pipefail makes retry decisions use Nix's status, not tee's.
                 until ${lib.getExe pkgs.nix} ${lib.optionalString (!config.nix.enable) "--extra-experimental-features 'nix-command read-only-local-store'"} copy --no-check-sigs --all ${lib.optionalString (!config.nix.enable) "--from 'local?root=/&state=/run/nix-clone-state&read-only=true'"} --to ${cfg.store.path} 2>&1 | ${lib.getExe' pkgs.coreutils "tee"} /var/log/nix-copy-setup.log; do
                   ${lib.getExe' pkgs.coreutils "echo"} "Copy failed (locked or RO), retrying in 5 seconds..."
                   ${lib.getExe' pkgs.coreutils "sleep"} 5
@@ -400,12 +364,9 @@ in
             wantedBy = [ "multi-user.target" ];
           };
 
-          # OVERLAY MODE: mounts an OverlayFS at <store.path>/nix/store so the
-          # custom daemon can serve a local-overlay store. lower=/nix/store
-          # (the container's read-only bind of the host store), upper=<store
-          # .path>/overlay/upper (writable, persistent), work=<store.path>
-          # /overlay/work (OverlayFS kernel metadata). Replaces nix-daemon-
-          # storage — no `nix copy --all`, instant COW.
+          # Overlay mode mounts <store.path>/nix/store with the read-only
+          # host store as lower and persistent upper/work directories under
+          # <store.path>/overlay, replacing the full clone.
           nix-daemon-overlay-mount = mkIf useOverlay {
             description = "Mount OverlayFS for the relocated nix store (local-overlay-store)";
             wantedBy = [ "multi-user.target" ];

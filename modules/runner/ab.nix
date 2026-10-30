@@ -1,20 +1,10 @@
-# A/B image staging for `method = "ab-image"` targets (Batch E).
+# Central A/B staging for method = "ab-image": versioned artifacts, manifest
+# signing, HTTPS distribution, and retention. Target-side triggering and
+# gating live in modules/deploy-target/ab.nix.
 #
-# Owns the central image staging directory on the runner host + its HTTPS
-# distribution + the GPG signing key for image manifests + a retain-GC. This is
-# the runner-SIDE half of ab-image; the target-SIDE half (gating unit that
-# triggers `systemd-sysupdate` when runners are idle) lives in
-# `modules/deploy-target/ab.nix`.
-#
-# Flow (CI stages centrally, each target atomically swaps its own slot):
-#   CI (container) builds `sysupdate-package` → writes versioned files into the
-#   central staging dir (bind-mounted into the container) → signs SHA256SUMS
-#   with the GPG key → signals the target. Each target's `systemd-sysupdate`
-#   reads the image from this dir (local-self: `file://`; remote: HTTPS via the
-#   nginx location on the cache vhost) and writes its inactive A/B slot.
-#
-# The container NEVER writes a disk slot itself (no block-device access) — it
-# only stages; sysupdate on each target does the atomic slot write + reboot.
+# CI only stages and signs; it never writes a target disk. Each target's
+# sysupdate reads from a plain local path (local-self) or HTTPS (remote),
+# writes the inactive slot, and reboots.
 {
   config,
   lib,
@@ -193,12 +183,9 @@ in
     };
 
     # --- retain GC: trim each <cfg>/ subdir to the last `retain` versions ------
-    # Runs on the host (sees the real staging dir). For each per-config subdir,
-    # keeps the `retain` newest `<id>_<v>.{raw,efi}` tuples (by version) and
-    # removes older ones, then regenerates that subdir's SHA256SUMS from the
-    # survivors + re-signs SHA256SUMS.gpg with the signing key (if provisioned).
-    # Without re-signing, remote targets with Transfer.Verify=yes would reject
-    # the stale .gpg (signed over the pre-GC file list).
+    # Keep the newest `retain` versions of each complete raw/EFI/lower-DB
+    # artifact set, then regenerate and re-sign SHA256SUMS so verification
+    # never uses a signature over the pre-GC file list.
     systemd.services.nixtache-ab-gc = {
       description = "nixtache ab-image staging retain GC (keep N newest versions per config)";
       path = with pkgs; [ coreutils findutils gawk ]

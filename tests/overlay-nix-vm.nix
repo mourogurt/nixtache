@@ -1,6 +1,5 @@
-# QEMU (pexpect) BEHAVIORAL test for the module
-# `services.nixtache.overlay-nix.*` (spec 08 sec. 6): a Nix `local-overlay-store`
-# layered over the read-only squashFS /nix/store of an A/B appliance.
+# QEMU (pexpect) behavioral test for services.nixtache.overlay-nix: a
+# local-overlay-store layered over the A/B appliance's read-only slot store.
 #
 # Boots a REAL A/B appliance image (built with the REAL deploy-target + ab-image
 # + overlay-nix modules) in QEMU and asserts the overlay comes
@@ -10,13 +9,9 @@
 # versioned ESP path, the boot loader seeds /nix/var/nix/db from it, and a
 # lower path resolves `nix path-info` with no manual seeding.
 #
-# Offline constraint: the appliance VM has no internet, so `nix-env -i`/`nix shell`
-# (which fetch from a registry) are NOT exercised here — the read-only+overlay
-# COW mechanism at the filesystem level IS (the user's stated priority). The
-# nix-command tests (O2/O3) are deferred to a networked integration run; see
-# TEST-SPECS.md sec. 5 / review sec. 11.4 (merged mountpoint ambiguity).
-#
-# Needs KVM (requiredSystemFeatures). Covers TEST-SPECS.md sec. 5: O1, O7.
+# This suite pins boot, mount, copy-on-write, and shipped-DB behavior;
+# overlay-nix-install-vm.nix covers full Nix operations hermetically with a
+# local cache and registry. Needs KVM (requiredSystemFeatures).
 { nixpkgs, self, system ? "x86_64-linux"
 , appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
 }:
@@ -26,10 +21,8 @@ let
   pkgs = nixpkgs.legacyPackages.${system};
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
 
-  # Local appliance builder = ab-fixture mkAppliance + the overlay-nix
-  # module + its config. (ab-fixture.nix mkAppliance doesn't take extra modules,
-  # so we replicate its thin consumer layer and add overlay-nix. Do NOT edit
-  # ab-fixture.nix — other tests depend on it unchanged.)
+  # Build a real A/B appliance locally with deploy-target, ab-image, and
+  # overlay-nix for this pexpect suite.
   mkApplianceOverlay =
     { version ? "1"
     , upperDir ? "/var/lib/nix-overlay/upper"
@@ -66,7 +59,7 @@ let
               ab.gating = false;
             };
 
-            # The overlay-nix config (spec 08 sec. 6).
+            # Enable the module under test with the caller's upper location.
             services.nixtache.overlay-nix = {
               enable = true;
               inherit upperDir workDir;
@@ -127,13 +120,9 @@ let
     print("RESULT_UPPER_DIR=" + run("test -d /var/lib/nix-overlay/upper && echo yes || echo no"))
     print("RESULT_WORK_DIR=" + run("test -d /var/lib/nix-overlay/work && echo yes || echo no"))
 
-    # --- The read-only + overlay COW proof (user's priority) -------------------
-    # Detect the overlay's merged mountpoint (spec sec. 6 mountpoint is ambiguous —
-    # review sec. 11.4 — so detect from `mount` rather than assume). Then write a
-    # probe THROUGH the merged view and confirm it lands in the upper dir while
-    # the lower squashFS stays read-only. Single-line: the pexpect serial driver
-    # cannot handle multi-line `\` continuations (the shell hangs waiting for
-    # the rest of the command).
+    # Detect the merged mountpoint instead of duplicating the module's path,
+    # then prove a write lands in the upper while the lower stays read-only.
+    # Single-line: this serial driver cannot handle shell continuations.
     cow = run("merged=$(mount | grep '/var/lib/nix-overlay/upper' | head -1 | awk '{print $3}'); [ -z \"$merged\" ] && merged=/mnt/nix-overlay/nix/store; probe=probe-$$; if touch \"$merged/$probe\" 2>/dev/null; then find /var/lib/nix-overlay/upper -name \"$probe\" >/dev/null 2>&1 && echo COW_OK || echo COW_NOT_IN_UPPER; else echo COW_WRITE_FAILED; fi")
     print("RESULT_COW=" + cow)
 

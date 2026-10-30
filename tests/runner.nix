@@ -487,8 +487,7 @@ self.nixosModules.runner
     };
   };
 
-  # method="ab-image" serialises correctly; the action's ab-image branch is
-  # Batch E — here we only assert the field reaches the env intact.
+  # method="ab-image" reaches the action's deploy-map env JSON intact.
   hostAbImage = mkHost "/srv" {
     services.nixtache.runner.deploy.targets.server = {
       host = "10.13.37.1";
@@ -598,7 +597,7 @@ self.nixosModules.runner
     };
   };
 
-  # --- ab-image staging scenarios (Batch E: services.nixtache.runner.deploy.ab)
+  # --- ab-image staging scenarios (services.nixtache.runner.deploy.ab) ------
   # ab.enable=true wires the central staging store: bind-mount into the
   # container, nginx location on the cache vhost, runner-host/staging envs, the
   # retain-GC timer+service, gnupg in the container, and (when a signing key is

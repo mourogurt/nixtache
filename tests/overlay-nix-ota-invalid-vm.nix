@@ -1,6 +1,5 @@
-# overlay-nix-ota-invalid-vm — overlay-nix across OTA slot swaps on the
-# SHIPPED world A (the appliance image carries the lower store database —
-# see the lower-store-db openspec change).
+# overlay-nix-ota-invalid-vm — overlay-nix across OTA slot swaps with the
+# appliance's shipped lower-store database, loaded at boot.
 #
 # WHAT THIS SUITE PINS. With the slot closure's validity records shipped in
 # the image and loaded at boot, the lower store is a first-class readable
@@ -36,6 +35,8 @@
 #     module default, "wipe").
 #   upperTmpfs — move the upper layer to tmpfs (every reboot clears stale
 #     upper-owned state and reseeds the lower DB, even without a swap).
+#   reconcileDegraded — stop nix-serve before the swap so reconcile fails
+#     safely, then restore it and verify the pending retry heals.
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test
 # LAN; no internet.
@@ -287,13 +288,9 @@ pkgs.testers.runNixOSTest {
         "cd /var/lib/nixtache/ab-stage/abtest && : > SHA256SUMS"
       )
       sign_stage()
-      # --wait: the update unit is Type=simple, so a plain start returns
-      # at fork — without --wait the assertions below would race the
-      # still-running update. The CANONICAL unit name is required here:
-      # `systemd-sysupdate.service` is only an alias, and on the appliance
-      # systemd a `--wait` issued against the alias never returns even
-      # after the canonical unit deactivates (observed: unit finished in
-      # <1s, systemctl hung the full 900s timeout with empty output).
+      # --wait prevents the assertions from racing the Type=simple update.
+      # Use the canonical unit name: --wait against the compatibility alias
+      # does not return when the canonical unit deactivates.
       appliance.succeed(
         "systemctl start --wait systemd-sysupdate-update.service", timeout=900
       )

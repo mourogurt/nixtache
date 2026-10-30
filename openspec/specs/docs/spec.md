@@ -66,8 +66,8 @@ Documentation MUST use three layers: README overview, consumer
 is the canonical requirement corpus, not a doc layer. Every fact MUST have one
 canonical file; other locations link instead of copying. Feature docs MUST
 link relevant specs, archives are historical supplements only, and the README
-map MUST link every module. Workspace-infrastructure constraints MUST NOT be
-duplicated here.
+map MUST link every module. Public documents MUST NOT depend on contributor
+guidance stored outside this repository.
 
 #### Scenario: Reader reaches a detail in two hops
 

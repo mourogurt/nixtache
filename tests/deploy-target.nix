@@ -327,7 +327,7 @@ let
     };
   };
 
-  # --- ab-image scenarios (Batch E: services.nixtache.deploy-target.ab.*) ----
+  # --- ab-image scenarios (services.nixtache.deploy-target.ab.*) ------------
   # ab.enable wires a polkit rule authorizing the deploy user to start the ab
   # units (systemd-sysupdate, its -reboot variant, nixtache-ab-apply). Requires
   # the consumer to have enabled systemd.sysupdate + bootCounting (asserted).

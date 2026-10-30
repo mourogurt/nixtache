@@ -10,7 +10,7 @@ historical stage-by-stage design record:
 [`doc/archive/specs/`](../archive/specs/); the OTA (A/B image) route has its
 own guide: [`ota.md`](ota.md).
 
-## Runner side: the target map
+## Runner side: the deploy map
 
 On the runner host, declare one entry per deployable machine; the attribute
 name MUST equal the consumer's `nixosConfigurations.<name>` (the

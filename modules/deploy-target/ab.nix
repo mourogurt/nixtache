@@ -1,4 +1,4 @@
-# Target-side half of `method = "ab-image"` (Batch E).
+# Target-side runtime support for `method = "ab-image"`.
 #
 # Imported by every ab-image target (on top of the base `deploy-target`
 # module). Two responsibilities:

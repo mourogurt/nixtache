@@ -2,142 +2,142 @@
 
 ## Purpose
 
-Требования к direct-deploy: карта целей → action/workflow → live apply или ab-image/OTA → auto-update. Охватывает dry-activation, rollback, защиту от нехватки дискового пространства и изоляцию ошибок отдельных целей.
+Requirements for direct-deploy: deploy map → action/workflow → live apply or ab-image/OTA → auto-update. Covers dry-activation, rollback, disk-space protection, and isolation of per-target failures.
 
 ## Requirements
 
-### Requirement: Полная сериализация карты целей в env
+### Requirement: Full deploy-map serialization to env
 
-Runner-модуль MUST сериализовать в `NIXTACHE_DEPLOY_TARGETS` поля `{name, enable, host, sshUser, sshPort, method, system, tags, timeout, extraOptions, minFreeBytes, hasKey}`, не раскрывая пути к секретам. Отсутствие ключа в JSON MUST интерпретироваться action'ом как значение по умолчанию, а не как «выключено»: фильтр `enable` срабатывает только при явном `"enable": false`.
+The runner module MUST serialize `{name, enable, host, sshUser, sshPort, method, system, tags, timeout, extraOptions, minFreeBytes, hasKey}` into `NIXTACHE_DEPLOY_TARGETS` without exposing secret paths. A missing JSON key MUST be interpreted by the action as its default, not as disabled: the `enable` filter skips a target only for explicit `"enable": false`.
 
-#### Scenario: Таргет с enable=true деплоится через env, сгенерированный модулем
+#### Scenario: Target with enable=true deploys through module-generated env
 
-- **WHEN** модуль сконфигурирован с `deploy.targets.<name>.enable = true` (дефолт) и заданным `sshPrivateKey`, и action `deploy-target` получает `NIXTACHE_DEPLOY_TARGETS` из `runner.envs` реального модуля
-- **THEN** таргет НЕ скипается на фильтре enable и доходит до probe/activate
+- **WHEN** the module is configured with `deploy.targets.<name>.enable = true` (default) and an `sshPrivateKey`, and the `deploy-target` action receives `NIXTACHE_DEPLOY_TARGETS` from the real module's `runner.envs`
+- **THEN** the target is NOT skipped by the enable filter and proceeds to probe/activate
 
-#### Scenario: Явный enable=false скипается с предупреждением
+#### Scenario: Explicit enable=false is skipped with a warning
 
-- **WHEN** в env JSON для таргета стоит `"enable": false`
-- **THEN** action выводит `skip: <name> enable=false` и продолжает обработку остальных таргетов (CI не падает)
+- **WHEN** the target's env JSON contains `"enable": false`
+- **THEN** the action emits `skip: <name> enable=false` and continues processing other targets (CI does not fail)
 
-#### Scenario: Контрактный тест модуль→action
+#### Scenario: Module→action contract test
 
-- **WHEN** запускается контрактный тест, который вычисляет env через eval реального runner-модуля и прогоняет по нему фильтры action'а (no-entry / no-key / enable=false / probe)
-- **THEN** состав JSON, сгенерированного модулем, удовлетворяет всем ключам, читаемым action'ом (включая `enable` и `extraOptions`), и фильтры ведут себя как в сценариях выше
+- **WHEN** a contract test evaluates env using the real runner module and applies the action's filters to it (no-entry / no-key / enable=false / probe)
+- **THEN** the module-generated JSON includes every key read by the action (including `enable` and `extraOptions`), and the filters behave as in the scenarios above
 
-### Requirement: Tier-1 rollback реактивирует предыдущую конфигурацию
+### Requirement: Tier-1 rollback reactivates the previous configuration
 
-`nixtache-apply.service` при провале probe `criticalUnits` MUST откатывать систему к pre-apply closure: `nix-env --set <prev>` И активация `<prev>/bin/switch-to-configuration switch`. Использование `/run/current-system/bin/switch-to-configuration` для отката недопустимо (после успешного switch он указывает на новый, сломанный closure).
+On a `criticalUnits` probe failure, `nixtache-apply.service` MUST roll the system back to the pre-apply closure: `nix-env --set <prev>` AND activation via `<prev>/bin/switch-to-configuration switch`. Rollback MUST NOT use `/run/current-system/bin/switch-to-configuration`, which points to the new, broken closure after a successful switch.
 
-#### Scenario: Сломавший criticalUnits switch откатывается без ребута
+#### Scenario: A switch that breaks criticalUnits rolls back without rebooting
 
-- **WHEN** apply-юнит применил новую конфигурацию, probe `criticalUnits` не прошёл в окне `healthCheckTimeout`
-- **THEN** живая система возвращается на pre-apply closure (юниты перезапущены из старого closure), apply-юнит завершается с ненулевым кодом, CI-джоба краснеет
+- **WHEN** the apply unit has applied the new configuration and the `criticalUnits` probe fails within `healthCheckTimeout`
+- **THEN** the live system returns to the pre-apply closure (units restart from the old closure), the apply unit exits non-zero, and the CI job fails
 
-### Requirement: Удалённые ab-таргеты перезагружаются после обновления
+### Requirement: Remote A/B targets reboot after an update
 
-Для таргетов, деплоемых по `method = "ab-image"` через SSH (не local-self), action MUST дождаться завершения `systemd-sysupdate.service` (`systemctl start --wait`) и затем запустить `systemd-sysupdate-reboot.service`. Первая unit выполняет только fetch/install, вторая перезагружает машину лишь при уже установленной более новой версии. Для local-self та же последовательность запускается через idle-gated `nixtache-ab-apply`, чтобы не прервать CI-джобу.
+For targets deployed with `method = "ab-image"` over SSH (not local-self), the action MUST wait for `systemd-sysupdate.service` to finish (`systemctl start --wait`) and then start `systemd-sysupdate-reboot.service`. The first unit only fetches and installs; the second reboots only if a newer version is installed. For local-self, idle-gated `nixtache-ab-apply` runs the same sequence to avoid interrupting the CI job.
 
-#### Scenario: Удалённый таргет активирует новый слот
+#### Scenario: Remote target activates the new slot
 
-- **WHEN** CI записал через sysupdate новый образ в неактивный слот удалённого ab-таргета
-- **THEN** таргет перезагружается и грузится в новый слот без ручного вмешательства
+- **WHEN** CI has used sysupdate to write a new image to the inactive slot of a remote A/B target
+- **THEN** the target reboots and boots into the new slot without manual intervention
 
-### Requirement: Дефолтные метки A/B-слотов
+### Requirement: Default A/B slot labels
 
-`ab.partitions.slot_a.label` / `slot_b.label` MUST иметь дефолты `nix-store_1` / `_empty` (спека 08 §4). Созданные provisioning-скриптом GPT-партиции MUST иметь имена, соответствующие регулярному выражению stateless-детекции, даже если потребитель не задал labels явно.
+`ab.partitions.slot_a.label` / `slot_b.label` MUST default to `nix-store_1` / `_empty` (spec 08 §4). GPT partitions created by the provisioning script MUST have names matching the stateless-detection regular expression even when the consumer does not set labels explicitly.
 
-#### Scenario: Provisioning без явных labels идемпотентен
+#### Scenario: Provisioning without explicit labels is idempotent
 
-- **WHEN** потребитель включил `ab.partitions` не задавая `slot_a.label`/`slot_b.label`, и provisioning отработал дважды
-- **THEN** оба прогона находят уже созданные слоты по меткам (второй прогон — no-op), повторных партиций не появляется
+- **WHEN** the consumer enables `ab.partitions` without setting `slot_a.label`/`slot_b.label`, and provisioning runs twice
+- **THEN** both runs locate the slots by label (the second is a no-op), and no duplicate partitions are created
 
-### Requirement: Флаг gating-юнита поглощается только при успехе
+### Requirement: Gating-unit flag is consumed only on success
 
-`nixtache-ab-apply.service` MUST удалять флаг-файл `ab-pending` только после успешного `systemctl start --wait systemd-sysupdate.service`. При падении sysupdate флаг MUST оставаться, чтобы следующее срабатывание path-юнита повторило попытку.
+`nixtache-ab-apply.service` MUST remove the `ab-pending` flag file only after `systemctl start --wait systemd-sysupdate.service` succeeds. If sysupdate fails, the flag MUST remain so the next path-unit trigger retries.
 
-#### Scenario: Неудачный старт sysupdate не теряет сигнал
+#### Scenario: Failed sysupdate start preserves the signal
 
-- **WHEN** gating-юнит не смог выполнить `systemctl start --wait systemd-sysupdate.service` (например, юнит замаскирован или sysupdate завершился ошибкой)
-- **THEN** `ab-pending` сохраняется и попытка повторяется при следующем срабатывании path-триггера
+- **WHEN** the gating unit cannot run `systemctl start --wait systemd-sysupdate.service` (for example, the unit is masked or sysupdate fails)
+- **THEN** `ab-pending` remains and the next path trigger retries
 
-### Requirement: Конфликт размеров слотов останавливает обновления
+### Requirement: Slot-size mismatch stops updates
 
-При `onSizeMismatch = "error"` и несовпадении размеров существующих слотов с конфигурацией, provisioning MUST выводить причину и переводить `systemd-sysupdate.service` в остановленное/замаскированное состояние до ручного разрешения (unmask + повторный provisioning). Тихий `exit 0` недопустим.
+With `onSizeMismatch = "error"` and existing slot sizes that differ from the configuration, provisioning MUST report the reason and stop or mask `systemd-sysupdate.service` until manual resolution (unmask + rerun provisioning). A silent `exit 0` is forbidden.
 
-#### Scenario: Size-mismatch останавливает автообновление
+#### Scenario: Size mismatch stops auto-update
 
-- **WHEN** на диске слоты не того размера, а `onSizeMismatch = "error"`
-- **THEN** provisioning сообщает об ошибоке, `systemd-sysupdate` не выполняет обновления до ручного вмешательства, сервис-юнит provisioning завершается с ошибкой
+- **WHEN** on-disk slots have the wrong size and `onSizeMismatch = "error"`
+- **THEN** provisioning reports the error, `systemd-sysupdate` performs no updates until manual intervention, and the provisioning service unit fails
 
-### Requirement: Per-target таймаут соблюдается
+### Requirement: Per-target timeout is enforced
 
-Action `deploy-target` MUST ограничивать build+copy+активацию каждого таргета значением `timeout` (минуты) из карты; превышение — неудача таргета (джоба краснеет), остальные таргеты продолжают обрабатываться.
+The `deploy-target` action MUST limit each target's build, copy, and activation to the deploy-map `timeout` (minutes). Exceeding it fails that target (the job fails) while other targets continue.
 
-#### Scenario: Зависший таргет не блокирует пайплайн навсегда
+#### Scenario: A hung target does not block the pipeline indefinitely
 
-- **WHEN** активация таргета занимает дольше `timeout` минут
-- **THEN** обработка таргета прерывается по таймауту с ошибкой в логе, пайплайн завершается ненулевым кодом после обработки остальных таргетов
+- **WHEN** target activation takes longer than `timeout` minutes
+- **THEN** target processing times out with an error in the log, and the pipeline exits non-zero after processing the remaining targets
 
-### Requirement: Публичный deploy-ключ доступен джобе
+### Requirement: Public deploy key is available to the job
 
-Если задан `deploy.targets.<name>.sshPublicKey`, модуль MUST монтировать его в контейнер и выставлять как `LoadCredential deploy_ssh_<name>.pub` (аналогично приватному ключу), а не оставлять опцию мёртвой.
+When `deploy.targets.<name>.sshPublicKey` is set, the module MUST mount it into the container and expose it as `LoadCredential deploy_ssh_<name>.pub`, like the private key, rather than leaving the option unused.
 
-#### Scenario: Публичный ключ читается из credentials-директории
+#### Scenario: Public key is readable from the credentials directory
 
-- **WHEN** таргет сконфигурирован с `sshPublicKey` и джоба action'а запущена
-- **THEN** файл `$CREDENTIALS_DIRECTORY/deploy_ssh_<name>.pub` существует и содержит указанный ключ
+- **WHEN** a target is configured with `sshPublicKey` and the action's job runs
+- **THEN** `$CREDENTIALS_DIRECTORY/deploy_ssh_<name>.pub` exists and contains the specified key
 
-### Requirement: Предупреждение о выключенном boot counting
+### Requirement: Warning when boot counting is disabled
 
-На systemd-boot-таргетах приёмный модуль `deploy-target` MUST выдавать eval-предупреждение, когда `criticalUnits` непуст, а `boot.loader.systemd-boot.bootCounting.enable` не включён (Tier-0 без bootCounting не даёт отката generation).
+On systemd-boot targets, the receiving `deploy-target` module MUST emit an evaluation warning when `criticalUnits` is non-empty but `boot.loader.systemd-boot.bootCounting.enable` is not enabled (Tier-0 without bootCounting cannot roll back a generation).
 
-#### Scenario: Конфиг с probe-юнитами без bootCounting предупреждает
+#### Scenario: Configuration with probe units but no bootCounting warns
 
-- **WHEN** systemd-boot-таргет задаёт `criticalUnits = [ ... ]` и не включает bootCounting
-- **THEN** при eval конфигурации выводится предупреждение, связывающее оба факта
+- **WHEN** a systemd-boot target sets `criticalUnits = [ ... ]` without enabling bootCounting
+- **THEN** configuration evaluation emits a warning connecting both facts
 
-### Requirement: Ассерты auto-update для OTA-таргетов
+### Requirement: Auto-update assertions for OTA targets
 
-Модуль `auto-update` MUST ассертировать источник и наличие OTA-окружения: при OTA-пути (`method = "auto"` с ab-таргетом либо явный `method = "ab-image"`) источник MUST быть разрешим через `services.nixtache.ab-image.enable`, `deploy-target.ab.partitions` с заданным `source` или consumer-owned sysupdate transfer с `Source.Path`. При явном `method = "ab-image"` без ab-image, ab-provision и `systemd.sysupdate` eval MUST завершаться с понятным сообщением.
+On an OTA path (`method = "auto"` with an A/B target, or explicit `method = "ab-image"`), `auto-update` MUST require an image source via `services.nixtache.ab-image.enable`, `deploy-target.ab.partitions` with `source`, or a consumer-owned sysupdate transfer with `Source.Path`. Explicit `method = "ab-image"` without ab-image, ab-provision, or `systemd.sysupdate` MUST fail evaluation with a clear error.
 
-#### Scenario: Явный ab-image без OTA-модулей падает на eval
+#### Scenario: Explicit ab-image without OTA modules fails evaluation
 
-- **WHEN** `services.nixtache.auto-update.method = "ab-image"` и на машине нет ни ab-image, ни ab-provision, ни включённого systemd-sysupdate
-- **THEN** eval завершается ошибкой с сообщением о неподходящей цели для OTA-пути
+- **WHEN** `services.nixtache.auto-update.method = "ab-image"` and the machine has neither ab-image, ab-provision, nor enabled systemd-sysupdate
+- **THEN** evaluation fails with a message that the target is unsuitable for the OTA path
 
-#### Scenario: ab-путь без источника образов падает на eval
+#### Scenario: A/B path without an image source fails evaluation
 
-- **WHEN** auto-update выбран ab-путь, но `ab-image.enable` и `ab.partitions.source` не заданы и ни один consumer-owned sysupdate transfer не содержит `Source.Path`
-- **THEN** eval завершается ошибкой с сообщением о неразрешимом источнике образов
+- **WHEN** auto-update selects the A/B path, but neither `ab-image.enable` nor `ab.partitions.source` is set and no consumer-owned sysupdate transfer contains `Source.Path`
+- **THEN** evaluation fails with an unresolved-image-source error
 
-### Requirement: Сериализация deploy-воркфлоу
+### Requirement: Deploy workflow serialization
 
-`deploy.yml` MUST объявлять `concurrency.group`, уникальный для ветки/репозитория вызова, с `cancel-in-progress: false` — параллельные запуски деплоя по одной ветке становятся в очередь, а не конкурируют.
+`deploy.yml` MUST declare a `concurrency.group` unique to the calling branch/repository, with `cancel-in-progress: false`: concurrent deploys of one branch queue instead of competing.
 
-#### Scenario: Параллельные деплои одной ветки не конкурируют
+#### Scenario: Concurrent deploys of one branch do not compete
 
-- **WHEN** два деплой-рана одной ветки активны одновременно
-- **THEN** второй ожидает завершения первого (очередь), ни один не отменяется автоматически
+- **WHEN** two deploy runs for the same branch are active simultaneously
+- **THEN** the second waits for the first (queued), and neither is automatically cancelled
 
-### Requirement: Dry-activate выполняется root-юнитом
+### Requirement: Dry-activate runs as a root unit
 
-Режим `dry-activate` MUST копировать closure, записывать `/var/lib/nixtache/pending-dry` и запускать через polkit root-юнит `nixtache-apply-dry.service`, который выполняет `switch-to-configuration dry-activate` и удаляет pointer — без `nixos-rebuild` и sudo. Профиль системы, `pending-system` и `/run/current-system` MUST NOT изменяться.
+`dry-activate` MUST copy the closure, write `/var/lib/nixtache/pending-dry`, and use polkit to start the root unit `nixtache-apply-dry.service`, which runs `switch-to-configuration dry-activate` and removes the pointer, without `nixos-rebuild` or sudo. The system profile, `pending-system`, and `/run/current-system` MUST NOT change.
 
-#### Scenario: PR-ран показывает дифф и не мутирует цель
+#### Scenario: PR run shows the diff without mutating the target
 
-- **WHEN** action работает в режиме `dry-activate` на таргете
-- **THEN** юнит `nixtache-apply-dry.service` выводит дифф `switch-to-configuration dry-activate`, завершается успехом; системный профиль, `/run/current-system` и `pending-system` не тронуты, `pending-dry` потреблён
+- **WHEN** the action runs in `dry-activate` mode on a target
+- **THEN** `nixtache-apply-dry.service` prints the `switch-to-configuration dry-activate` diff and succeeds; the system profile, `/run/current-system`, and `pending-system` are unchanged, and `pending-dry` is consumed
 
-#### Scenario: Dry-триггер авторизуется polkit start-only
+#### Scenario: Dry trigger has start-only polkit authorization
 
-- **WHEN** deploy-пользователь выполняет `systemctl start nixtache-apply-dry.service`
-- **THEN** polkit авторизует ровно `verb=start` этого юнита (наряду с `nixtache-apply.service`); stop/restart и прочие юниты отвергаются
+- **WHEN** the deploy user runs `systemctl start nixtache-apply-dry.service`
+- **THEN** polkit authorizes exactly `verb=start` for this unit (alongside `nixtache-apply.service`); stop/restart and other units are rejected
 
-#### Scenario: Гейт пропускает dry-триггер
+#### Scenario: Gate allows the dry trigger
 
-- **WHEN** SSH-гейт (`sshGate = "gate"`) получает команду `echo '<storepath>' > /var/lib/nixtache/pending-dry && systemctl start nixtache-apply-dry.service` с валидным store-path
-- **THEN** команда разрешается; та же форма с невалидным путём — отвергается
+- **WHEN** the SSH gate (`sshGate = "gate"`) receives `echo '<storepath>' > /var/lib/nixtache/pending-dry && systemctl start nixtache-apply-dry.service` with a valid store path
+- **THEN** the command is allowed; the same form with an invalid path is rejected
 
 ### Requirement: Pre-copy target disk-space check
 

@@ -1,7 +1,5 @@
-# QEMU (runNixOSTest) CONTRACT for overlay-nix: FULL working nix over a
-# read-only lower store (spec 08 sec. 6). The point of overlay-nix is to restore a
-# normal nix on an A/B appliance (`nix.enable=false`, /nix/store ro squashFS) —
-# not just `nix-store` ops but the everyday nix surface.
+# QEMU (runNixOSTest) contract for overlay-nix: the full everyday Nix
+# surface over a read-only lower store (openspec/specs/overlay-nix).
 #
 # Covers (hermetic — a deployer node runs nix-serve with `hello` and `vim`
 # pre-seeded; a LOCAL nixpkgs path is registered so `nix run/shell/build
@@ -17,12 +15,9 @@
 #   O5  upperDir on the persistent root FS (per-node qcow2 ext4) → vim
 #       installed into the upper layer survives `machine.reboot()`.
 #   O6  upperDir on tmpfs (`/tmp/nix-overlay/upper`) → the upper layer is
-#       wiped by `machine.reboot()` (by design) and the overlay mount comes
-#       back up. NOTE: the spec's "`vim --version` fails" assertion is not
-#       expressible in this harness — the node's lower store is the HOST
-#       store (9p) which contains vim (the test closure references it), so
-#       vim stays visible from the lower. Asserted instead: upper wiped +
-#       merged store functional post-reboot (vim resolves from the lower).
+#       wiped by `machine.reboot()` and the overlay remounts cleanly. The
+#       harness lower is the host store and still contains vim, so the test
+#       asserts upper removal plus a functional merged store after reboot.
 #
 # Reboot mechanics: nodes are started with `allow_reboot=True` (no `-no-reboot`
 # qemu flag) and `machine.reboot()` injects ctrl-alt-delete via the monitor;
@@ -30,10 +25,7 @@
 # default), so /var/lib survives while tmpfs mounts do not. The driver
 # re-connects to the backdoor root shell after the guest comes back.
 #
-# RED until modules/overlay-nix/default.nix lands (option absent → node eval
-# refuses). Needs KVM. Substituters: local deployer only (hermetic); for live
-# CI runs swap `--option substituters https://cache.nixos.org/` until the
-# mirror-fix commit lands.
+# Needs KVM. Substituters: local deployer only (hermetic).
 { nixpkgs, self, system ? "x86_64-linux" }:
 
 let
@@ -67,10 +59,8 @@ let
       # instead of an attrset-missing eval crash).
       (self.nixosModules.overlay-nix or ({ ... }: { }))
     ];
-    # overlay-nix: bring a FULL working nix over the read-only lower via
-    # local-overlay-store. The module re-enables nix (review: mkOverride 900
-    # true, beats the appliance profile's normal-priority nix.enable=false —
-    # NO mkForce) and points the daemon at the local-overlay store.
+    # The module re-enables nix with mkOverride 99 (overriding the appliance
+    # profile without mkForce) and points the daemon at the local overlay.
     services.nixtache.overlay-nix = {
       enable = true;
       inherit upperDir workDir;
@@ -138,8 +128,7 @@ pkgs.testers.runNixOSTest {
     deployer.wait_for_unit("nix-serve.service")
 
     appliance.start(allow_reboot=True)
-    # overlay-nix brings nix back; poll for a WORKING nix (not a specific unit
-    # name — that's the implementing agent's choice).
+    # Poll for working nix rather than a specific unit name.
     appliance.wait_until_succeeds("nix --version")
 
     # -- O2: nix-store --realize hello from the cache → upper layer, runs -----
@@ -179,8 +168,8 @@ pkgs.testers.runNixOSTest {
     assert "${helloBasename}" in pi, "O8 FAIL: upper path (hello) not listed"
     print("O8 OK: path-info sees lower closure + upper path")
 
-    # -- O4: profile install → profile remove → GC deletes the upper-only
-    #        path, NEVER the lower (spec sec. 5.5) -------------------------------
+    # -- O4: profile install → remove → GC deletes only the upper path;
+    #        the lower stays intact (canonical GC coherence requirement).
     appliance.succeed("nix profile install nixpkgs#hello", timeout=300)
     out = appliance.succeed("/root/.nix-profile/bin/hello")
     assert "Hello, world" in out, f"O4 FAIL: profile-installed hello did not run ({out!r})"
@@ -234,16 +223,12 @@ pkgs.testers.runNixOSTest {
     applianceTmpfs.wait_until_succeeds(
       "systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=180
     )
-    # The spec asserts `vim --version` FAILS after the reboot — true on a real
-    # appliance (the squashFS lower lacks vim, so a wiped upper removes it).
-    # In this harness the lower is the HOST store (9p), which contains vim
-    # (the test closure references it), so vim stays runnable from the lower.
-    # The faithful assertions here: the tmpfs upper IS wiped ...
+    # The harness lower is the host store and still contains vim. Assert the
+    # upper copy disappears, then prove the merged store serves vim from the
+    # lower after the clean remount.
     applianceTmpfs.fail("test -d /tmp/nix-overlay/upper/${vimBasename}")
-    # ... and the remounted overlay is functional — vim now resolves from the
-    # LOWER layer through the merged view.
     out = applianceTmpfs.succeed("${pkgs.vim.outPath}/bin/vim --version")
     assert "VIM" in out, f"O6 FAIL: merged store broken after reboot ({out!r})"
-    print("O6 OK: tmpfs upper wiped on reboot (vim gone), overlay mount active")
+    print("O6 OK: tmpfs upper copy wiped on reboot, merged store functional")
   '';
 }

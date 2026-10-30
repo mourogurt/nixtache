@@ -1,37 +1,10 @@
-# nixosModules.overlay-nix — writable nix store overlay for A/B appliances.
+# nixosModules.overlay-nix — overmount an A/B appliance's read-only slot
+# store with a writable upper and configure the system daemon to serve Nix's
+# local-overlay-store. Writes and GC affect only the upper; the lower image
+# stays untouched. Requires Nix >= 2.19.
 #
-# An A/B appliance mounts `/nix/store` from a read-only squashFS/erofs partition
-# (slot A or B). That makes the store immutable — `nix shell`, `nix-env -i`,
-# `nix build` all fail with "read-only store". This module layers a writable
-# OverlayFS on top via Nix's experimental `local-overlay-store` store type,
-# giving ad-hoc nix commands a writable upper layer while the lower (squashFS)
-# stays untouched.
-#
-# Doc: https://nix.dev/manual/nix/2.35/store/types/experimental-local-overlay-store.html
 # Store URL: local-overlay://?lower-store=<L>&upper-layer=<U>
-# Experimental feature: `local-overlay-store` (landed in Nix 2.19, not 2.35 —
-# the /2.35/ doc URL is misleading; the feature is stable in the manual since 2.22).
-#
-# What the module does when `enable = true`:
-#   1. Re-enables nix on appliances (`nix.enable = mkOverride 900 true` — the
-#      image-based-appliance profile forces `nix.enable = false` at normal
-#      priority; 900 beats it WITHOUT mkForce, so a consumer can still force-off).
-#   2. tmpfiles: create `upperDir` + `workDir` (the writable layer + OverlayFS
-#      workdir).
-#   3. `nix-daemon-overlay-mount.service`: mount OverlayFS AT `/nix/store` —
-#      lowerdir = `/nix/store` (ro squashFS), upperdir = `upperDir`, workdir =
-#      `workDir`. The merged view IS `/nix/store` (default root for the
-#      local-overlay store). Runs before `nix-daemon` so the daemon always sees
-#      the merged view.
-#   4. `nix.settings.store = local-overlay://...` — the SYSTEM nix-daemon serves
-#      the overlay store (not a side daemon). Every nix command (`nix run`,
-#      `nix shell`, `nix build`, `nix-store --realize`, `nix-collect-garbage`)
-#      talks to the daemon via the standard socket and gets the layered store.
-#   5. `ignore-gc-delete-failure=true` — GC deletes upper-layer paths; lower
-#      (squashFS) delete failures are ignored as warnings (lower is read-only).
-#
-# Assert: requires Nix >= 2.19 (the experimental feature is absent in earlier
-# versions — `nix-daemon` would reject the store URL).
+# Doc: https://nix.dev/manual/nix/2.35/store/types/experimental-local-overlay-store.html
 { config, lib, pkgs, ... }:
 
 with lib;
@@ -39,22 +12,12 @@ with lib;
 let
   cfg = config.services.nixtache.overlay-nix;
 
-  # local-overlay store URL served by the SYSTEM nix-daemon. No `root=`
-  # parameter → defaults to `/` (merged store at `/nix/store`, matching the
-  # OverlayFS mount point). `lower-store=local` — the DEFAULT local store (root
-  # `/`, store dir `/nix/store`) provides the read-only squashFS lower layer.
-  # NOT `daemon` (the daemon can't be its own lower store — circular reference).
-  # NOT a path like `/nix/store` (resolves its store dir to `/nix/store/nix/store`).
-  # `upper-layer` is where writes land; `ignore-gc-delete-failure=true` lets GC
-  # reap upper paths while treating lower delete failures as warnings.
-  # `remount-hook` is a STORE-level setting (URL parameter, not nix.conf):
-  # GC's dedup path deletes upper copies of lower-valid paths directly
-  # through the upperdir, and the hook rebuilds the overlay mount afterwards
-  # so the kernel's merged view stays coherent (stale-dentry protection).
-  # `check-mount=false`: the overlay is an OVERMOUNT on /nix/store (lowerdir ==
-  # mountpoint, the squashFS). The default check-mount=true reads /proc/mounts
-  # and expects lowerdir to be a DIFFERENT path than the mountpoint — an
-  # overmount fails that check even though the kernel handles it correctly.
+  # No root= selects /, making /nix/store the merged store. lower-store=local
+  # avoids a circular daemon lower and does not reinterpret /nix/store as a
+  # store root. Writes go to upper-layer; GC ignores lower deletion failures.
+  # remount-hook is a store URL parameter, not nix.conf (see below).
+  # check-mount=false is required because lowerdir and mountpoint are
+  # intentionally the same overmounted path.
   overlayStoreUrl = "local-overlay://"
     + "?lower-store=local"
     + "&upper-layer=${cfg.upperDir}"
@@ -213,9 +176,9 @@ in
         never modified — writes go to `upperDir`; GC reaps upper paths and
         ignores lower delete failures (`ignore-gc-delete-failure=true`).
 
-        Re-enables nix on appliances (`nix.enable = mkOverride 900 true`, beating
-        the appliance profile's `nix.enable = false` without mkForce). Requires
-        Nix >= 2.19 (the `local-overlay-store` experimental feature).
+        Re-enables nix on appliances (`nix.enable = mkOverride 99 true`,
+        overriding the appliance profile without mkForce). Requires Nix >=
+        2.19 (the `local-overlay-store` experimental feature).
       '';
     };
 
@@ -306,9 +269,8 @@ in
     # socket and gets the layered view.
     nix.settings.store = overlayStoreUrl;
     nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" "ca-derivations" ];
-    # A/B appliances are typically offline — the global flake registry download
-    # would fail and block every `nix run/shell/build`. Disable it; local
-    # registry entries (nix.registry.*) still work.
+    # Avoid downloading the global flake registry on typically offline
+    # appliances; local nix.registry entries remain available.
     nix.settings.flake-registry = "";
 
     # Create upper + work directories.
@@ -317,11 +279,8 @@ in
       "d ${cfg.workDir} 0755 root root -"
     ];
 
-    # -- OverlayFS mount service --------------------------------------------
-    # Mounts the merged view AT `/nix/store` (overmounting the read-only
-    # squashFS). The kernel allows stacking: the squashFS stays mounted
-    # underneath, the OverlayFS merges it with the writable upper layer.
-    # Runs before nix-daemon so the daemon always sees the merged view.
+    # Stack the writable overlay on the already-mounted read-only slot store
+    # before the daemon starts serving requests.
     systemd.services.nix-daemon-overlay-mount = {
       description = "Mount OverlayFS for the nix local-overlay-store";
       wantedBy = [ "multi-user.target" ];
@@ -404,6 +363,8 @@ in
     };
     }
 
+    # Wipe runs before DB reseeding and mounting; reconcile runs after both
+    # because it verifies and repairs through the merged store.
     (mkIf (cfg.upperOnUpdate == "wipe") {
     systemd.services.nixtache-overlay-lifecycle = {
       after = [ "local-fs.target" "zfs-mount.service" "nixtache-overlay-tmpfs-reset.service" ];

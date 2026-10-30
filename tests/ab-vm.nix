@@ -1,4 +1,4 @@
-# A/B image-update VM integration tests (Batch E) — uses REAL nixtache modules.
+# A/B image-update VM integration tests using the real nixtache modules.
 #
 # The `target` imports BOTH real nixtache modules:
 #   - self.nixosModules.deploy-target  → runtime: polkit on systemd-sysupdate /

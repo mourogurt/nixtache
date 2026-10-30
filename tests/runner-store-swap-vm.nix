@@ -1,6 +1,5 @@
-# runner-store-swap-vm — R4 (formerly skipped in ab-runner-compat-vm): the
-# runner's relocated store across a REAL appliance slot swap, on a real
-# mkAppliance image with the runner container baked in.
+# runner-store-swap-vm — the runner's relocated store across a real
+# appliance slot swap, on a real mkAppliance image with the container baked in.
 #
 # Runs the shipped world: the appliance image carries the lower store DB
 # (ab-image; loaded at boot), so the clone seed enumerates the real host DB

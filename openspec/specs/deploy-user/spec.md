@@ -2,80 +2,80 @@
 
 ## Purpose
 
-Провижининг deploy-пользователя на целевой машине (приёмный модуль `deploy-target`): выделенная системная учётная запись только для SSH-активации, невидимая в графических экранах входа и не расширяющая привилегии.
+Provisioning of the deploy user on the target machine (receiving `deploy-target` module): a dedicated system account used only for SSH activation, hidden from graphical login screens and granted no additional privileges.
 
 ## Requirements
 
-### Requirement: Deploy-пользователь — системная учётная запись
+### Requirement: Deploy user is a system account
 
-При `deployUser.autoProvision = true` модуль MUST создавать пользователя как **системного**: `isSystemUser = true`, uid из системного диапазона (< 1000), без `isNormalUser`, без создания домашней директории в `/home`. Пользователь MUST NOT отображаться в графических экранах входа (SDDM/Plasma и т.п.), оставаясь пригодным для SSH-входа по ключу и запуска команд активации (`nix copy`, запись pointer, `systemctl start` по polkit).
+With `deployUser.autoProvision = true`, the module MUST create the user as a **system account**: `isSystemUser = true`, a system-range uid (< 1000), no `isNormalUser`, and no home directory in `/home`. The user MUST NOT appear in graphical login screens (SDDM/Plasma, etc.) while retaining key-based SSH login and activation commands (`nix copy`, pointer writes, polkit-authorized `systemctl start`).
 
-#### Scenario: Deploy-пользователь не виден в SDDM
+#### Scenario: Deploy user is not visible in SDDM
 
-- **WHEN** на таргете включён SDDM (Plasma) и модуль провижинит deploy-пользователя
-- **THEN** учётная запись отсутствует в списке пользователей экрана входа (системный uid, не normal user)
+- **WHEN** SDDM (Plasma) is enabled on the target and the module provisions the deploy user
+- **THEN** the account is absent from the login-screen user list (system uid, not a normal user)
 
-#### Scenario: SSH-активация работает с системной учётной записью
+#### Scenario: SSH activation works with a system account
 
-- **WHEN** deployer подключается к таргету по SSH ключом deploy-пользователя
-- **THEN** вход выполняется, а команды `nix copy`, записи pointer и `systemctl start nixtache-apply.service` (polkit) доступны
+- **WHEN** the deployer connects to the target by SSH using the deploy user's key
+- **THEN** login succeeds and `nix copy`, pointer writes, and `systemctl start nixtache-apply.service` (polkit) are available
 
-#### Scenario: Конфигурация с deploy-user не проходит как normal user
+#### Scenario: Configuration with deploy-user is not a normal user
 
-- **WHEN** выполняется eval конфигурации таргета с `autoProvision = true`
-- **THEN** `users.users.<name>.isNormalUser` не установлен (false), `isSystemUser = true`, uid выдан из системного диапазона
+- **WHEN** the target configuration is evaluated with `autoProvision = true`
+- **THEN** `users.users.<name>.isNormalUser` is unset (false), `isSystemUser = true`, and the uid is allocated from the system range
 
-### Requirement: Минимальные привилегии deploy-пользователя
+### Requirement: Minimal deploy-user privileges
 
-Deploy-пользователь MUST быть ограничен SSH-входом по ключу, доступом к nix-daemon, записью pointer через `nixtache-deploy` и start-only polkit для apply/dry (+ A/B-триггеры при ab). Он MUST NOT входить в `wheel` или иметь sudo/doas/run0. Безусловное членство в `trusted-users` необходимо для serve-write.
+The deploy user MUST be limited to key-based SSH login, nix-daemon access, pointer writes via `nixtache-deploy`, and start-only polkit for apply/dry (plus A/B triggers for A/B). The user MUST NOT belong to `wheel` or have sudo/doas/run0. Unconditional `trusted-users` membership is required for serve-write.
 
-#### Scenario: Провижиненный пользователь не привилегирован
+#### Scenario: Provisioned user is unprivileged
 
-- **WHEN** модуль провижинит deploy-пользователя с дефолтами
-- **THEN** пользователь состоит только в группе `nixtache-deploy` (+ безусловный trusted-users для nix-daemon), отсутствует в `wheel`, не имеет sudo/doas/run0
+- **WHEN** the module provisions the deploy user with defaults
+- **THEN** the user belongs only to the `nixtache-deploy` group (plus unconditional trusted-users for nix-daemon), is absent from `wheel`, and has no sudo/doas/run0
 
-### Requirement: Ручное управление пользователем ассертится
+### Requirement: Manually managed user is asserted
 
-При `deployUser.autoProvision = false` модуль MUST ассертить существование `users.users.<name>` (eval-ошибка с понятным сообщением при отсутствии) и всё равно добавлять пользователя в группу `nixtache-deploy` и генерировать polkit-правило под его имя. Потребитель, провижинящий пользователя вручную, SHOULD сам создавать его системным (uid < 1000); модуль MUST выдавать предупреждение, если ручной пользователь оказался normal user (видимым в DM).
+With `deployUser.autoProvision = false`, the module MUST assert that `users.users.<name>` exists (a clear evaluation error otherwise), while still adding the user to `nixtache-deploy` and generating the polkit rule for that name. A consumer provisioning the user manually SHOULD make it a system account (uid < 1000); the module MUST warn if the manual user is a normal user (visible in the DM).
 
-#### Scenario: Отсутствующий ручной пользователь падает на eval
+#### Scenario: Missing manual user fails evaluation
 
-- **WHEN** `autoProvision = false` и `users.users.<name>` не объявлен
-- **THEN** eval завершается ошибкой, указывающей имя отсутствующего deploy-пользователя
+- **WHEN** `autoProvision = false` and `users.users.<name>` is not declared
+- **THEN** evaluation fails with an error naming the missing deploy user
 
-#### Scenario: Ручной normal user предупреждает
+#### Scenario: Manual normal user warns
 
-- **WHEN** `autoProvision = false`, пользователь существует, но `isNormalUser = true`
-- **THEN** eval выводит предупреждение о видимости учётной записи в экранах входа
+- **WHEN** `autoProvision = false`, the user exists, but `isNormalUser = true`
+- **THEN** evaluation warns that the account is visible in login screens
 
-### Requirement: SSH-сессия deploy-ключа ограничена гейтом
+### Requirement: Deploy-key SSH session is gated
 
-При `autoProvision = true` модуль MUST ограничивать deploy-ключ префиксом `restrict,command=<gate>`. Gate MUST принимать только точные валидированные команды протокола из сценариев, включая serve без shell-chaining и pointer-формы с проверкой store-path. Произвольные команды и неутверждённые chaining/redirection, pty/X11/agent/port-forwarding MUST отвергаться с понятным сообщением. Опция `restrict`-only MUST отключать gate для дрейфа протокола.
+With `autoProvision = true`, the module MUST restrict the deploy key with the `restrict,command=<gate>` prefix. The gate MUST accept only the exact validated protocol commands in the scenarios, including serve without shell chaining and pointer forms with store-path validation. Arbitrary commands and unapproved chaining/redirection, pty/X11/agent/port-forwarding MUST be rejected with a clear message. The `restrict`-only option MUST disable the gate for protocol drift.
 
-#### Scenario: Port forwarding запрещён
+#### Scenario: Port forwarding is forbidden
 
-- **WHEN** держатель ключа открывает SSH-соединение с `-L`/`-R`/`-D` (туннелирование)
-- **THEN** соединение отвергается опцией `restrict` — туннель не устанавливается
+- **WHEN** the key holder opens an SSH connection with `-L`/`-R`/`-D` (tunneling)
+- **THEN** the `restrict` option rejects the connection and no tunnel is established
 
-#### Scenario: Произвольная команда отвергается гейтом
+#### Scenario: Arbitrary command is rejected by the gate
 
-- **WHEN** держатель ключа пытается выполнить команду, не входящую в рабочий протокол деплоя (например, запуск shell или чтение произвольных файлов)
-- **THEN** gate завершается с отказом и сообщением о разрешённых формах команд; на цели не выполняется ничего
+- **WHEN** the key holder attempts a command outside the deploy protocol (for example, launching a shell or reading arbitrary files)
+- **THEN** the gate rejects it with a message listing allowed command forms; nothing executes on the target
 
-#### Scenario: Рабочий протокол деплоя проходит без изменений
+#### Scenario: Deploy protocol passes unchanged
 
-- **WHEN** action выполняет probe, `nix copy`, apply/dry-триггеры, remote A/B-команду `systemctl start --wait systemd-sysupdate.service && systemctl start systemd-sysupdate-reboot.service` или local-self сигнал через `ab-pending` + `nixtache-ab-apply.service`
-- **THEN** gate принимает эти точные формы; pointer и dry-pointer допускаются только с валидным `/nix/store/...` путём
+- **WHEN** the action performs a probe, `nix copy`, apply/dry triggers, the remote A/B command `systemctl start --wait systemd-sysupdate.service && systemctl start systemd-sysupdate-reboot.service`, or the local-self signal via `ab-pending` + `nixtache-ab-apply.service`
+- **THEN** the gate accepts these exact forms; pointer and dry-pointer are allowed only with a valid `/nix/store/...` path
 
-#### Scenario: Escape-hatch на restrict-only
+#### Scenario: Restrict-only escape hatch
 
-- **WHEN** потребитель переключает опцию гейта в режим `restrict`-only
-- **THEN** authorized_keys несёт только префикс `restrict` (без `command=`), команды выполняются как прежде; eval не требует изменений в action'е
+- **WHEN** the consumer switches the gate option to `restrict`-only mode
+- **THEN** authorized_keys carries only the `restrict` prefix (without `command=`), commands run as before, and evaluation requires no action changes
 
-#### Scenario: Ручное управление ключом без гейта предупреждает
+#### Scenario: Manually managed key without a gate warns
 
-- **WHEN** `autoProvision = false` и потребитель управляет authorized_keys сам
-- **THEN** модуль не может навязать префикс и выводит предупреждение с готовым рекомендуемым префиксом (строкой `restrict,command=...`) для ручного применения
+- **WHEN** `autoProvision = false` and the consumer manages authorized_keys directly
+- **THEN** the module cannot enforce the prefix and warns with a ready-to-use recommended prefix (the `restrict,command=...` string) for manual application
 
 ### Requirement: Gate allows the disk-space query
 

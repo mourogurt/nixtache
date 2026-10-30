@@ -1,26 +1,16 @@
-# nixosModules.ab-image — the FULL A/B image config (Batch E), in nixtache.
+# nixosModules.ab-image — build-time A/B appliance configuration: repart
+# slots, UKI, sysupdate transfers, image metadata, boot counting, and
+# optional OpenPGP manifest verification. Runtime deployment and gating live
+# in nixosModules.deploy-target.
 #
-# Generates the consumer-side A/B prep that used to be copy-pasted: repart
-# A/B slots, UKI, systemd.sysupdate transfers, system.image.{id,version},
-# boot-counting, AND signature verification (import-pubring.pgp + Transfer.Verify).
-# Consumers import this ONLY for A/B targets (alongside nixosModules.deploy-target
-# for the runtime side: polkit/gating). Every field is an mkOption with a default
-# and overridable — advanced consumers can swap the layout via `extraPartitions`
-# / `transfers` while trivial consumers set just `imageId` + `publicKeyFile`.
+# Import only on A/B targets: the image-based-appliance profile disables
+# normal in-place NixOS rebuilding (`nix.enable = false` and
+# `system.switch.enable = false`), which is incompatible with live targets.
 #
-# WHY a separate module (not folded into deploy-target.ab): this imports nixpkgs'
-# `image-based-appliance` profile, which forces `nix.enable=false` +
-# `system.switch.enable=false` (appliances have no Nix, can't be rebuilt). That
-# would break live (desktop/laptop) targets that also import deploy-target. So
-# the aggressive image profile lives HERE, imported only by A/B targets.
-#
-# Signing model (Q2): the runner host signs with the PRIVATE key
-# (`services.nixtache.runner.deploy.ab.signingKeyFile`); each target sets the
-# matching PUBLIC key here (`publicKeyFile`/`publicKey`) → this module installs
-# /etc/systemd/import-pubring.pgp and forces `Transfer.Verify=yes` so sysupdate
-# rejects unsigned/tampered manifests. systemd-sysupdate verifies ONLY OpenPGP.
-#
-# Design details: doc/archive/specs/direct-deploy/06-ab-image.md.
+# The runner signs with its private key; the target configures the matching
+# public key here. The module installs its pubring and forces
+# `Transfer.Verify = yes`, so sysupdate rejects unsigned or tampered
+# manifests.
 { config, lib, pkgs, modulesPath, ... }:
 
 with lib;
@@ -51,26 +41,14 @@ let
 
   efiArch = pkgs.stdenv.hostPlatform.efiArch;
 
-  # Validity-record dump for the whole slot closure: the closure's
-  # REGISTERED records (`pkgs.closureInfo`'s `registration` output, the
-  # `nix-store --load-db` format) — content-true because the appliance
-  # evaluation is content-addressed (asserted below: `ca:fixed:r:` binds
-  # each path's hash to its content hash, so the daemon's records cannot lie
-  # about shipped bytes; under input-addressing they provably can —
-  # substitution churn, multi-realisation artifacts — and the runner's
-  # clone seed verifies every copied path against these records).
-  # One derivation per toplevel, so image rebuilds with an unchanged
-  # closure reuse it.
+  # closureInfo's registration is the slot closure's load-db dump. Content
+  # addressing makes its records authoritative for the shipped bytes, which
+  # the runner's clone verifies on every copy; an input-addressed path can
+  # have different realisations whose bytes do not match one DB record.
   #
-  # Carrier constraints (both discovered at implementation time):
-  #   - NOT environment.etc / a toplevel-referenced store path: the dump
-  #     covers the toplevel closure, so a toplevel→dump reference is a
-  #     derivation cycle.
-  #   - NOT inside /nix/store: the local-overlay store's GC scans the merged
-  #     store dir and hard-fails on any non-store-path entry ("too short
-  #     to be a valid store path").
-  # The dump therefore ships on the ESP at a versioned path (per-slot by
-  # filename) and travels across updates via the 15-lower-db transfer.
+  # The dump cannot be referenced by the toplevel (a derivation cycle) or
+  # stored as an arbitrary /nix/store entry (overlay GC rejects non-store
+  # names). It therefore ships versioned on the ESP via 15-lower-db.
   lowerStoreDb = import ./lower-store-db.nix {
     inherit pkgs;
     toplevel = config.system.build.toplevel;
@@ -148,8 +126,6 @@ let
   };
 in
 {
-  # image.repart + the appliance profile are NOT in the default import list.
-  # This module is imported only by A/B targets, so the aggressive profile is OK.
   imports = [
     "${modulesPath}/image/repart.nix"
     "${modulesPath}/profiles/image-based-appliance.nix"
@@ -388,13 +364,10 @@ in
   };
 
   config = mkIf cfg.enable {
-    # The shipped dump is the closure's REGISTERED records — content-true
-    # only when the evaluation is content-addressed. A module cannot
-    # silently flip a flake consumer's nixpkgs, so require it loudly.
-    # NOTE: the nix EVALUATING this config also needs the `ca-derivations`
-    # experimental feature in its SYSTEM nix.conf — the daemon ignores
-    # client-side feature overrides on connect (NixOS/nix#9090), so
-    # user-level config/flags are not enough for `nix build`/`flake check`.
+    # Registered DB records are content-true only in a CA evaluation, which
+    # the consumer must select in its nixpkgs import. The evaluating machine
+    # also needs ca-derivations in system nix.conf: after connecting to a
+    # daemon, client-side feature overrides cannot enable it (NixOS/nix#9090).
     assertions = [{
       assertion = pkgs.config.contentAddressedByDefault or false;
       message = ''
@@ -445,18 +418,11 @@ in
       # "max disk" mode: build the image at a fixed total size; root then fills
       # (Weight) what the fixed slots + ESP leave. null (default) = minimal image.
       imageSize = mkIf (cfg.diskSize != null) cfg.diskSize;
-      # EROFS density: block-aligned file tails waste ~half a block per file
-      # (~40M on a ~22K-file closure), which makes erofs lose to squashfs
-      # despite zstd. fragments/ztailpacking pack the tails; -C262144 (big
-      # pcluster, capped at 256K) lets zstd compress across 4K block
-      # boundaries. The cap is a kernel constraint: 1M pclusters break the
-      # pinned kernel's (6.18) zstd readahead decompression — boots die in
-      # initrd activation with "failed to decompress … Unknown frame
-      # descriptor" — while 256K and below boot green with the same
-      # compression win. Raise only with a kernel pin that carries the fix.
-      # No-ops when the store is uncompressed. Repart appends these after
-      # the positional args (getopt permutes) via
-      # SYSTEMD_REPART_MKFS_OPTIONS_EROFS.
+      # Pack EROFS file tails and use 256 KiB pclusters so zstd compresses
+      # across 4 KiB boundaries. Larger pclusters can fail initrd
+      # decompression with the pinned kernel; raise the cap only with a
+      # compatible kernel. Repart appends these options through
+      # SYSTEMD_REPART_MKFS_OPTIONS_EROFS; they are irrelevant uncompressed.
       mkfsOptions = mkIf (cfg.storeFs == "erofs") {
         erofs = [ "-Efragments,ztailpacking" "-C262144" ];
       };
@@ -477,40 +443,28 @@ in
           };
           repartConfig = {
             Type = "esp"; Label = "boot"; Format = "vfat";
-            # Pinned (min=max): in max-disk mode an unpinned ESP would claim
-            # a proportional share of the leftover space by default Weight
-            # (measured: a 2G image splits ~1024M ESP / ~1024M root), and
-            # root — not the ESP — is meant to fill the disk. 260M matches
-            # repart's ESP_MIN_SIZE_4K: the enforced minimum for a vfat ESP
-            # at 4K filesystem sectors (the image-build default), which
-            # silently overrode the previously configured 200M anyway.
+            # A fixed ESP leaves all max-disk leftover space to root. 260M
+            # is repart's enforced minimum for a vfat ESP with 4K sectors.
             SizeMinBytes = "260M"; SizeMaxBytes = "260M"; SplitName = "-";
           };
         };
         nix-store = {
-          # Ship an (empty) .links dir in the store image. Opening ANY local
-          # store unconditionally runs createDirs(/nix/store/.links) (nix
-          # master as of 2026-10, even with read-only=true) — which fails on
-          # the RO squashFS unless the directory already exists. The lower-DB
-          # loader, the runner container's clone seed and local-overlay
-          # lowers all open local stores here. GC skips `.links` by name (it
-          # may delete the placeholder file itself — nlink==1 — which is
-          # harmless: the directory stays). Not a store path, so absent from
-          # the dump and from the store tree's CopyFiles source.
+          # Opening any local Nix store tries to create /nix/store/.links,
+          # even for read-only access. That write fails on the read-only slot
+          # unless the image already contains the directory; the DB loader,
+          # runner clone seed, and local-overlay lowers all depend on it.
+          # GC ignores the directory and may remove only the harmless .keep
+          # placeholder. .links is not a store path, so it is added here
+          # rather than through the closure dump or store tree.
           contents."/.links/.keep".source = pkgs.writeText "links-keep" "";
-          # Store content ships via ONE CopyFiles source (the store tree)
-          # — NOT `storePaths`: that option emits a CopyFiles line per
-          # closure path, and repart dereferences each source, so top-level
-          # symlink paths would ship as their target's content (see
-          # store-tree.nix).
+          # One store-tree source prevents repart from dereferencing
+          # individual symlink closure paths (see store-tree.nix).
           repartConfig = mkMerge [
             {
               CopyFiles = [ "${storeTree}:/" ];
               Type = "linux-generic"; Label = "nix-store_${cfg.imageVersion}";
-              # Minimize=on: the partition image shrinks to fit the compressed
-              # squashfs/erofs content (needed for the compression size comparison
-              # in ab-compression-vm). The A/B SLOT sizes on the target disk are
-              # fixed by the provision module, not by this build-time partition.
+              # Shrink the split image to its contents; target slot sizes
+              # are independently fixed by provisioning.
               Minimize = "on";
               # Percentages → fallback for build-time (provision resolves at runtime).
               SizeMinBytes = if (hasSuffix "%" cfg.storeSize) then "2G" else cfg.storeSize;
@@ -577,14 +531,10 @@ in
     # Without ab-provision (standalone tests like ab-vm.nix), these defaults apply.
     systemd.sysupdate.transfers = mkDefault cfg.transfers;
 
-    # The update artifact the deploy action stages + signs: the split nix-store
-    # squashfs + the UKI + the slot's lower store DB dump + a SHA256SUMS
-    # manifest. The UKI KEEPS its ukify
-    # `+tries` filename (`abtest_2+3.efi`): the boot-counting counter lives in
-    # the FILENAME (systemd-boot decrements it by renaming; an exhausted
-    # counter makes the loader skip the entry — the rollback mechanism), so
-    # stripping it would disable boot counting entirely. The transfers match
-    # it via sysupdate's `@l` (tries left) wildcard alongside `@v`.
+    # Staged artifacts: raw store, UKI, lower-DB dump, and SHA256SUMS.
+    # The UKI keeps its +tries suffix because the boot counter lives in the
+    # filename and systemd-boot decrements it by renaming. Transfers match
+    # that mutable suffix through @l; stripping it would break rollback.
     system.build.sysupdate-package =
       pkgs.runCommand "sysupdate-package-${cfg.imageVersion}" { } ''
         mkdir $out

@@ -1,4 +1,4 @@
-# Direct-deploy target map: `services.nixtache.runner.deploy.targets`.
+# Deploy map: `services.nixtache.runner.deploy.targets`.
 #
 # Owns the `config → host → creds` map. Each target's attribute name MUST
 # match the consumer's
@@ -53,8 +53,8 @@ in
     type = types.attrsOf (import ./types.nix { inherit lib; }).deployTargetType;
     default = { };
     description = ''
-      Direct-deploy target map. One attribute per machine this runner may deploy
-      to; the attribute name MUST equal the consumer's
+      Deploy map. One attribute per machine this runner may deploy to; the
+      attribute name MUST equal the consumer's
       `nixosConfigurations.<name>`. Each entry binds the config to a reachable
       host (`host`/`sshUser`/`sshPort`) and a credential (`sshPrivateKey`).
 

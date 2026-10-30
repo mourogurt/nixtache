@@ -1,11 +1,11 @@
 # Architecture
 
-How the pieces fit: the workspace view, the flake's module layout, and the
+How the pieces fit: consumer integration, the flake's module layout, and the
 way sub-modules merge into one container. Consumer-facing wiring (what to put
 in your config) lives in [`doc/user_guide/`](../user_guide/); this document
 is for contributors.
 
-## Workspace view
+## Consumer integration
 
 ```
                     +------------------+
@@ -25,10 +25,6 @@ workflows, actions) |                  |   |- nixosModules.secrets
                        (the runner is declared via the nixtache runner
                         module, consumed by the infra machine)
 ```
-
-Repository-infrastructure constraints (git object format, remotes) are owned
-by the workspace-level `AGENTS.md` one level above this repo — not duplicated
-here.
 
 ## Module layout
 
