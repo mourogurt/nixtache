@@ -426,6 +426,10 @@ in
       systemd.sockets.nix-daemon-custom = mkIf customStore {
         description = "Custom Nix Daemon Socket";
         listenStreams = [ "${cfg.store.path}/nix/var/nix/daemon-socket/socket" ];
+        after = optional useOverlay "nix-daemon-overlay-mount.service"
+          ++ optional useClone "nix-daemon-storage.service";
+        requires = optional useOverlay "nix-daemon-overlay-mount.service"
+          ++ optional useClone "nix-daemon-storage.service";
         socketConfig.DirectoryMode = "0755";
         wantedBy = [ "sockets.target" ];
       };

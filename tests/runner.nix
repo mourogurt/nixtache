@@ -118,6 +118,8 @@ self.nixosModules.runner
       socketParentTmpfiles = lib.elem
         "d /srv/nix/var/nix/daemon-socket 0755 root root -"
         (containerCfg hostSrv).systemd.tmpfiles.rules;
+      socketAfterStorage = (socketsOf hostSrv)."nix-daemon-custom".after == [ "nix-daemon-storage.service" ];
+      socketRequiresStorage = (socketsOf hostSrv)."nix-daemon-custom".requires == [ "nix-daemon-storage.service" ];
       srvMountPoint = (bindMountsOf hostSrv)."srv-nix".mountPoint == "/srv";
       # per-instance token mount present, SSH mounts / SSH LoadCredentials
       # absent (the token's own upstream LoadCredential IS present even here
@@ -798,6 +800,8 @@ self.nixosModules.runner
       # Appliance overlay: no storage oneshot (the overlay mount replaces it).
       applianceNoStorage = !(has (servicesOf hostApplianceOverlay) "nix-daemon-storage");
       applianceOverlayMount = has (servicesOf hostApplianceOverlay) "nix-daemon-overlay-mount";
+      applianceSocketAfterOverlay = (socketsOf hostApplianceOverlay)."nix-daemon-custom".after == [ "nix-daemon-overlay-mount.service" ];
+      applianceSocketRequiresOverlay = (socketsOf hostApplianceOverlay)."nix-daemon-custom".requires == [ "nix-daemon-overlay-mount.service" ];
     };
   };
 
