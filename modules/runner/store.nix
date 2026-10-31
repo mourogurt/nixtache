@@ -260,7 +260,7 @@ in
               # at <store.path>; in clone mode it serves the plain relocated
               # local store at <store.path>/nix.
                seedUnit = if useOverlay then "nix-daemon-overlay-mount.service" else "nix-daemon-storage.service";
-              # nix.conf content for the custom daemon (NIX_CONF env — a
+              # nix.conf content for the custom daemon (NIX_CONFIG env — a
               # multi-line nix.conf read as an alt to /etc/nix/nix.conf):
               # - overlay mode opts into the local-overlay-store experimental
               #   feature;
@@ -282,7 +282,7 @@ in
 
               environment = (lib.filterAttrs (n: _v: n != "PATH") (nixDaemonCfg.environment or { }))
                 // (lib.optionalAttrs (nixConf != "") {
-                  NIX_CONF = nixConf;
+                  NIX_CONFIG = nixConf;
                 });
 
               after = [ seedUnit ];

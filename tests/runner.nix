@@ -747,10 +747,10 @@ self.nixosModules.runner
       customDaemonStandalone =
         (svcAppliance."nix-daemon-custom".requires or [ ]) == [ "nix-daemon-storage.service" ];
       # No nixbld build users exist without the system nix module — the
-      # daemon builds as root via NIX_CONF.
+      # daemon builds as root via NIX_CONFIG.
       customDaemonBuildsAsRoot =
         lib.hasInfix "build-users-group ="
-          (svcAppliance."nix-daemon-custom".environment.NIX_CONF or "");
+          (svcAppliance."nix-daemon-custom".environment.NIX_CONFIG or "");
     };
   };
 
@@ -793,9 +793,9 @@ self.nixosModules.runner
       applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
       applianceReadOnlyFeature = lib.hasInfix
         "extra-experimental-features = ca-derivations local-overlay-store read-only-local-store"
-        ((servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONF or "");
+        ((servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONFIG or "");
       applianceSingleFeatureSetting =
-        let conf = (servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONF or ""; in
+        let conf = (servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONFIG or ""; in
         lib.length (lib.splitString "extra-experimental-features" conf) == 2;
       applianceLowerStoreBind =
         let binds = bindMountsOf hostApplianceOverlay; in

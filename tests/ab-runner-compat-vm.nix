@@ -228,7 +228,7 @@ pkgs.testers.runNixOSTest {
     print("DIAG appliance nix-daemon-custom unit env:")
     print(appliance.succeed(
         "nixos-container run runner -- "
-        "systemctl cat nix-daemon-custom 2>&1 | grep -E 'NIX_CONF|build-users|ExecStart' || true"
+        "systemctl cat nix-daemon-custom 2>&1 | grep -E 'NIX_CONFIG|build-users|ExecStart' || true"
     ))
     print("DIAG appliance host build-users-group:")
     print(appliance.succeed("grep build-users-group /etc/nix/nix.conf || echo unset"))
