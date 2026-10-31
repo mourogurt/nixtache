@@ -27,8 +27,8 @@ modes and documentation, not another store redesign.
 
 - [x] 3.1 Finish `tests/runner-store-swap-vm.nix`: `mkAppliance` embedding the runner container closure and a trivial build through the relocated store on v1 — verify the pre-swap build succeeds in CI
 - [x] 3.2 Clone variant: swap, reboot → assert the re-clone is additive and a post-swap build succeeds (the nspawn bind-path guarantee already landed; the container appliance-mode wiring is `lower-store-db`'s group 3) — verify suite leg green and `nix flake check` passes
-- [ ] 3.3 Overlay variant: swap, reboot → assert the merged view is coherent and a post-swap build succeeds — verify suite leg green
-- [ ] 3.4 After `lower-store-db` wires the matrix: verify both suite modes report PASS in the full-matrix job log; note the runner-store-across-swaps behaviour under `doc/user_guide/ota.md` route 3 (gated self-update) with a link to `openspec/specs/runner/spec.md`; add the testing.md row — verify docs render
+- [x] 3.3 Overlay variant: swap, reboot → assert the merged view is coherent and a post-swap build succeeds — verify suite leg green
+- [x] 3.4 After `lower-store-db` wires the matrix: verify both suite modes report PASS in the full-matrix job log; note the runner-store-across-swaps behaviour under `doc/user_guide/ota.md` route 3 (gated self-update) with a link to `openspec/specs/runner/spec.md`; add the testing.md row — verify docs render
 
 ## 4. Overlay reconcile replay leg (D5)
 
@@ -38,7 +38,7 @@ modes and documentation, not another store redesign.
 ## 5. Integration
 
 - [x] 5.1 `nix flake check --show-trace --all-systems` green and `openspec validate server-ab-migration-prep --strict` green — verify both commands
-- [ ] 5.2 Full `vmTests` matrix green on a KVM runner (manual dispatch of `vmtests.yml` with the full subset) — verify every suite, including the three new ones, reports PASS in the job log
+- [x] 5.2 Full `vmTests` matrix green on a KVM runner (manual dispatch of `vmtests.yml` with the full subset) — verify every suite, including the three new ones, reports PASS in the job log
 
 ## 6. Deterministic absolute slot sizing (D7)
 
@@ -60,7 +60,7 @@ modes and documentation, not another store redesign.
 - [x] 8.2 Update `ab-contract` to current `upperOnUpdate = "wipe" | "reconcile"` and lower-DB semantics, remove missing-module/expected-red fallbacks, register it in `checks` and the self-CI report loop — verify its report in CI
 - [x] 8.3 Remove stale expected-red/known-red narratives from auto-update and overlay test entry points and make them import implemented modules directly — verify static Nix parsing and the relevant CI suites
 - [x] 8.4 Reconcile all maintained docs with the new sizing, rollback, auto-update and data-pool behavior and with `wipe-on-cutover`; run `openspec validate server-ab-migration-prep --strict` and `openspec validate --specs --strict` without local AB/CA builds
-- [ ] 8.5 Use the existing full KVM CI matrix in task 5.2 for CA-dependent and VM verification; do not require a second local content-addressed world build
+- [x] 8.5 Use the existing full KVM CI matrix in task 5.2 for CA-dependent and VM verification; do not require a second local content-addressed world build
 
 ## 9. Credential-only A/B manifest signing (D11)
 
