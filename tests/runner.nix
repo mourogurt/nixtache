@@ -115,6 +115,9 @@ self.nixosModules.runner
       storageRequiresSystemDaemon = lib.elem "nix-daemon.service" (svcSrv."nix-daemon-storage".requires or [ ]);
       storageDaemonEnv = lib.elem "NIX_REMOTE=daemon" (svcSrv."nix-daemon-storage".serviceConfig.Environment or [ ]);
       socketPath = (socketsOf hostSrv)."nix-daemon-custom".listenStreams == [ "/srv/nix/var/nix/daemon-socket/socket" ];
+      socketParentTmpfiles = lib.elem
+        "d /srv/nix/var/nix/daemon-socket 0755 root root -"
+        (containerCfg hostSrv).systemd.tmpfiles.rules;
       srvMountPoint = (bindMountsOf hostSrv)."srv-nix".mountPoint == "/srv";
       # per-instance token mount present, SSH mounts / SSH LoadCredentials
       # absent (the token's own upstream LoadCredential IS present even here

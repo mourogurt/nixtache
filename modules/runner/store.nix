@@ -222,6 +222,10 @@ in
         systemPackages = [ config.nix.package ];
       };
 
+      systemd.tmpfiles.rules = mkIf customStore [
+        "d ${cfg.store.path}/nix/var/nix/daemon-socket 0755 root root -"
+      ];
+
       systemd.services = mkMerge [
         # One `forgejo-runner-<name>` service per enabled instance gets the
         # relocated-store BindPaths + a hard dep on the custom daemon.
