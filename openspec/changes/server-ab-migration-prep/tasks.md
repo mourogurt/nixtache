@@ -48,7 +48,7 @@ modes and documentation, not another store redesign.
 
 ## 7. Auto-update, provisioning and rollback correctness (D8, D9)
 
-- [ ] 7.1 Change the A/B auto-update poll to `systemctl start --wait` on `systemd-sysupdate-update.service` (systemd ≥ 262) or `systemd-sysupdate.service` (older releases) before journal inspection; add positive staged-image coverage for `if-needed` and `window`, plus a no-new-image control — verify in the existing CI auto-update suite, not a local CA rebuild
+- [x] 7.1 Change the A/B auto-update poll to `systemctl start --wait` on `systemd-sysupdate-update.service` (systemd ≥ 262) or `systemd-sysupdate.service` (older releases) before journal inspection; add positive staged-image coverage for `if-needed` and `window`, plus a no-new-image control — verify in the existing CI auto-update suite, not a local CA rebuild
 - [x] 7.2 Correct non-cross-midnight reboot-window comparison to `now >= start && now < end`, retain the wrapping predicate for cross-midnight windows, and add cheap scripted cases for before/start/inside/end/after and persistent catch-up with a controlled clock and reboot stub
 - [x] 7.3 Add `slotSize` reduction to the low-space provisioning remedies and assert the message in the provision contract — verify through the CI provision coverage
 - [x] 7.4 Implement the D9 post-rollback recovery path after checking for a sysupdate-supported complete-instance removal operation; preserve the running slot, refuse ambiguous deletion and never rely on bare vacuum for a boot-failed complete version
@@ -58,7 +58,7 @@ modes and documentation, not another store redesign.
 
 - [x] 8.1 Split `ab-data-pool-vm` assertions by concern: pool/state persistence independent of upper policy; explicit `reconcile` + retained substituter for the upper-intact leg; a default-wipe control expecting cleared upper content — verify in KVM CI
 - [x] 8.2 Update `ab-contract` to current `upperOnUpdate = "wipe" | "reconcile"` and lower-DB semantics, remove missing-module/expected-red fallbacks, register it in `checks` and the self-CI report loop — verify its report in CI
-- [ ] 8.3 Remove stale expected-red/known-red narratives from auto-update and overlay test entry points and make them import implemented modules directly — verify static Nix parsing and the relevant CI suites
+- [x] 8.3 Remove stale expected-red/known-red narratives from auto-update and overlay test entry points and make them import implemented modules directly — verify static Nix parsing and the relevant CI suites
 - [x] 8.4 Reconcile all maintained docs with the new sizing, rollback, auto-update and data-pool behavior and with `wipe-on-cutover`; run `openspec validate server-ab-migration-prep --strict` and `openspec validate --specs --strict` without local AB/CA builds
 - [ ] 8.5 Use the existing full KVM CI matrix in task 5.2 for CA-dependent and VM verification; do not require a second local content-addressed world build
 

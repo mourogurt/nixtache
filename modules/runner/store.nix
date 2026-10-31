@@ -270,7 +270,7 @@ in
               #   build users exist, so the daemon builds as root.
               nixConf = lib.concatStringsSep "\n" (
                 [ "extra-experimental-features = ca-derivations" ]
-                ++ lib.optional useOverlay "extra-experimental-features = local-overlay-store"
+                ++ lib.optional useOverlay "extra-experimental-features = local-overlay-store read-only-local-store"
                 ++ lib.optional (!config.nix.enable) "build-users-group ="
               );
             in
@@ -300,7 +300,7 @@ in
                 ExecStart =
                   let
                     daemonCmd = if useOverlay
-                      then "${lib.getExe' config.nix.package "nix-daemon"} --store '${lib.replaceStrings [ "%" ] [ "%%" ] overlayStoreUrl}'"
+                      then "${lib.getExe' config.nix.package "nix-daemon"} --store '${overlayStoreUrl}'"
                       else "${lib.getExe' config.nix.package "nix-daemon"} --daemon";
                   in
                   if cfg.enableSandbox
@@ -308,7 +308,7 @@ in
                     ${lib.getExe' pkgs.util-linux "mount"} proc -t proc /proc
                     exec -a nix-daemon ${daemonCmd}
                   ''}"
-                  else daemonCmd;
+                  else lib.replaceStrings [ "%" ] [ "%%" ] daemonCmd;
                 # Terminate the main daemon first, then kill any connection
                 # workers still in the unit cgroup when it exits or times out.
                 KillMode = "mixed";

@@ -773,6 +773,14 @@ self.nixosModules.runner
     };
     nix.enable = false;
   };
+  hostApplianceOverlaySandbox = mkHost "/srv" {
+    services.nixtache.runner = {
+      enableSandbox = true;
+      additionalCapabilities = [ "CAP_SYS_ADMIN" ];
+      store.mode = "overlay";
+    };
+    nix.enable = false;
+  };
   execOverlayOf = host: (servicesOf host)."nix-daemon-custom".serviceConfig.ExecStart or "";
   scenarioOverlayLower = {
     name = "overlay mode: daemon lower on nix-enabled hosts, dedicated local lower on appliance hosts";
@@ -783,6 +791,9 @@ self.nixosModules.runner
         "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower%%26read-only%%3Dtrue"
         (execOverlayOf hostApplianceOverlay);
       applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
+      applianceReadOnlyFeature = lib.hasInfix
+        "extra-experimental-features = local-overlay-store read-only-local-store"
+        ((servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONF or "");
       applianceLowerStoreBind =
         let binds = bindMountsOf hostApplianceOverlay; in
         binds ? "host-nix-lower-store"
@@ -968,6 +979,8 @@ self.nixosModules.runner
   # (writeShellScript), so its content is verified at build time below.
   storageExecSrv = svcSrv."nix-daemon-storage".serviceConfig.ExecStart;
   overlayMountExecAppliance = (servicesOf hostApplianceOverlay)."nix-daemon-overlay-mount".serviceConfig.ExecStart;
+  overlaySandboxScriptAppliance = lib.elemAt
+    (lib.splitString " " (execOverlayOf hostApplianceOverlaySandbox)) 2;
 
   # The REAL deploy-target action script, extracted from action.yml at build
   # time (same technique as the ab-deploy VM suites — the YAML is the single
@@ -987,7 +1000,7 @@ pkgs.runCommand "runner-module-test"
     actionYmlFileSrc = actionYmlFile;
     passAsFile = [ "report" "failMsg" "deployMap" ];
     # Force the scripts into the store so the builder can inspect their text.
-    deps = [ storageExecSrv overlayMountExecAppliance ];
+    deps = [ storageExecSrv overlayMountExecAppliance overlaySandboxScriptAppliance ];
   }
   ''
     # Report to stdout (visible in build logs) and into $out (CI prints $out,
@@ -1009,6 +1022,16 @@ pkgs.runCommand "runner-module-test"
     if ! grep -q -- 'lowerdir=/run/nixtache-runner-lower/nix/store' "${overlayMountExecAppliance}"; then
       echo "FAIL: appliance overlay does not mount the dedicated host lower store"
       echo "FAIL: appliance overlay does not mount the dedicated host lower store" >> "$out"
+      exit 1
+    fi
+    if ! grep -q -- 'lower-store=local%3Froot%3D/run/nixtache-runner-lower%26read-only%3Dtrue' "${overlaySandboxScriptAppliance}"; then
+      echo "FAIL: sandbox wrapper does not preserve the nested lower-store URL"
+      echo "FAIL: sandbox wrapper does not preserve the nested lower-store URL" >> "$out"
+      exit 1
+    fi
+    if grep -q -- 'lower-store=local%%3F' "${overlaySandboxScriptAppliance}"; then
+      echo "FAIL: sandbox wrapper contains systemd-escaped percent signs"
+      echo "FAIL: sandbox wrapper contains systemd-escaped percent signs" >> "$out"
       exit 1
     fi
 
