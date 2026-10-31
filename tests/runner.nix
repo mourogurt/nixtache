@@ -792,8 +792,11 @@ self.nixosModules.runner
         (execOverlayOf hostApplianceOverlay);
       applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
       applianceReadOnlyFeature = lib.hasInfix
-        "extra-experimental-features = local-overlay-store read-only-local-store"
+        "extra-experimental-features = ca-derivations local-overlay-store read-only-local-store"
         ((servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONF or "");
+      applianceSingleFeatureSetting =
+        let conf = (servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONF or ""; in
+        lib.length (lib.splitString "extra-experimental-features" conf) == 2;
       applianceLowerStoreBind =
         let binds = bindMountsOf hostApplianceOverlay; in
         binds ? "host-nix-lower-store"

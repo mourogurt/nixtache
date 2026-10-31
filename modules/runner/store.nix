@@ -269,8 +269,7 @@ in
               # - on appliance-style containers (nix.enable=false) no nixbld
               #   build users exist, so the daemon builds as root.
               nixConf = lib.concatStringsSep "\n" (
-                [ "extra-experimental-features = ca-derivations" ]
-                ++ lib.optional useOverlay "extra-experimental-features = local-overlay-store read-only-local-store"
+                [ "extra-experimental-features = ca-derivations${lib.optionalString useOverlay " local-overlay-store read-only-local-store"}" ]
                 ++ lib.optional (!config.nix.enable) "build-users-group ="
               );
             in
