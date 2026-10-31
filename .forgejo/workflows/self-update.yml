@@ -1,0 +1,30 @@
+# Nixtache self-update: bump THIS flake's own flake.lock through the shared
+# update pipeline. The schedule and manual entry point live here because
+# update-flake.yml is a reusable workflow that updates its CALLER's flake —
+# nixtache is the caller for itself, and its maintenance policy (schedule,
+# runner) belongs in its own thin wrapper, not in the consumer-facing
+# reusable workflow.
+#
+# The nixtache-self validation profile skips the consumer-only NixOS
+# configuration and devShell rebuilds: nixtache exposes no consumer
+# nixosConfigurations (only the abtest-remote dogfood fixture) and no
+# devShells, and flake-validation already builds every checks.* suite.
+#
+# Runs on the dedicated `test` runner (label `test:host`), like ci.yml.
+# In the Forgejo UI the call renders as two jobs: `update-flake` (0s caller)
+# and `update-flake-1` (the work). Expected.
+name: Self Update Flake
+
+on:
+  # Monday 04:15 UTC.
+  schedule:
+    - cron: "15 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  update-flake:
+    uses: nixops/nixtache/.forgejo/workflows/update-flake.yml@main
+    with:
+      runner: test
+      validation-profile: nixtache-self
+    secrets: inherit

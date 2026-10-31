@@ -4,17 +4,44 @@
 # Per Q2=B it is invoked as:
 #   jobs.update-flake.uses: nixops/nixtache/.forgejo/workflows/update-flake.yml@main
 #
+# Optional inputs (declared for both workflow_call and workflow_dispatch so a
+# direct dispatch keeps the consumer behavior):
+#   runner              runner label (default `nixos`)
+#   validation-profile  `consumer` (default: flake validation + the NixOS
+#                       configuration and devShell rebuilds) or
+#                       `nixtache-self` (flake validation only — nixtache's
+#                       own self-update.yml caller, which has no consumer
+#                       configurations or devShells to rebuild)
+#
 # NOTE: the `schedule` trigger must live in the CALLER's thin wrapper, not here
 # (a schedule in nixtache would update nixtache's own flake, not the caller's).
 name: Update Flakes
 
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: "Runner label (default `nixos`)."
+        type: string
+        default: "nixos"
+      validation-profile:
+        description: "consumer (default: validation + configuration/devShell rebuilds) or nixtache-self (validation only)."
+        type: string
+        default: "consumer"
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label (default `nixos`)."
+        type: string
+        default: "nixos"
+      validation-profile:
+        description: "consumer (default: validation + configuration/devShell rebuilds) or nixtache-self (validation only)."
+        type: string
+        default: "consumer"
 
 jobs:
   update-flake:
-    runs-on: nixos
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Checkout caller repository
         uses: actions/checkout@v4
@@ -94,6 +121,17 @@ jobs:
           # directory must exist even when every work step is skipped or the
           # first step fails, so create it here unconditionally.
           mkdir -p artifacts
+          # Reject an unknown validation profile before any update work: an
+          # unrecognised value would silently change which validations the
+          # caller gets, so fail here instead of mid-pipeline.
+          profile="${{ inputs.validation-profile }}"
+          case "$profile" in
+            consumer|nixtache-self) ;;
+            *)
+              echo "::error::update-flake: unknown validation-profile '$profile' (accepted: consumer, nixtache-self)."
+              exit 1
+              ;;
+          esac
           if [ -z "${NIXTACHE_UPDATE_GIT_USER:-}" ]; then
             echo "::warning::update-flake disabled: services.nixtache.runner.updateSshCreds is null (no push credential). Set updateSshCreds to enable."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -143,11 +181,16 @@ jobs:
         uses: ./.nixtache/.forgejo/actions/flake-validation
 
       - name: Rebuilding All NixOS Configurations
-        if: steps.guard.outputs.enabled == 'true'
+        # Consumer profile only: the nixtache-self profile validates with the
+        # flake check alone (nixtache has no consumer configurations to
+        # rebuild — only the abtest-remote dogfood fixture, which
+        # flake-validation already builds).
+        if: steps.guard.outputs.enabled == 'true' && inputs.validation-profile == 'consumer'
         uses: ./.nixtache/.forgejo/actions/rebuild-configurations
 
       - name: Rebuilding All Nix DevShells
-        if: steps.guard.outputs.enabled == 'true'
+        # Consumer profile only: nixtache defines no devShells.
+        if: steps.guard.outputs.enabled == 'true' && inputs.validation-profile == 'consumer'
         uses: ./.nixtache/.forgejo/actions/rebuild-devshells
         timeout-minutes: 4320
         with:

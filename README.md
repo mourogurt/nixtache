@@ -30,9 +30,10 @@ the [quickstart](doc/user_guide/quickstart.md).
 | `nix-check.yml` | validate the caller flake + rebuild all its `nixosConfigurations` and `x86_64-linux` devShells |
 | `deploy.yml` | direct deploy of the caller's configurations to their targets |
 | `docs.yml` | build + upload the caller's generated documentation |
-| `update-flake.yml` | scheduled flake-input bump with an SSH-signed bot commit |
+| `update-flake.yml` | flake-input bump with an SSH-signed bot commit; optional `runner` / `validation-profile` inputs keep the consumer default (`nixos` runner, validation + configuration/devShell rebuilds) |
 | `ci.yml` | nixtache's **own** CI (not reusable) |
 | `vmtests.yml` | KVM VM suite matrix on a `kvm`-labelled runner (dispatch + weekly/nightly schedule); per-suite full-log artifacts, bounded matrix concurrency |
+| `self-update.yml` | nixtache's **own** flake self-update (not reusable) — weekly schedule + manual dispatch calling `update-flake.yml` with the `nixtache-self` profile on the `test` runner |
 
 Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 `rebuild-configurations`, `rebuild-devshells`, `generate-docs`,
