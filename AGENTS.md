@@ -104,7 +104,7 @@ reference to a spec section or scenario code (`spec §11.7`, `A2`, `S2`, …)
 may only FOLLOW a self-contained explanation, never replace it. A comment
 consisting solely of a spec pointer is a bug.
 
-Git commit description is under 60 words, MR is under 300.
+Git commit description length is no more then 60 words, MR is up to 300.
 
 ### Terminology
 
