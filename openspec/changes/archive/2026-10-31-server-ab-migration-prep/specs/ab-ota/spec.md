@@ -9,11 +9,6 @@ migratable to the OTA route in a controlled order: A/B slots are provisioned
 on free space, the first OTA image is installed and blessed while the live
 generation remains bootable as a fallback, and the deploy map entry flips to
 `method = "ab-image"` without a window in which the machine is unmanaged.
-Because provisioning creates only the two nix-store slots, the pre-existing
-disk MUST satisfy the image's mount contract before the first OTA boot: the
-partitions serving `/` and the ESP are reachable under the device identifiers
-the image was built with (the default GPT partlabels `root` and `boot`, or
-consumer-overridden `fileSystems` devices baked into the image's initrd).
 
 #### Scenario: Migration preserves a working fallback
 
@@ -22,24 +17,6 @@ consumer-overridden `fileSystems` devices baked into the image's initrd).
 - **THEN** the previously active live generation remains available as a
   boot fallback until the first OTA boot is blessed, and the next deploy
   run delivers an image update (not a live closure)
-
-#### Scenario: Legacy partition labels roll back safely
-
-- **WHEN** a migrated disk's partitions do not satisfy the image's mount
-  contract (e.g. the GPT partlabels `root`/`boot` are absent) and the first
-  staged OTA image is selected at boot
-- **THEN** the boot never reaches boot-completion, boot counting exhausts
-  the new entry's tries, and the machine boots the pre-migration entry
-  again with the update machinery still functional — no brick, no silent
-  state
-
-#### Scenario: Honoured mount contract cuts over
-
-- **WHEN** the disk satisfies the image's mount contract (partitions
-  relabeled to `root`/`boot`, or `fileSystems` overrides baked into the
-  image) and the first OTA image is staged and applied
-- **THEN** the machine boots the staged image, the boot is blessed, and the
-  pre-migration loader entries remain on the ESP as bootable fallback
 
 #### Scenario: A staged image never cuts over while the legacy default pin stands
 
@@ -94,6 +71,32 @@ preserving the running oldest slot before another update (see the OTA guide).
   the running slot, after which the fixed image can boot and be blessed
 
 ## ADDED Requirements
+
+### Requirement: The first OTA boot requires the image mount contract
+
+Because provisioning creates only the two nix-store slots, the pre-existing
+disk MUST satisfy the image's mount contract before the first OTA boot: the
+partitions serving `/` and the ESP are reachable under the device identifiers
+the image was built with (the default GPT partlabels `root` and `boot`, or
+consumer-overridden `fileSystems` devices baked into the image's initrd).
+
+#### Scenario: Legacy partition labels roll back safely
+
+- **WHEN** a migrated disk's partitions do not satisfy the image's mount
+  contract (e.g. the GPT partlabels `root`/`boot` are absent) and the first
+  staged OTA image is selected at boot
+- **THEN** the boot never reaches boot-completion, boot counting exhausts
+  the new entry's tries, and the machine boots the pre-migration entry
+  again with the update machinery still functional — no brick, no silent
+  state
+
+#### Scenario: Honoured mount contract cuts over
+
+- **WHEN** the disk satisfies the image's mount contract (partitions
+  relabeled to `root`/`boot`, or `fileSystems` overrides baked into the
+  image) and the first OTA image is staged and applied
+- **THEN** the machine boots the staged image, the boot is blessed, and the
+  pre-migration loader entries remain on the ESP as bootable fallback
 
 ### Requirement: Storage outside the A/B slots survives updates
 
