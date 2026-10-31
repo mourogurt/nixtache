@@ -33,9 +33,9 @@ parts of `server-ab-migration-prep`.
 
 ## R1. Vault Agent provider and signing-key rotation
 
-Provide a concrete `vault-agent` implementation for the existing secrets
-provider abstraction, then add a safe rollover protocol for OTA manifest
-signing keys.
+Introduce a secrets provider abstraction with a concrete `vault-agent`
+implementation, then add a safe rollover protocol for OTA manifest signing
+keys.
 
 - Use Vault Agent for auto-auth, token/lease renewal and atomic template
   rendering. Materialise secrets with runtime-only permissions and wire

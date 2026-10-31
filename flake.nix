@@ -1,5 +1,5 @@
 {
-  description = "Reusable NixOS CI/CD modules: Forgejo Actions runner, binary cache, secrets providers, docs helpers.";
+  description = "Reusable NixOS CI/CD modules: Forgejo Actions runner, binary cache, docs helpers.";
 
   # Only used to build `checks.*` (module tests), `packages.*optionsMarkdown`
   # (this flake's own option docs) and `lib.mkDocs`. Module consumers bring
@@ -22,7 +22,6 @@
       # --- NixOS modules ---------------------------------------------------
       # Consumers import via:
       #   inputs.nixtache.nixosModules.runner     # the Forgejo Actions runner
-      #   inputs.nixtache.nixosModules.secrets    # the secrets provider abstraction
       # or the convenience alias:
       #   inputs.nixtache.nixosModules.default     # = .runner
       nixosModules = {
@@ -36,7 +35,6 @@
         ab-image = import ./modules/ab-image;
         overlay-nix = import ./modules/overlay-nix;
         auto-update = import ./modules/auto-update;
-        secrets = import ./modules/secrets.nix;
         default = self.nixosModules.runner;
       };
 
@@ -236,7 +234,6 @@
               self.nixosModules.ab-image
               self.nixosModules.auto-update
               self.nixosModules.overlay-nix
-              self.nixosModules.secrets
               { system.stateVersion = lib.trivial.release; }
               # ab-image imports the image-based-appliance profile, which
               # trips the base NixOS no-login assertion (root without a

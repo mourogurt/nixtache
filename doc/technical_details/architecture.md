@@ -17,9 +17,9 @@ nixtache ---------->|  configuration   |  inputs.nixtache  (git+ssh)
 runner, deploy-     |   server)        |   |- nixosModules.deploy-target
 target, ab-image,   |                  |   |- nixosModules.ab-image
 overlay-nix, auto-  |                  |   |- nixosModules.overlay-nix
-update, secrets,    |                  |   |- nixosModules.auto-update
-workflows, actions) |                  |   |- nixosModules.secrets
-                    +------------------+   |- lib.mkDocs (consumer docs)
+update, workflows,  |                  |   |- nixosModules.auto-update
+actions)            |                  |   |- lib.mkDocs (consumer docs)
+                    +------------------+
                            |
                            v  runs on the Forgejo Actions runner
                        (the runner is declared via the nixtache runner
@@ -57,7 +57,6 @@ all definitions into the inner `eval-config` modules list).
 | `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)). |
 | `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`, so appliance targets can install packages at runtime. |
 | `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, poll timer, reboot policy and a deferred-reboot timer in window mode. |
-| `modules/secrets.nix` | Secrets provider abstraction (`vars` + extensible `providers`). |
 
 Requirements (canonical) live in
 [`openspec/specs/`](../../openspec/specs/) — capabilities updated through

@@ -1,10 +1,10 @@
 # nixtache
 
 Reusable, **vendor-agnostic** NixOS CI/CD flake. Provides the Forgejo Actions
-runner as a NixOS module, a binary cache, a secrets-provider abstraction, a
-direct-deploy pipeline (CI → your machines), and the reusable Forgejo
-workflows + composite actions that build, validate and document consumer
-flakes. Any project can consume it **without forking**.
+runner as a NixOS module, a binary cache, a direct-deploy pipeline (CI → your
+machines), and the reusable Forgejo workflows + composite actions that build,
+validate and document consumer flakes. Any project can consume it **without
+forking**.
 
 nixtache stores **no secrets** and hardcodes no consumer-specific Forgejo,
 cache or deploy endpoints — those are supplied via module options. Start with
@@ -21,7 +21,6 @@ the [quickstart](doc/user_guide/quickstart.md).
 | [`ab-image`](doc/user_guide/ota.md) | `services.nixtache.ab-image`: build-time A/B appliance image config (repart slots, UKI, sysupdate transfers, boot counting, GPG verify, the slot's lower store DB dump + boot-time loader) — the OTA route. |
 | [`overlay-nix`](doc/user_guide/overlay-nix.md) | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` so image-based targets can install packages at runtime — delta installs against the shipped lower store DB and an upper-layer lifecycle across OTA updates (`"wipe"` default / `"reconcile"`). |
 | [`auto-update`](doc/user_guide/auto-update.md) | `services.nixtache.auto-update`: unified auto-update channel replacing `system.autoUpgrade` — flake and A/B paths, one poll timer plus a deferred-reboot timer in window mode. |
-| [`secrets`](doc/user_guide/secrets.md) | `services.nixtache.secrets`: secrets-provider abstraction (`vars` + extensible `providers`). |
 
 ### Reusable workflows (`.forgejo/workflows/`) and actions
 
@@ -63,7 +62,7 @@ Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
 | Layer | Audience | Content |
 |---|---|---|
 | [`ROADMAP.md`](ROADMAP.md) | everyone | planned directions, dependency order and research gates — not current feature guarantees |
-| [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, OTA (A/B updates), overlay-nix, auto-update, secrets, docs generation — linking maintained capability specs where they exist |
+| [`doc/user_guide/`](doc/user_guide/) | consumers | quickstart, deploy, OTA (A/B updates), overlay-nix, auto-update, docs generation — linking maintained capability specs where they exist |
 | [`doc/technical_details/`](doc/technical_details/) | contributors | architecture, module→CI wiring, sandboxing, workflow mechanics, resources, binary-cache availability, lower-store-db, testing |
 | [`doc/GLOSSARY.md`](doc/GLOSSARY.md) | everyone | the canonical domain vocabulary (terms, not facts) |
 | [`openspec/specs/`](openspec/specs/) | everyone (requirements) | the canonical, maintained capability corpus |

@@ -6,11 +6,11 @@ wrappers. Deep wiring internals live in
 [`doc/technical_details/`](../technical_details/); the direct-deploy feature
 has its own guide ([`deploy.md`](deploy.md)).
 
-- What you import: six NixOS modules — `nixtache.nixosModules.runner` (the
+- What you import: five NixOS modules — `nixtache.nixosModules.runner` (the
   Actions runner in a NixOS container), `.deploy-target` (receive direct
   deploys), `.ab-image` (A/B appliance image config), `.overlay-nix`
   (writable store overlay for appliances), `.auto-update` (unified
-  auto-update channel), `.secrets` (secrets-provider abstraction).
+  auto-update channel).
 - What gets generated: option references for this flake AND helpers
   (`nixtache.lib.mkDocs`) so consumers document their own configurations and
   devShells — see [`docs-generation.md`](docs-generation.md).

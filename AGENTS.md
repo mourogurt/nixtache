@@ -16,7 +16,6 @@ modules/deploy-target/ receiving side of direct deploy
 modules/ab-image/      build-time A/B appliance image config
 modules/overlay-nix/   writable /nix/store overlay for appliances
 modules/auto-update/   unified auto-update channel
-modules/secrets.nix    secrets provider abstraction (vars + providers)
 lib/mkDocs.nix         consumer docs helper (nixtache.lib.mkDocs)
 tests/                 test suites + fixtures (see below)
 .forgejo/workflows/    reusable workflows + this repo's own ci.yml + vmtests.yml
@@ -162,11 +161,3 @@ Runner-side mechanics (sandbox probe, credential wiring, reusable-workflow
 resolution) are documented once in `doc/technical_details/` — `sandboxing.md`,
 `module-ci-wiring.md`, `workflow-mechanics.md`. Workflow and action inventories
 live in the [README repository map](README.md#repository-map).
-
-## TODO / out of scope
-
-- **Secret provider implementations.** The provider abstraction
-  (`services.nixtache.secrets.{vars,providers}`) is in place — see
-  `modules/secrets.nix` and `doc/user_guide/secrets.md`. Concrete provider
-  modules (`ssh`, `forgejo`, `vault` as primary, `systemd`) land
-  incrementally, each just appending to `vars`.
