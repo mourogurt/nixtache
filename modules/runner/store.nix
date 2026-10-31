@@ -300,7 +300,7 @@ in
                 ExecStart =
                   let
                     daemonCmd = if useOverlay
-                      then "${lib.getExe' config.nix.package "nix-daemon"} --store '${overlayStoreUrl}'"
+                      then "${lib.getExe' config.nix.package "nix-daemon"} --store '${lib.replaceStrings [ "%" ] [ "%%" ] overlayStoreUrl}'"
                       else "${lib.getExe' config.nix.package "nix-daemon"} --daemon";
                   in
                   if cfg.enableSandbox
@@ -426,10 +426,6 @@ in
       systemd.sockets.nix-daemon-custom = mkIf customStore {
         description = "Custom Nix Daemon Socket";
         listenStreams = [ "${cfg.store.path}/nix/var/nix/daemon-socket/socket" ];
-        after = optional useOverlay "nix-daemon-overlay-mount.service"
-          ++ optional useClone "nix-daemon-storage.service";
-        requires = optional useOverlay "nix-daemon-overlay-mount.service"
-          ++ optional useClone "nix-daemon-storage.service";
         socketConfig.DirectoryMode = "0755";
         wantedBy = [ "sockets.target" ];
       };

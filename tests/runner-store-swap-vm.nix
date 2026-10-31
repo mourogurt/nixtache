@@ -170,10 +170,19 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet container@runner.service", timeout=600
     )
-    appliance.wait_until_succeeds(
-      "nixos-container run runner -- systemctl is-active nix-daemon-custom",
-      timeout=600
-    )
+    try:
+        appliance.wait_until_succeeds(
+          "nixos-container run runner -- systemctl is-active nix-daemon-custom",
+          timeout=600
+        )
+    except Exception:
+        print("DIAG custom daemon units:")
+        print(crun("systemctl status nix-daemon-custom.service nix-daemon-custom.socket nix-daemon-overlay-mount.service --no-pager -l 2>&1 || true"))
+        print("DIAG custom daemon journal:")
+        print(crun("journalctl -u nix-daemon-custom.service -u nix-daemon-custom.socket -u nix-daemon-overlay-mount.service -n 100 --no-pager 2>&1 || true"))
+        print("DIAG custom daemon paths:")
+        print(crun("ls -ld /srv/nix /srv/nix/var /srv/nix/var/nix /srv/nix/var/nix/daemon-socket /srv/nix/var/nix/daemon-socket/socket 2>&1 || true"))
+        raise
     print("OK: runner container + custom daemon up on the appliance")
 
     # -- A CI build through the relocated store works pre-swap ---------------
