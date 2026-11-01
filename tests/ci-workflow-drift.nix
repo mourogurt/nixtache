@@ -82,6 +82,16 @@ pkgs.runCommand "ci-workflow-drift-test"
               return "runs nix build / nix flake check"
       return None
 
+  def load_workflow(name, description):
+      path = os.path.join(src, name)
+      if not os.path.exists(path):
+          bad("%s: missing (%s)" % (name, description))
+          return None, {}
+      with open(path) as f:
+          wf = yaml.safe_load(f) or {}
+      # PyYAML resolves the bare `on:` trigger key to the boolean True.
+      return wf, wf.get("on") or wf.get(True) or {}
+
   for path in sorted(glob.glob(os.path.join(src, "*.yml"))):
       wf_name = os.path.basename(path)
       with open(path) as f:
@@ -213,14 +223,8 @@ pkgs.runCommand "ci-workflow-drift-test"
   # update work, and only the two consumer rebuild steps depend on the
   # profile — update, flake validation and push stay profile-independent,
   # so existing consumer wrappers keep working unchanged.
-  update_path = os.path.join(src, "update-flake.yml")
-  if not os.path.exists(update_path):
-      bad("update-flake.yml: missing (reusable update pipeline)")
-  else:
-      with open(update_path) as f:
-          update = yaml.safe_load(f) or {}
-      # PyYAML resolves the bare `on:` trigger key to the boolean True.
-      update_triggers = update.get("on") or update.get(True) or {}
+  update, update_triggers = load_workflow("update-flake.yml", "reusable update pipeline")
+  if update is not None:
       for trig_name in ("workflow_call", "workflow_dispatch"):
           trig = update_triggers.get(trig_name) or {}
           inputs = trig.get("inputs") or {}
@@ -277,13 +281,8 @@ pkgs.runCommand "ci-workflow-drift-test"
   # the Monday schedule, the manual entry point, the @main reusable target
   # and the self inputs, so schedule or input drift cannot silently change
   # when/where nixtache updates its own lock file.
-  self_path = os.path.join(src, "self-update.yml")
-  if not os.path.exists(self_path):
-      bad("self-update.yml: missing (nixtache self-update caller)")
-  else:
-      with open(self_path) as f:
-          self_wf = yaml.safe_load(f) or {}
-      self_triggers = self_wf.get("on") or self_wf.get(True) or {}
+  self_wf, self_triggers = load_workflow("self-update.yml", "nixtache self-update caller")
+  if self_wf is not None:
       crons = [e.get("cron") for e in (self_triggers.get("schedule") or [])]
       if "15 4 * * 1" not in crons:
           bad("self-update.yml: weekly cron must be '15 4 * * 1' (got %r)" % (crons,))
