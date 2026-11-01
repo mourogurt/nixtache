@@ -364,8 +364,8 @@ pkgs.runCommand "ci-workflow-drift-test"
               bad("self-update.yml preflight: does not query the runners API with the OIDC JWT")
           elif "ACTIONS_ID_TOKEN_REQUEST_URL&audience=$RUNNER_DISCOVERY_AUDIENCE" not in select_run or "NIXTACHE_RUNNER_DISCOVERY_AUDIENCE" not in select_run:
               bad("self-update.yml preflight: does not obtain a JWT for the configured Authorized Integration audience")
-          elif "runner=test" not in select_run or "runner=kvm" not in select_run or "online" not in select_run or ".labels" not in select_run:
-              bad("self-update.yml preflight: must select online kvm and retain test fallback")
+          elif "runner=test" not in select_run or "runner=kvm" not in select_run or '"active"' not in select_run or '"idle"' not in select_run or ".labels" not in select_run:
+              bad("self-update.yml preflight: must select active/idle kvm and retain test fallback")
           elif 'echo "runner=$runner" >> "$GITHUB_OUTPUT"' not in select_run:
               bad("self-update.yml preflight: selected runner is not exported")
           else:

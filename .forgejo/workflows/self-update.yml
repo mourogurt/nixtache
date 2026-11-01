@@ -60,7 +60,7 @@ jobs:
             echo "::warning::self-update: Forgejo runner discovery failed; selecting the test runner."
           elif jq -e '
             def online_kvm:
-              (.status // "") == "online" and
+              ((.status // "") == "active" or (.status // "") == "idle") and
               any(.labels[]?;
                 (if type == "string" then . else (.name // "") end)
                 | split(":")[0] == "kvm");
