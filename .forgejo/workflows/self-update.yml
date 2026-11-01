@@ -95,9 +95,13 @@ jobs:
           candidate="${{ needs.select-runner.outputs.runner }}"
           runner=test
           if [ "$candidate" = "kvm" ]; then
-            if [ -c /dev/kvm ] && (exec 3<>/dev/kvm) 2>/dev/null; then
+            if [ -c /dev/kvm ] && (exec 3<>/dev/kvm); then
               runner=kvm
             else
+              if [ ! -c /dev/kvm ]; then
+                echo "self-update: /dev/kvm is not a character device in the runner job environment."
+              fi
+              (exec 3<>/dev/kvm)
               if [ -e /dev/kvm ]; then
                 ls -l /dev/kvm
               else
