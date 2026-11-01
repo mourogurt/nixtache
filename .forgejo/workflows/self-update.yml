@@ -70,6 +70,13 @@ jobs:
             runner=kvm
           else
             echo "::warning::self-update: no online kvm runner found; selecting the test runner."
+            jq -c '
+              def runner_list: if type == "array" then . else (.runners // []) end;
+              "self-update: runners API summary: " + ({
+                top_level_keys: (if type == "object" then keys else [] end),
+                runners: (runner_list | map({name, status, labels}))
+              } | tojson)
+            ' "$response"
           fi
           echo "runner=$runner" >> "$GITHUB_OUTPUT"
           echo "self-update: selected the $runner runner."
