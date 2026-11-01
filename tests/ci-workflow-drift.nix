@@ -307,8 +307,8 @@ pkgs.runCommand "ci-workflow-drift-test"
               eval_pos = vm_run.find("nix eval")
               if skip_pos < 0 or eval_pos < 0 or skip_pos > eval_pos:
                   bad("update-flake.yml VM step: unavailable /dev/kvm must skip before inventory discovery")
-              elif "[ ! -c /dev/kvm ]" not in vm_run or "[ ! -r /dev/kvm ]" not in vm_run or "[ ! -w /dev/kvm ]" not in vm_run:
-                  bad("update-flake.yml VM step: must require a readable/writable /dev/kvm character device")
+              elif "[ ! -c /dev/kvm ]" not in vm_run or "! (exec 3<>/dev/kvm)" not in vm_run:
+                  bad("update-flake.yml VM step: must require a character device that opens read/write")
               elif "artifacts/vm-tests/skipped.log" not in vm_run or "exit 0" not in vm_run[:eval_pos]:
                   bad("update-flake.yml VM step: unavailable KVM must record a skip and exit successfully")
               else:
@@ -378,8 +378,8 @@ pkgs.runCommand "ci-workflow-drift-test"
               bad("self-update.yml capability probe: runner output is not wired from steps.probe")
           else:
               probe_run = "\n".join(s.get("run") or "" for s in (probe.get("steps") or []))
-              if "[ -c /dev/kvm ]" not in probe_run or "[ -r /dev/kvm ]" not in probe_run or "[ -w /dev/kvm ]" not in probe_run:
-                  bad("self-update.yml capability probe: must check for a usable /dev/kvm")
+              if "[ -c /dev/kvm ]" not in probe_run or "(exec 3<>/dev/kvm)" not in probe_run:
+                  bad("self-update.yml capability probe: must check that /dev/kvm opens read/write")
               elif 'candidate="''${{ needs.select-runner.outputs.runner }}"' not in probe_run or "runner=test" not in probe_run or "runner=kvm" not in probe_run:
                   bad("self-update.yml capability probe: must choose kvm only for a capable candidate and test otherwise")
               else:

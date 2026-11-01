@@ -95,7 +95,7 @@ jobs:
           candidate="${{ needs.select-runner.outputs.runner }}"
           runner=test
           if [ "$candidate" = "kvm" ]; then
-            if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            if [ -c /dev/kvm ] && (exec 3<>/dev/kvm) 2>/dev/null; then
               runner=kvm
             else
               if [ -e /dev/kvm ]; then

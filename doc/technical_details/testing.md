@@ -62,7 +62,7 @@ Every non-parked suite must pass a full dispatch.
 
 The `nixtache-self` update profile also discovers suite names directly from
 `vmTests.x86_64-linux`, so its pre-push gate cannot drift from the flake
-inventory. With a readable/writable `/dev/kvm`, it builds every discovered
+inventory. With `/dev/kvm` that opens read/write, it builds every discovered
 suite with at most three concurrent builds, writes each full transcript to
 `artifacts/vm-tests/<suite>/full.log` and fails before push on any suite
 failure. Without that device, it writes `artifacts/vm-tests/skipped.log` and

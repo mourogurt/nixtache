@@ -189,7 +189,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/vm-tests
-          if [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+          if [ ! -c /dev/kvm ] || ! (exec 3<>/dev/kvm) 2>/dev/null; then
             echo "update-flake: /dev/kvm is unavailable or not readable/writable; skipping the full VM inventory." | tee artifacts/vm-tests/skipped.log
             exit 0
           fi
