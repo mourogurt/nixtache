@@ -1,0 +1,85 @@
+name: "Git LFS fetch"
+description: "Preserve an explicit LFS endpoint or select pure SSH with HTTPS fallback, then fetch LFS objects"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Select LFS transport and fetch objects
+      shell: bash
+      run: |
+        set -euo pipefail
+        log_dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lfs-fetch.XXXXXX")
+        trap 'rm -rf "$log_dir"' EXIT
+
+        if ! git lfs version > /dev/null 2>&1; then
+          echo "::error::lfs-fetch: git-lfs is unavailable on this runner."
+          exit 1
+        fi
+
+        endpoint_key='^(lfs\.(url|pushurl)|remote\..*\.lfs(url|pushurl))$'
+        explicit=false
+        if git config --get-regexp "$endpoint_key" > /dev/null 2>&1; then
+          explicit=true
+        elif [ -f .lfsconfig ] && git config -f .lfsconfig --get-regexp "$endpoint_key" > /dev/null 2>&1; then
+          explicit=true
+        fi
+
+        if [ "$explicit" = "true" ]; then
+          if ! git lfs pull > "$log_dir/explicit.log" 2>&1; then
+            echo "::error::lfs-fetch: the explicitly configured LFS endpoint could not fetch objects; its configuration was preserved. Endpoint output is redacted to protect credentials."
+            exit 1
+          fi
+          echo "lfs-fetch: fetched objects using the explicitly configured LFS endpoint."
+          exit 0
+        fi
+
+        if [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITHUB_SERVER_URL:-}" ]; then
+          echo "::error::lfs-fetch: GITHUB_REPOSITORY and GITHUB_SERVER_URL are required to derive LFS endpoints."
+          exit 1
+        fi
+
+        origin=$(git remote get-url origin 2> /dev/null || true)
+        case "$origin" in
+          ssh://*|git+ssh://*)
+            ssh_url="$origin"
+            ;;
+          *@*:*)
+            case "$origin" in
+              *://*) origin="" ;;
+            esac
+            if [ -n "$origin" ]; then ssh_url="$origin"; fi
+            ;;
+        esac
+
+        if [ -z "${ssh_url:-}" ]; then
+          ssh_host="${NIXTACHE_GIT_SSH_HOST:-}"
+          if [ -z "$ssh_host" ]; then
+            ssh_host="${GITHUB_SERVER_URL#https://}"
+            ssh_host="${ssh_host#http://}"
+            ssh_host="${ssh_host%%/*}"
+            ssh_host="${ssh_host%%:*}"
+          fi
+          ssh_user="${NIXTACHE_UPDATE_GIT_USER:-${NIXTACHE_FLAKE_GIT_USER:-git}}"
+          ssh_url="ssh://${ssh_user}@${ssh_host}/${GITHUB_REPOSITORY}.git"
+        fi
+        https_url="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}.git/info/lfs"
+
+        # `always` prevents git-lfs from silently downgrading a failed pure-SSH
+        # probe to the hybrid SSH/HTTPS protocol; fallback is selected explicitly.
+        git config --local lfs.url "$ssh_url"
+        git config --local lfs.sshtransfer always
+        if git lfs pull > "$log_dir/ssh.log" 2>&1; then
+          echo "lfs-fetch: pure-SSH LFS selected; objects fetched and the local endpoint retained for later pushes."
+          exit 0
+        fi
+        echo "::warning::lfs-fetch: pure-SSH LFS could not fetch objects; trying the HTTPS endpoint. Endpoint output is redacted to protect credentials."
+
+        git config --local lfs.url "$https_url"
+        git config --local lfs.sshtransfer never
+        if git lfs pull > "$log_dir/https.log" 2>&1; then
+          echo "lfs-fetch: HTTPS LFS fallback selected; objects fetched and the local endpoint retained for later pushes."
+          exit 0
+        fi
+
+        echo "::error::lfs-fetch: neither the pure-SSH nor the HTTPS LFS endpoint for ${GITHUB_REPOSITORY} could fetch objects. Endpoint and credential output is redacted."
+        exit 1

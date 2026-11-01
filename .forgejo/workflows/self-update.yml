@@ -10,7 +10,10 @@
 # nixosConfigurations (only the abtest-remote dogfood fixture) and no
 # devShells, and flake-validation already builds every checks.* suite.
 #
-# Runs on the dedicated `test` runner (label `test:host`), like ci.yml.
+# A preflight on the dedicated `test` runner selects an online `kvm` runner
+# through the Forgejo API, or retains `test` when no optional KVM runner is
+# available. A capability probe on that candidate falls back to `test` when
+# /dev/kvm is unusable; the reusable pipeline skips VM suites in that case.
 # In the Forgejo UI the call renders as two jobs: `update-flake` (0s caller)
 # and `update-flake-1` (the work). Expected.
 name: Self Update Flake
@@ -22,9 +25,71 @@ on:
   workflow_dispatch:
 
 jobs:
+  select-runner:
+    runs-on: test
+    permissions:
+      actions: read
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - name: Select an online KVM runner or fall back to test
+        id: select
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          response=$(mktemp)
+          trap 'rm -f "$response"' EXIT
+          api="${GITHUB_API_URL:-${GITHUB_SERVER_URL%/}/api/v1}"
+          runner=test
+          if ! curl -fsS --max-time 30 \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            "$api/repos/$GITHUB_REPOSITORY/actions/runners" -o "$response"; then
+            echo "::warning::self-update: Forgejo runner discovery failed; selecting the test runner."
+          elif jq -e '
+            def online_kvm:
+              (.status // "") == "online" and
+              any(.labels[]?;
+                (if type == "string" then . else (.name // "") end)
+                | split(":")[0] == "kvm");
+            (if type == "array" then . else (.runners // []) end)
+            | any(.[]?; online_kvm)
+          ' "$response" > /dev/null; then
+            runner=kvm
+          else
+            echo "::warning::self-update: no online kvm runner found; selecting the test runner."
+          fi
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "self-update: selected the $runner runner."
+
+  probe-runner:
+    needs: select-runner
+    runs-on: ${{ needs.select-runner.outputs.runner }}
+    outputs:
+      runner: ${{ steps.probe.outputs.runner }}
+    steps:
+      - name: Check KVM on the selected runner
+        id: probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          candidate="${{ needs.select-runner.outputs.runner }}"
+          runner=test
+          if [ "$candidate" = "kvm" ]; then
+            if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              runner=kvm
+            else
+              echo "::warning::self-update: the online kvm runner has no usable /dev/kvm; selecting the test runner."
+            fi
+          fi
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "self-update: selected the $runner runner after the KVM capability probe."
+
   update-flake:
+    needs: probe-runner
     uses: nixops/nixtache/.forgejo/workflows/update-flake.yml@main
     with:
-      runner: test
+      runner: ${{ needs.probe-runner.outputs.runner }}
       validation-profile: nixtache-self
     secrets: inherit

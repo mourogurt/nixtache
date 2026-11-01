@@ -17,9 +17,12 @@
 # before update work, and only the two consumer rebuild steps depend on the
 # profile (update, flake validation and push stay profile-independent).
 # self-update.yml — nixtache's own caller for that pipeline — is pinned to
-# its Monday schedule, manual trigger, the @main reusable target and its
-# self inputs (test runner, nixtache-self profile, inherited secrets).
-# Fast, no KVM.
+# its Monday schedule, manual trigger, online-kvm/test preflight and @main
+# reusable target. The self profile discovers and builds the full VM inventory
+# only with usable /dev/kvm and records a successful skip otherwise. Four
+# LFS-enabled workflows defer checkout transfer to the shared lfs-fetch action;
+# fake endpoints exercise SSH preference, HTTPS fallback, explicit endpoint
+# preservation and redacted total failure. Fast, no KVM.
 { nixpkgs, system ? "x86_64-linux" }:
 
 let
@@ -28,6 +31,7 @@ let
   workflowsSrc = pkgs.runCommand "nixtache-forgejo-workflows" { } ''
     mkdir -p $out
     cp ${../.forgejo/workflows}/*.yml $out/
+    cp ${../.forgejo/actions/lfs-fetch/action.yml} $out/lfs-fetch-action.yml
   '';
 in
 pkgs.runCommand "ci-workflow-drift-test"
@@ -38,10 +42,11 @@ pkgs.runCommand "ci-workflow-drift-test"
   set -uo pipefail
   report="$(mktemp)"
   python3 - "${workflowsSrc}" "$report" <<'PYEOF'
-  import glob, os, re, sys
+  import glob, os, re, shutil, subprocess, sys, tempfile, textwrap
   import yaml
 
   src, report_path = sys.argv[1], sys.argv[2]
+  action_path = os.path.join(src, "lfs-fetch-action.yml")
 
   # Composite actions that read SANDBOX_OK (exported by sandbox-probe) and
   # fall back to --no-sandbox when it is unset.
@@ -270,12 +275,55 @@ pkgs.runCommand "ci-workflow-drift-test"
                   bad("update-flake.yml step '%s': must be consumer-profile-only (got if: %r)" % (name, if_))
               else:
                   ok("update-flake.yml step '%s' is consumer-profile-only" % name)
+          vm_step_name = "Validate VM suites (nixtache-self)"
           for name, step in by_name.items():
-              if name in rebuild_steps or name == "Guard — update-flake enabled?":
+              if name in rebuild_steps or name in ("Guard — update-flake enabled?", vm_step_name):
                   continue
               if "validation-profile" in (step.get("if") or ""):
                   bad("update-flake.yml step '%s': must stay profile-independent (got if: %r)" % (name, step.get("if")))
           ok("update-flake.yml shared steps (update, validation, push, artifacts) stay profile-independent")
+
+          vm_step = by_name.get(vm_step_name)
+          if vm_step is None:
+              bad("update-flake.yml: missing self-only VM validation step")
+          else:
+              vm_if = vm_step.get("if") or ""
+              vm_run = vm_step.get("run") or ""
+              if "steps.guard.outputs.enabled == 'true'" not in vm_if or "inputs.validation-profile == 'nixtache-self'" not in vm_if:
+                  bad("update-flake.yml VM step: must be guarded and nixtache-self-only (got if: %r)" % vm_if)
+              else:
+                  ok("update-flake.yml VM step is self-only and never runs for consumer updates")
+              if "nix eval --json --apply builtins.attrNames .#vmTests.x86_64-linux" not in vm_run:
+                  bad("update-flake.yml VM step: does not discover the full vmTests.x86_64-linux attribute inventory")
+              elif 'jq -r' not in vm_run or "xargs -r -n 1 -P 3" not in vm_run:
+                  bad("update-flake.yml VM step: inventory must drive bounded per-suite builds")
+              elif '.#vmTests.x86_64-linux.$suite' not in vm_run or "artifacts/vm-tests/$suite/full.log" not in vm_run:
+                  bad("update-flake.yml VM step: missing per-suite targets or retained full logs")
+              elif 'return "$rc"' not in vm_run:
+                  bad("update-flake.yml VM step: suite failure status is not propagated")
+              else:
+                  ok("update-flake.yml VM step discovers and builds the full inventory with per-suite logs")
+              skip_pos = vm_run.find("skipping the full VM inventory")
+              eval_pos = vm_run.find("nix eval")
+              if skip_pos < 0 or eval_pos < 0 or skip_pos > eval_pos:
+                  bad("update-flake.yml VM step: unavailable /dev/kvm must skip before inventory discovery")
+              elif "[ ! -c /dev/kvm ]" not in vm_run or "[ ! -r /dev/kvm ]" not in vm_run or "[ ! -w /dev/kvm ]" not in vm_run:
+                  bad("update-flake.yml VM step: must require a readable/writable /dev/kvm character device")
+              elif "artifacts/vm-tests/skipped.log" not in vm_run or "exit 0" not in vm_run[:eval_pos]:
+                  bad("update-flake.yml VM step: unavailable KVM must record a skip and exit successfully")
+              else:
+                  ok("update-flake.yml VM step records a successful skip before discovery when KVM is unavailable")
+              step_names = [s.get("name") for s in steps]
+              ordered_names = ["Update Flakes Inputs", "Validate Nix Configuration", vm_step_name, "Push Changes"]
+              try:
+                  positions = [step_names.index(name) for name in ordered_names]
+              except ValueError:
+                  bad("update-flake.yml: update → flake validation → VM tests → push ordering cannot be checked")
+              else:
+                  if positions != sorted(positions):
+                      bad("update-flake.yml: expected update → flake validation → VM tests → push ordering")
+                  else:
+                      ok("update-flake.yml orders update → flake validation → VM tests/skip → push")
 
   # self-update.yml is nixtache's own caller for the shared pipeline: pin
   # the Monday schedule, the manual entry point, the @main reusable target
@@ -293,25 +341,245 @@ pkgs.runCommand "ci-workflow-drift-test"
       else:
           ok("self-update.yml has a manual workflow_dispatch trigger")
       self_jobs = self_wf.get("jobs") or {}
-      if len(self_jobs) != 1:
-          bad("self-update.yml: expected exactly one job (got %d)" % len(self_jobs))
+      if set(self_jobs) != {"select-runner", "probe-runner", "update-flake"}:
+          bad("self-update.yml: expected select-runner + probe-runner + update-flake jobs (got %r)" % list(self_jobs))
       else:
-          job = list(self_jobs.values())[0]
+          select = self_jobs["select-runner"]
+          if select.get("runs-on") != "test":
+              bad("self-update.yml preflight: must run on test (got %r)" % (select.get("runs-on"),))
+          elif (select.get("outputs") or {}).get("runner") != "''${{ steps.select.outputs.runner }}":
+              bad("self-update.yml preflight: runner output is not wired from steps.select")
+          elif (select.get("permissions") or {}).get("actions") != "read":
+              bad("self-update.yml preflight: needs actions: read for runner discovery")
+          else:
+              ok("self-update.yml preflight runs on test and exports its runner selection")
+          select_steps = select.get("steps") or []
+          select_run = "\n".join(s.get("run") or "" for s in select_steps)
+          if "/repos/$GITHUB_REPOSITORY/actions/runners" not in select_run or "Authorization: token $FORGEJO_TOKEN" not in select_run:
+              bad("self-update.yml preflight: does not query the authenticated repository runners API")
+          elif "runner=test" not in select_run or "runner=kvm" not in select_run or "online" not in select_run or ".labels" not in select_run:
+              bad("self-update.yml preflight: must select online kvm and retain test fallback")
+          elif 'echo "runner=$runner" >> "$GITHUB_OUTPUT"' not in select_run:
+              bad("self-update.yml preflight: selected runner is not exported")
+          else:
+              ok("self-update.yml preflight discovers online kvm via the API and falls back to test")
+
+          probe = self_jobs["probe-runner"]
+          if probe.get("needs") != "select-runner" or probe.get("runs-on") != "''${{ needs.select-runner.outputs.runner }}":
+              bad("self-update.yml capability probe: must run on the discovery-selected candidate")
+          elif (probe.get("outputs") or {}).get("runner") != "''${{ steps.probe.outputs.runner }}":
+              bad("self-update.yml capability probe: runner output is not wired from steps.probe")
+          else:
+              probe_run = "\n".join(s.get("run") or "" for s in (probe.get("steps") or []))
+              if "[ -c /dev/kvm ]" not in probe_run or "[ -r /dev/kvm ]" not in probe_run or "[ -w /dev/kvm ]" not in probe_run:
+                  bad("self-update.yml capability probe: must check for a usable /dev/kvm")
+              elif 'candidate="''${{ needs.select-runner.outputs.runner }}"' not in probe_run or "runner=test" not in probe_run or "runner=kvm" not in probe_run:
+                  bad("self-update.yml capability probe: must choose kvm only for a capable candidate and test otherwise")
+              else:
+                  ok("self-update.yml capability probe switches device-less KVM candidates to test")
+
+          job = self_jobs["update-flake"]
           if job.get("uses") != "nixops/nixtache/.forgejo/workflows/update-flake.yml@main":
               bad("self-update.yml: must call nixops/nixtache/.forgejo/workflows/update-flake.yml@main (got %r)" % (job.get("uses"),))
+          elif job.get("needs") != "probe-runner":
+              bad("self-update.yml: update call must need the KVM capability probe")
           else:
-              ok("self-update.yml calls the shared pipeline at @main")
+              ok("self-update.yml calls the shared pipeline at @main after preflight")
           with_ = job.get("with") or {}
-          if with_.get("runner") != "test":
-              bad("self-update.yml: must select the 'test' runner (got %r)" % (with_.get("runner"),))
+          if with_.get("runner") != "''${{ needs.probe-runner.outputs.runner }}":
+              bad("self-update.yml: must forward the preflight runner selection (got %r)" % (with_.get("runner"),))
           elif with_.get("validation-profile") != "nixtache-self":
               bad("self-update.yml: must select the nixtache-self profile (got %r)" % (with_.get("validation-profile"),))
           else:
-              ok("self-update.yml self inputs: runner=test, validation-profile=nixtache-self")
+              ok("self-update.yml self inputs: dynamic kvm/test runner, nixtache-self profile")
           if job.get("secrets") != "inherit":
               bad("self-update.yml: must pass secrets: inherit (the pipeline reads the runner's credential secrets)")
           else:
               ok("self-update.yml forwards secrets: inherit")
+
+  # Every LFS-enabled reusable workflow defers checkout transfer until the
+  # shared action has run after SSH setup and before the first build/update.
+  lfs_workflows = {
+      "nix-check.yml": "Validate Nix Configuration",
+      "deploy.yml": "Deploy to targets",
+      "docs.yml": "Generate documentation",
+      "update-flake.yml": "Update Flakes Inputs",
+  }
+  with open(action_path) as f:
+      lfs_action = yaml.safe_load(f) or {}
+  lfs_action_run = "\n".join(
+      s.get("run") or "" for s in (lfs_action.get("runs") or {}).get("steps") or []
+  )
+  for wf_name, work_name in lfs_workflows.items():
+      wf, _ = load_workflow(wf_name, "LFS-enabled reusable workflow")
+      if wf is None:
+          continue
+      for jname, job in (wf.get("jobs") or {}).items():
+          steps = job.get("steps") or []
+          label = "%s job '%s'" % (wf_name, jname)
+          caller = next((
+              s for s in steps
+              if action_name(s).startswith("checkout@")
+              and not (s.get("with") or {}).get("repository")
+          ), None)
+          if caller is None:
+              bad("%s: no caller checkout (checker stale?)" % label)
+          elif (caller.get("with") or {}).get("lfs") is not False:
+              bad("%s: caller checkout must set lfs: false" % label)
+          else:
+              ok("%s: caller checkout defers LFS transfer" % label)
+
+          names = [s.get("name") for s in steps]
+          ssh_idx = next((i for i, s in enumerate(steps) if action_name(s) == "ssh-setup"), None)
+          lfs_idx = next((i for i, s in enumerate(steps) if action_name(s) == "lfs-fetch"), None)
+          work_idx = next((i for i, s in enumerate(steps) if s.get("name") == work_name), None)
+          if ssh_idx is None or lfs_idx is None or work_idx is None:
+              bad("%s: expected ssh-setup, lfs-fetch and '%s' steps" % (label, work_name))
+          elif not ssh_idx < lfs_idx < work_idx:
+              bad("%s: expected ssh-setup < lfs-fetch < %s ordering" % (label, work_name))
+          else:
+              ok("%s: LFS transport setup follows SSH and precedes build/update work" % label)
+
+          if wf_name == "update-flake.yml":
+              push_idx = next((i for i, s in enumerate(steps) if s.get("name") == "Push Changes"), None)
+              if push_idx is None or lfs_idx is None or lfs_idx >= push_idx:
+                  bad("%s: lfs-fetch must run before Push Changes" % label)
+              elif "git config --local lfs.url" not in lfs_action_run or re.search(r"git config[^\n]*--unset[^\n]*lfs\.url", lfs_action_run):
+                  bad("lfs-fetch: selected endpoint is not retained in local config for the update push")
+              else:
+                  ok("update-flake.yml: selected LFS endpoint remains local and effective through Push Changes")
+
+  # Execute the real composite run script against fake git endpoints. The fake
+  # emits a credential marker on every pull; the action must capture rather
+  # than expose it, including on the no-working-transport path.
+  fake_git = textwrap.dedent(r"""#!/bin/bash
+      set -u
+      config_value() {
+        grep -E "^$1 " "$FAKE_STATE/config" 2>/dev/null | tail -n 1 | cut -d' ' -f2- || true
+      }
+      if [ "$1" = "lfs" ] && [ "''${2:-}" = "version" ]; then
+        exit 0
+      fi
+      if [ "$1" = "config" ] && [ "''${2:-}" = "--get-regexp" ]; then
+        if [ "$FAKE_MODE" = "explicit" ]; then
+          echo "lfs.url https://explicit.invalid/repo.git/info/lfs"
+          exit 0
+        fi
+        exit 1
+      fi
+      if [ "$1" = "config" ] && [ "''${2:-}" = "--local" ]; then
+        printf '%s %s\n' "$3" "$4" >> "$FAKE_STATE/config"
+        printf '%s=%s\n' "$3" "$4" >> "$FAKE_STATE/sets"
+        exit 0
+      fi
+      if [ "$1" = "remote" ] && [ "''${2:-}" = "get-url" ]; then
+        echo "https://secret-token@forgejo.invalid/nixops/nixtache.git"
+        exit 0
+      fi
+      if [ "$1" = "lfs" ] && [ "''${2:-}" = "pull" ]; then
+        url=$(config_value lfs.url)
+        transfer=$(config_value lfs.sshtransfer)
+        printf '%s\t%s\n' "$url" "$transfer" >> "$FAKE_STATE/pulls"
+        echo "fake endpoint received secret-token" >&2
+        case "$FAKE_MODE" in
+          ssh)
+            if [ "$transfer" = "always" ]; then
+              case "$url" in ssh://*) exit 0 ;; esac
+            fi
+            ;;
+          https)
+            if [ "$transfer" = "never" ]; then
+              case "$url" in https://*) exit 0 ;; esac
+            fi
+            ;;
+          explicit)
+            if [ "$url" = "https://explicit.invalid/repo.git/info/lfs" ]; then exit 0; fi
+            ;;
+        esac
+        exit 1
+      fi
+      exit 2
+  """).replace("#!/bin/bash", "#!" + shutil.which("bash"), 1)
+  for mode in ("ssh", "https", "explicit", "none"):
+      with tempfile.TemporaryDirectory() as td:
+          state = os.path.join(td, "state")
+          bin_dir = os.path.join(td, "bin")
+          os.makedirs(state)
+          os.makedirs(bin_dir)
+          for name in ("config", "pulls"):
+              open(os.path.join(state, name), "w").close()
+          if mode == "explicit":
+              with open(os.path.join(state, "config"), "w") as f:
+                  f.write("lfs.url https://explicit.invalid/repo.git/info/lfs\n")
+          fake_path = os.path.join(bin_dir, "git")
+          with open(fake_path, "w") as f:
+              f.write(fake_git)
+          os.chmod(fake_path, 0o755)
+          script_path = os.path.join(td, "action.sh")
+          with open(script_path, "w") as f:
+              f.write(lfs_action_run)
+          env = os.environ.copy()
+          env.update({
+              "PATH": bin_dir + os.pathsep + env["PATH"],
+              "FAKE_MODE": mode,
+              "FAKE_STATE": state,
+              "RUNNER_TEMP": td,
+              "TMPDIR": td,
+              "GITHUB_REPOSITORY": "nixops/nixtache",
+              "GITHUB_SERVER_URL": "https://forgejo.invalid",
+              "NIXTACHE_GIT_SSH_HOST": "forgejo.invalid",
+              "NIXTACHE_UPDATE_GIT_USER": "update-bot",
+          })
+          result = subprocess.run(
+              ["bash", script_path], cwd=td, env=env,
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+          )
+          output = result.stdout
+          with open(os.path.join(state, "pulls")) as f:
+              pulls = [line.rstrip("\n").split("\t") for line in f if line.strip()]
+          config = {}
+          with open(os.path.join(state, "config")) as f:
+              for line in f:
+                  key, value = line.rstrip("\n").split(" ", 1)
+                  config[key] = value
+
+          if "secret-token" in output:
+              bad("lfs-fetch %s: credential marker leaked into action output" % mode)
+          else:
+              ok("lfs-fetch %s: endpoint output keeps credentials redacted" % mode)
+
+          if mode == "ssh":
+              if result.returncode == 0 and len(pulls) == 1 and pulls[0][0].startswith("ssh://"):
+                  ok("lfs-fetch: pure SSH is preferred when its fetch succeeds")
+              else:
+                  bad("lfs-fetch SSH preference: rc=%d pulls=%r output=%s" % (result.returncode, pulls, output))
+              if config.get("lfs.url", "").startswith("ssh://") and config.get("lfs.sshtransfer") == "always":
+                  ok("lfs-fetch: pure-SSH endpoint and transport are retained locally")
+              else:
+                  bad("lfs-fetch: pure-SSH local config drifted: %r" % config)
+          elif mode == "https":
+              if result.returncode == 0 and len(pulls) == 2 and pulls[0][0].startswith("ssh://") and pulls[1][0].startswith("https://"):
+                  ok("lfs-fetch: failed pure SSH falls back to one HTTPS fetch")
+              else:
+                  bad("lfs-fetch HTTPS fallback: rc=%d pulls=%r output=%s" % (result.returncode, pulls, output))
+              if config.get("lfs.url", "").startswith("https://") and config.get("lfs.sshtransfer") == "never":
+                  ok("lfs-fetch: HTTPS fallback endpoint is retained locally")
+              else:
+                  bad("lfs-fetch: HTTPS local config drifted: %r" % config)
+          elif mode == "explicit":
+              if result.returncode == 0 and len(pulls) == 1 and pulls[0][0] == "https://explicit.invalid/repo.git/info/lfs":
+                  ok("lfs-fetch: explicit repository endpoint is used directly")
+              else:
+                  bad("lfs-fetch explicit endpoint: rc=%d pulls=%r output=%s" % (result.returncode, pulls, output))
+              if not os.path.exists(os.path.join(state, "sets")) and config.get("lfs.url") == "https://explicit.invalid/repo.git/info/lfs":
+                  ok("lfs-fetch: explicit repository endpoint configuration is preserved")
+              else:
+                  bad("lfs-fetch: explicit configuration was overwritten: %r" % config)
+          else:
+              if result.returncode != 0 and len(pulls) == 2 and "pure-SSH" in output and "HTTPS" in output:
+                  ok("lfs-fetch: no working transport fails after naming both attempts")
+              else:
+                  bad("lfs-fetch failure contract: rc=%d pulls=%r output=%s" % (result.returncode, pulls, output))
 
   with open(report_path, "w") as f:
       f.write("\n".join(lines) + "\n")

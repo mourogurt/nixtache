@@ -9,9 +9,9 @@
 #   runner              runner label (default `nixos`)
 #   validation-profile  `consumer` (default: flake validation + the NixOS
 #                       configuration and devShell rebuilds) or
-#                       `nixtache-self` (flake validation only — nixtache's
-#                       own self-update.yml caller, which has no consumer
-#                       configurations or devShells to rebuild)
+#                       `nixtache-self` (flake validation + full VM tests when
+#                       /dev/kvm is usable, skipping them otherwise; no consumer
+#                       configuration or devShell rebuilds)
 #
 # NOTE: the `schedule` trigger must live in the CALLER's thin wrapper, not here
 # (a schedule in nixtache would update nixtache's own flake, not the caller's).
@@ -25,7 +25,7 @@ on:
         type: string
         default: "nixos"
       validation-profile:
-        description: "consumer (default: validation + configuration/devShell rebuilds) or nixtache-self (validation only)."
+        description: "consumer (default: validation + configuration/devShell rebuilds) or nixtache-self (validation + VM tests when KVM is available)."
         type: string
         default: "consumer"
   workflow_dispatch:
@@ -35,7 +35,7 @@ on:
         type: string
         default: "nixos"
       validation-profile:
-        description: "consumer (default: validation + configuration/devShell rebuilds) or nixtache-self (validation only)."
+        description: "consumer (default: validation + configuration/devShell rebuilds) or nixtache-self (validation + VM tests when KVM is available)."
         type: string
         default: "consumer"
 
@@ -46,7 +46,7 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
 
       - name: Checkout nixtache (for reusable actions)
         uses: actions/checkout@v4
@@ -104,6 +104,9 @@ jobs:
         with:
           git-host: ${{ steps.githost.outputs.hosts }}
           creds: flake update
+
+      - name: Fetch Git LFS objects
+        uses: ./.nixtache/.forgejo/actions/lfs-fetch
 
       - name: Guard — update-flake enabled?
         # update-flake needs push credentials. The nixtache runner module
@@ -180,11 +183,57 @@ jobs:
         if: steps.guard.outputs.enabled == 'true'
         uses: ./.nixtache/.forgejo/actions/flake-validation
 
+      - name: Validate VM suites (nixtache-self)
+        if: steps.guard.outputs.enabled == 'true' && inputs.validation-profile == 'nixtache-self'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/vm-tests
+          if [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "update-flake: /dev/kvm is unavailable or not readable/writable; skipping the full VM inventory." | tee artifacts/vm-tests/skipped.log
+            exit 0
+          fi
+
+          inventory=artifacts/vm-tests/inventory.json
+          suites=artifacts/vm-tests/suites.txt
+          nix eval --json --apply builtins.attrNames .#vmTests.x86_64-linux > "$inventory"
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "string")' "$inventory" > /dev/null; then
+            echo "::error::update-flake: vmTests.x86_64-linux inventory is empty or not a list of suite names."
+            exit 1
+          fi
+          jq -r '.[]' "$inventory" > "$suites"
+
+          if [ "${SANDBOX_OK:-0}" = "1" ]; then
+            SANDBOX_FLAG=""
+          else
+            echo "SANDBOX_OK!=1 → --no-sandbox"
+            SANDBOX_FLAG="--no-sandbox"
+          fi
+          export SANDBOX_FLAG
+
+          run_suite() {
+            local suite="$1" rc
+            local log="artifacts/vm-tests/$suite/full.log"
+            mkdir -p "artifacts/vm-tests/$suite"
+            echo "----- $suite: building (full transcript in artifacts/vm-tests/$suite/full.log) -----"
+            if nix build -L --no-link --print-out-paths $SANDBOX_FLAG \
+              ".#vmTests.x86_64-linux.$suite" > "$log" 2>&1; then
+              echo "----- $suite: PASS -----"
+              return 0
+            else
+              rc=$?
+              echo "::error::update-flake: VM suite $suite failed; refusing to push. Full transcript: artifacts/vm-tests/$suite/full.log"
+              tail -n 40 "$log"
+              return "$rc"
+            fi
+          }
+          export -f run_suite
+          xargs -r -n 1 -P 3 bash -c 'run_suite "$1"' _ < "$suites"
+
       - name: Rebuilding All NixOS Configurations
-        # Consumer profile only: the nixtache-self profile validates with the
-        # flake check alone (nixtache has no consumer configurations to
+        # Consumer profile only: nixtache has no consumer configurations to
         # rebuild — only the abtest-remote dogfood fixture, which
-        # flake-validation already builds).
+        # flake-validation already builds.
         if: steps.guard.outputs.enabled == 'true' && inputs.validation-profile == 'consumer'
         uses: ./.nixtache/.forgejo/actions/rebuild-configurations
 

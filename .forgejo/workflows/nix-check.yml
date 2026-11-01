@@ -22,7 +22,7 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
 
       - name: Checkout nixtache (for reusable actions)
         uses: actions/checkout@v4
@@ -71,6 +71,9 @@ jobs:
         with:
           git-host: ${{ steps.githost.outputs.hosts }}
           creds: flake
+
+      - name: Fetch Git LFS objects
+        uses: ./.nixtache/.forgejo/actions/lfs-fetch
 
       - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
         uses: ./.nixtache/.forgejo/actions/sandbox-probe

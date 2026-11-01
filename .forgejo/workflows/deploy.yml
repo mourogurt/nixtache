@@ -38,7 +38,7 @@ jobs:
       - name: Checkout caller repository
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
 
       - name: Checkout nixtache (for the reusable action)
         uses: actions/checkout@v4
@@ -46,6 +46,40 @@ jobs:
           repository: nixops/nixtache
           path: .nixtache
           ref: main
+
+      - name: Derive git hosts
+        id: githost
+        shell: bash
+        run: |
+          push_host="${NIXTACHE_GIT_SSH_HOST:-}"
+          if [ -z "$push_host" ]; then
+            push_host="${GITHUB_SERVER_URL#https://}"; push_host="${push_host#http://}"
+            push_host="${push_host%%:*}"
+          fi
+          hosts="$push_host"
+          while IFS= read -r url; do
+            case "$url" in
+              git+ssh://*) url="${url#git+ssh://}" ;;
+              ssh://*)     url="${url#ssh://}" ;;
+              *)           continue ;;
+            esac
+            host="${url%%/*}"
+            host="${host#*@}"
+            case " $hosts " in
+              *" $host "*) ;;
+              *) hosts="$hosts $host" ;;
+            esac
+          done < <(jq -r '.nodes[].locked.url // empty' flake.lock)
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
+
+      - name: Setup SSH
+        uses: ./.nixtache/.forgejo/actions/ssh-setup
+        with:
+          git-host: ${{ steps.githost.outputs.hosts }}
+          creds: flake
+
+      - name: Fetch Git LFS objects
+        uses: ./.nixtache/.forgejo/actions/lfs-fetch
 
       - name: Probe sandbox (runtime detect sandbox vs --no-sandbox)
         uses: ./.nixtache/.forgejo/actions/sandbox-probe

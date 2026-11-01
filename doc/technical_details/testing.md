@@ -28,7 +28,7 @@ not by `nix flake check`.
 | `tests/ab-existing.nix` | compression/UKI options, runner A/B staging assertions and retain-GC wiring, `hostBackup`, `deploy-target.ab.forceAfterTimeout`, native-store/A/B assertion | `checks.<system>.ab-existing` |
 | `tests/auto-update.nix` | the auto-update module — methods, assertions, timer/reboot wiring | `checks.<system>.auto-update` |
 | `tests/ab-deploy-drift.nix` | the deploy action's protocol-drift skip contract (extracted action.yml text vs a fake old SSH gate) | `checks.<system>.ab-deploy-drift` |
-| `tests/ci-workflow-drift.nix` | the workflows' sandbox-probe ordering contract, the vmtests flag wiring, `docs.yml`'s private-input SSH wiring (host derivation from `flake.lock`, optional `flake` bundle, `ssh-setup` before `generate-docs`), the `update-flake.yml` input/profile contract (consumer defaults on both triggers, guard profile validation, consumer-only rebuild steps, profile-independent shared steps) and the `self-update.yml` self-call wiring (Monday schedule, manual trigger, `@main` target, self inputs) | `checks.<system>.ci-workflow-drift` |
+| `tests/ci-workflow-drift.nix` | real workflow/action contracts: sandbox ordering, private-input SSH wiring, consumer/self update profiles, online-`kvm` discovery with `test` fallback, KVM-gated full VM inventory and skip behavior, deferred LFS checkout and ordering, plus fake-endpoint LFS transport scenarios (SSH preference, HTTPS fallback, explicit endpoint preservation and redacted failure) | `checks.<system>.ci-workflow-drift` |
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` flag × documentation-completeness matrix | `checks.<system>.mkDocs` |
 
 `tests/ab-fixture.nix`, `tests/ab-anywhere-install.nix` and
@@ -59,6 +59,17 @@ Every `vmTests` suite belongs in the full matrix unless it is explicitly
 parked. A parked suite remains locally buildable, its exclusion site names the
 open change tracking the rework, and it is re-added when that change completes.
 Every non-parked suite must pass a full dispatch.
+
+The `nixtache-self` update profile also discovers suite names directly from
+`vmTests.x86_64-linux`, so its pre-push gate cannot drift from the flake
+inventory. With a readable/writable `/dev/kvm`, it builds every discovered
+suite with at most three concurrent builds, writes each full transcript to
+`artifacts/vm-tests/<suite>/full.log` and fails before push on any suite
+failure. Without that device, it writes `artifacts/vm-tests/skipped.log` and
+continues without VM builds; the runner-selection mechanics are documented in
+[workflow-mechanics.md](workflow-mechanics.md#runner-labels), and the canonical
+requirements are in
+[`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md).
 
 `ab-ota-anywhere-vm` evaluates the install configuration once on the host and
 passes its pre-built `diskoScript` and `toplevel` to nixos-anywhere with

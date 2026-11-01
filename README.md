@@ -32,11 +32,11 @@ the [quickstart](doc/user_guide/quickstart.md).
 | `update-flake.yml` | flake-input bump with an SSH-signed bot commit; optional runner and validation-profile selection |
 | `ci.yml` | nixtache's **own** CI (not reusable) |
 | `vmtests.yml` | KVM VM suite matrix on a `kvm`-labelled runner (dispatch + weekly/nightly schedule); per-suite full-log artifacts, bounded matrix concurrency |
-| `self-update.yml` | nixtache's **own** flake self-update (not reusable) — weekly schedule + manual dispatch through `update-flake.yml` |
+| `self-update.yml` | nixtache's **own** flake self-update (not reusable) — weekly schedule + manual dispatch through `update-flake.yml`, with online-`kvm` discovery, `test` fallback and VM tests when KVM is available |
 
-Composite actions: `ssh-setup`, `sandbox-probe`, `flake-validation`,
-`rebuild-configurations`, `rebuild-devshells`, `generate-docs`,
-`deploy-target`. How they resolve at run time:
+Composite actions: `ssh-setup`, `lfs-fetch`, `sandbox-probe`,
+`flake-validation`, `rebuild-configurations`, `rebuild-devshells`,
+`generate-docs`, `deploy-target`. How they resolve at run time:
 [`doc/technical_details/workflow-mechanics.md`](doc/technical_details/workflow-mechanics.md).
 
 ### Other outputs

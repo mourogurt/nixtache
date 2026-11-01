@@ -207,7 +207,10 @@ input bump with SSH-signed bot commits; self-disables when the runner's
 `flakeSshCreds`; the guard validates the update key before the pipeline runs,
 see [module-ci-wiring.md](../technical_details/module-ci-wiring.md)). See
 [`doc/technical_details/workflow-mechanics.md`](../technical_details/workflow-mechanics.md)
-for how reusable workflows resolve actions.
+for how reusable workflows resolve actions. Git LFS repositories use the same
+wrappers; see [Git LFS transport](../technical_details/workflow-mechanics.md#git-lfs-transport)
+for deferred fetching, transport selection, explicit endpoint precedence and
+redacted diagnostics.
 
 ## 4. (Optional) Generate your flake's docs
 
