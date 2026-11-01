@@ -116,6 +116,20 @@ runners report idle before applying and rebooting; `forceAfterTimeout` can
 explicitly override that wait.
 _Avoid_: idle lock, maintenance mode
 
+### Self-update
+
+**Flake self-update**:
+The CI run that bumps a repository's own `flake.lock` through the reusable
+update pipeline — in contrast to the same pipeline bumping a consumer's flake
+when the consumer is the caller.
+_Avoid_: lock bump, flake auto-update (auto-update is the host channel)
+
+**Host self-update**:
+The runner host updating its own system through the auto-update channel
+(applying a new A/B slot under idle gating) — a different "self-update" from
+the flake self-update.
+_Avoid_: system update, machine update
+
 ### Overlay store
 
 **Lower layer**:
