@@ -101,7 +101,9 @@ jobs:
               if [ ! -c /dev/kvm ]; then
                 echo "self-update: /dev/kvm is not a character device in the runner job environment."
               fi
-              (exec 3<>/dev/kvm)
+              if ! (exec 3<>/dev/kvm); then
+                echo "self-update: opening /dev/kvm read/write failed."
+              fi
               if [ -e /dev/kvm ]; then
                 ls -l /dev/kvm
               else

@@ -380,6 +380,8 @@ pkgs.runCommand "ci-workflow-drift-test"
               probe_run = "\n".join(s.get("run") or "" for s in (probe.get("steps") or []))
               if "[ -c /dev/kvm ]" not in probe_run or "(exec 3<>/dev/kvm)" not in probe_run:
                   bad("self-update.yml capability probe: must check that /dev/kvm opens read/write")
+              elif "if ! (exec 3<>/dev/kvm); then" not in probe_run:
+                  bad("self-update.yml capability probe: diagnostic open must not abort the test fallback")
               elif 'candidate="''${{ needs.select-runner.outputs.runner }}"' not in probe_run or "runner=test" not in probe_run or "runner=kvm" not in probe_run:
                   bad("self-update.yml capability probe: must choose kvm only for a capable candidate and test otherwise")
               else:

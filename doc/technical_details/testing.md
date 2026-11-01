@@ -249,11 +249,20 @@ access to `/dev/kvm` inside the runner container:
 
 ```nix
 nix.settings.system-features = [ "kvm" "nixos-test" "big-parallel" ];
+containers.<runner-name>.allowedDevices = [
+  { node = "/dev/kvm"; modifier = "rwm"; }
+];
 containers.<runner-name>.bindMounts."/dev/kvm" = {
   hostPath = "/dev/kvm";
-  isReadOnly = true;
+  isReadOnly = false;
 };
 ```
+
+A bind mount alone can leave `open(/dev/kvm)` failing with `Operation not
+permitted` even when the node is visible as `crw-rw-rw-`: `allowedDevices`
+grants the container's device-cgroup access, while `isReadOnly = false` avoids
+mount-level write restrictions. The self-update capability probe checks the
+actual open, not just the node or its mode bits.
 
 `runNixOSTest` adds the `kvm` and `nixos-test` requirements; pexpect-based
 suites declare `kvm` themselves. Give the runner instance the `kvm` label so
