@@ -60,7 +60,10 @@ weekly schedule (`15 4 * * 1`, Monday at 04:15 UTC). A small preflight job on
 `test` discovers an online `kvm` candidate through the Forgejo runners API and
 falls back to `test` when discovery fails or no such runner is online. A second
 short job probes `/dev/kvm` on that candidate and selects `test` if the device
-is unusable. The update job calls
+is unusable. API authentication uses a short-lived OIDC JWT for an optional
+Forgejo Authorized Integration whose non-secret audience comes from the
+`NIXTACHE_RUNNER_DISCOVERY_AUDIENCE` repository variable; an unconfigured or
+denied integration retains the `test` fallback. The update job calls
 `nixops/nixtache/.forgejo/workflows/update-flake.yml@main` with the final
 selected runner and validation inputs described below.
 

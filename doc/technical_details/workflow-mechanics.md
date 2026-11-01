@@ -75,7 +75,7 @@ use the same transport; in particular, changing the Git `origin` URL in
 | `update-flake.yml` | `nix flake update --commit-lock-file`, validate, push signed bot commit | optional inputs `runner` (default `nixos`) and `validation-profile` (default `consumer`): `consumer` keeps flake validation + the NixOS configuration and devShell rebuilds, `nixtache-self` skips the two consumer rebuilds and, after flake validation, runs the full `vmTests.x86_64-linux` inventory before push when `/dev/kvm` is readable/writable (or records a successful skip otherwise); the guard rejects any other profile value before update work; guard step self-disables when `NIXTACHE_UPDATE_GIT_USER` is absent (`updateSshCreds = null`), otherwise probes the update key with `git ls-remote` before the pipeline (semantics: [module-ci-wiring.md](module-ci-wiring.md)); `ssh-setup` wires both `flake` and `update` bundles into one SSH config with the [derived host list](#ssh-host-derivation); the update step greps its log for fetch errors nix downgrades to warnings and fails on them; `sandbox-probe` before builds (same `SANDBOX_OK` self-heal as `nix-check.yml`); `flake update` + `flake check` output teed into `artifacts/` (`flake-update.log`, `flake-check.log`) for the always-run upload; **the `schedule` trigger must live in the caller's wrapper** — a schedule here would update nixtache's own flake, not the caller's — canonical requirements: [`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md) |
 | `ci.yml` (self-CI, not reusable) | validate nixtache itself | runs on the dedicated `test` runner label; `sandbox-probe` first, before the `flake-validation` build; prints every `checks.*` suite report; generates the `nixtache-options` artifact |
 | `vmtests.yml` (self-CI, not reusable) | run the KVM-only `vmTests` inventory | manual dispatch (full/smoke or one `suite`) + nightly-smoke/weekly-full schedules on the `kvm` label; `sandbox-probe` once per matrix job, the suite `nix build` applies the `SANDBOX_OK`-derived flag (see [sandboxing.md](sandboxing.md)); runner prerequisites: [testing.md](testing.md) |
-| `self-update.yml` (self, not reusable) | nixtache's own flake self-update: scheduled + manual bump of this flake's `flake.lock` | a `test`-runner preflight queries the repository runners API with the automatic token and selects an online `kvm` candidate, falling back to `test` when discovery fails or none is online; a capability probe on the candidate also selects `test` when `/dev/kvm` is unusable, then the update job calls `update-flake.yml@main` with the final runner, `validation-profile: nixtache-self` and `secrets: inherit`; `workflow_dispatch` + weekly schedule `15 4 * * 1` (Monday 04:15 UTC) — canonical requirements: [`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md) |
+| `self-update.yml` (self, not reusable) | nixtache's own flake self-update: scheduled + manual bump of this flake's `flake.lock` | a `test`-runner preflight uses an optional OIDC Authorized Integration to query the repository runners API and selects an online `kvm` candidate, falling back to `test` when discovery is unconfigured or denied, or when none is online; a capability probe on the candidate also selects `test` when `/dev/kvm` is unusable, then the update job calls `update-flake.yml@main` with the final runner, `validation-profile: nixtache-self` and `secrets: inherit`; `workflow_dispatch` + weekly schedule `15 4 * * 1` (Monday 04:15 UTC) — canonical requirements: [`openspec/specs/ci-workflows/spec.md`](../../openspec/specs/ci-workflows/spec.md) |
 
 Composite actions: `ssh-setup` (parameterised `git-host` list — one `Host`
 block per host, see [SSH host derivation](#ssh-host-derivation) — `creds:
@@ -98,3 +98,16 @@ self profile runs VM suites only when the update runner exposes that device;
 otherwise it records the skip and continues without making a KVM registration
 mandatory. Labels are properties of the runner registration, not of the
 workflows.
+
+Runner discovery uses Forgejo's OIDC support rather than the unsupported
+workflow `permissions` field (which Forgejo ignores with a warning). To allow
+it to see online runners, create a **Forgejo Actions (Local)** [Authorized
+Integration](https://forgejo.org/docs/v17.0/user/api/authorized-integrations/)
+for source repository `nixops/nixtache`, workflow file `self-update.yml`, Git
+reference `refs/heads/main` and events `schedule` + `workflow_dispatch`, with
+`read:repository` capability on `nixops/nixtache`. Set the repository Actions
+variable `NIXTACHE_RUNNER_DISCOVERY_AUDIENCE` to the generated audience; this
+identifier is not confidential. The workflow requests a short-lived JWT for
+that audience and uses it only in the runners API Authorization header. A
+missing audience, unavailable OIDC or denied API request produces a warning and
+selects `test`, so self-update still works without this optional integration.

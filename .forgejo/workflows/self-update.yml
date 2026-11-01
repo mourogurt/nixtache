@@ -18,6 +18,8 @@
 # and `update-flake-1` (the work). Expected.
 name: Self Update Flake
 
+enable-openid-connect: true
+
 on:
   # Monday 04:15 UTC.
   schedule:
@@ -27,8 +29,6 @@ on:
 jobs:
   select-runner:
     runs-on: test
-    permissions:
-      actions: read
     outputs:
       runner: ${{ steps.select.outputs.runner }}
     steps:
@@ -36,15 +36,26 @@ jobs:
         id: select
         shell: bash
         env:
-          FORGEJO_TOKEN: ${{ github.token }}
+          RUNNER_DISCOVERY_AUDIENCE: ${{ vars.NIXTACHE_RUNNER_DISCOVERY_AUDIENCE }}
         run: |
           set -uo pipefail
           response=$(mktemp)
           trap 'rm -f "$response"' EXIT
           api="${GITHUB_API_URL:-${GITHUB_SERVER_URL%/}/api/v1}"
           runner=test
-          if ! curl -fsS --max-time 30 \
-            -H "Authorization: token $FORGEJO_TOKEN" \
+          if [ -z "${RUNNER_DISCOVERY_AUDIENCE:-}" ]; then
+            echo "::warning::self-update: NIXTACHE_RUNNER_DISCOVERY_AUDIENCE is not configured; selecting the test runner."
+          elif [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::warning::self-update: OpenID Connect is unavailable; selecting the test runner."
+          elif ! jwt=$(curl -fsS --max-time 30 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$RUNNER_DISCOVERY_AUDIENCE" \
+            | jq -r '.value // empty'); then
+            echo "::warning::self-update: could not obtain a runner-discovery JWT; selecting the test runner."
+          elif [ -z "$jwt" ]; then
+            echo "::warning::self-update: runner-discovery JWT response was empty; selecting the test runner."
+          elif ! curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $jwt" \
             "$api/repos/$GITHUB_REPOSITORY/actions/runners" -o "$response"; then
             echo "::warning::self-update: Forgejo runner discovery failed; selecting the test runner."
           elif jq -e '

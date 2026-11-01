@@ -349,14 +349,21 @@ pkgs.runCommand "ci-workflow-drift-test"
               bad("self-update.yml preflight: must run on test (got %r)" % (select.get("runs-on"),))
           elif (select.get("outputs") or {}).get("runner") != "''${{ steps.select.outputs.runner }}":
               bad("self-update.yml preflight: runner output is not wired from steps.select")
-          elif (select.get("permissions") or {}).get("actions") != "read":
-              bad("self-update.yml preflight: needs actions: read for runner discovery")
+          elif self_wf.get("enable-openid-connect") is not True:
+              bad("self-update.yml: must enable OIDC for Authorized Integrations")
+          elif "permissions" in select:
+              bad("self-update.yml preflight: unsupported Forgejo permissions field must not be present")
           else:
-              ok("self-update.yml preflight runs on test and exports its runner selection")
+              ok("self-update.yml preflight runs on test with OIDC and exports its runner selection")
           select_steps = select.get("steps") or []
           select_run = "\n".join(s.get("run") or "" for s in select_steps)
-          if "/repos/$GITHUB_REPOSITORY/actions/runners" not in select_run or "Authorization: token $FORGEJO_TOKEN" not in select_run:
-              bad("self-update.yml preflight: does not query the authenticated repository runners API")
+          select_env = {k: v for s in select_steps for k, v in (s.get("env") or {}).items()}
+          if select_env.get("RUNNER_DISCOVERY_AUDIENCE") != "''${{ vars.NIXTACHE_RUNNER_DISCOVERY_AUDIENCE }}":
+              bad("self-update.yml preflight: audience must come from the repository variable")
+          elif "/repos/$GITHUB_REPOSITORY/actions/runners" not in select_run or "Authorization: Bearer $jwt" not in select_run:
+              bad("self-update.yml preflight: does not query the runners API with the OIDC JWT")
+          elif "ACTIONS_ID_TOKEN_REQUEST_URL&audience=$RUNNER_DISCOVERY_AUDIENCE" not in select_run or "NIXTACHE_RUNNER_DISCOVERY_AUDIENCE" not in select_run:
+              bad("self-update.yml preflight: does not obtain a JWT for the configured Authorized Integration audience")
           elif "runner=test" not in select_run or "runner=kvm" not in select_run or "online" not in select_run or ".labels" not in select_run:
               bad("self-update.yml preflight: must select online kvm and retain test fallback")
           elif 'echo "runner=$runner" >> "$GITHUB_OUTPUT"' not in select_run:
