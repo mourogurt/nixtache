@@ -98,6 +98,12 @@ jobs:
             if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
               runner=kvm
             else
+              if [ -e /dev/kvm ]; then
+                ls -l /dev/kvm
+              else
+                echo "self-update: /dev/kvm does not exist in the runner job environment."
+              fi
+              id
               echo "::warning::self-update: the online kvm runner has no usable /dev/kvm; selecting the test runner."
             fi
           fi
