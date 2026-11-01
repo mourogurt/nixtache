@@ -103,7 +103,8 @@ Runner discovery uses Forgejo's OIDC support rather than the unsupported
 workflow `permissions` field (which Forgejo ignores with a warning). To allow
 it to see online runners, create a **Forgejo Actions (Local)** [Authorized
 Integration](https://forgejo.org/docs/v17.0/user/api/authorized-integrations/)
-for source repository `nixops/nixtache`, workflow file `self-update.yml`, Git
+as a user with repository administration rights (repository write alone cannot
+list runners) for source repository `nixops/nixtache`, workflow file `self-update.yml`, Git
 reference `refs/heads/main` and events `schedule` + `workflow_dispatch`, with
 `read:repository` capability on `nixops/nixtache`. Set the repository Actions
 variable `NIXTACHE_RUNNER_DISCOVERY_AUDIENCE` to the generated audience; this
