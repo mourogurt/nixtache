@@ -9,10 +9,13 @@
 # back to the last blessed one. The test drives the reboots (Tier-0 itself
 # never reboots — it only withholds the blessing).
 #
-# Images: v1 plain (blessed first); v2 carries a canary unit that FAILS and
-# is listed in criticalUnits (ukiTries=2, healthCheckTimeout=20s to keep the
-# failure window short); v3 is the fixed follow-up (hello marker proves new
-# lower content). Needs KVM. Hermetic (deployer LAN only).
+# Images: v1 carries a healthy critical service rooted in the persistent upper;
+# v2 repairs that service's old-lower dependency into its target upper, runs the
+# tool, then deliberately fails criticalUnits (ukiTries=2, healthCheckTimeout=20s).
+# Rollback and a later manual older-slot boot must select v1's original upper
+# generation and DB without another reconcile. Two physical slots containing the
+# same v1 lower are also given different uppers to pin PARTUUID-based selection.
+# v3 is the fixed follow-up. Needs KVM. Hermetic (deployer LAN only).
 { nixpkgs
 , self
 , system ? "x86_64-linux"
@@ -23,19 +26,54 @@ let
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) fixture pkgs;
 
-  # v2's broken boot: the canary fails, Tier-0 sees it via criticalUnits and
-  # withholds the blessing. Short health window keeps each failed boot quick.
+  pkgs_1 = pkgs.runCommand "rollback-runtime" { } ''
+    mkdir -p $out/bin
+    install -m 0755 ${pkgs.busybox}/bin/busybox $out/bin/busybox
+  '';
+  pkgs_2 = pkgs.runCommand "rollback-tool" { } ''
+    mkdir -p $out/bin
+    printf '#!%s/bin/busybox sh\necho rollback-tool-ok\n' "${pkgs_1}" > $out/bin/tool
+    chmod +x $out/bin/tool
+  '';
+  pkgs_4 = pkgs.runCommand "rollback-slot-marker" { } ''
+    mkdir -p $out/bin
+    install -m 0755 ${pkgs.busybox}/bin/busybox $out/bin/busybox
+  '';
+  p1Path = pkgs_1.outPath;
+  p2Path = pkgs_2.outPath;
+  p2Runtime = builtins.unsafeDiscardStringContext p2Path;
+  p4Path = pkgs_4.outPath;
+
+  overlayModules = [
+    self.nixosModules.overlay-nix
+    ({ lib, ... }: {
+      services.nixtache.overlay-nix = {
+        enable = true;
+        upperOnUpdate = "reconcile";
+      };
+      services.nixtache.deploy-target.criticalUnits = [ "nixtache-rollback-canary.service" ];
+      systemd.services.nixtache-rollback-canary = {
+        after = [ "nixtache-overlay-ready.target" ];
+        requires = [ "nixtache-overlay-ready.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = "${p2Runtime}/bin/tool";
+      };
+    })
+  ];
+
+  # v2's upper-hosted tool starts successfully, then the canary exits nonzero;
+  # Tier-0 sees that failure through criticalUnits and withholds the blessing.
   brokenBootModules = [
     ({ lib, ... }: {
       services.nixtache.ab-image.ukiTries = 2;
-      services.nixtache.deploy-target = {
-        healthCheckTimeout = 20;
-        criticalUnits = [ "nixtache-rollback-canary.service" ];
-      };
+      services.nixtache.deploy-target.healthCheckTimeout = 20;
       systemd.services.nixtache-rollback-canary = {
         wantedBy = [ "multi-user.target" ];
-        serviceConfig.Type = "oneshot";
-        script = ''
+        script = lib.mkForce ''
+          ${p2Runtime}/bin/tool
           echo "nixtache-rollback-canary: failing on purpose (rollback test)"
           exit 1
         '';
@@ -43,20 +81,29 @@ let
     })
   ];
 
-  v1 = otaLib.mkAppliance { version = "1"; };
+  v1 = otaLib.mkAppliance { version = "1"; extraPackages = [ pkgs_1 ]; extraModules = overlayModules; };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
-  v2 = otaLib.mkAppliance { version = "2"; extraModules = brokenBootModules; };
+  v2 = otaLib.mkAppliance { version = "2"; extraModules = overlayModules ++ brokenBootModules; };
   v2Pkg = v2.config.system.build.sysupdate-package;
-  v3 = otaLib.mkAppliance { version = "3"; extraPackages = [ pkgs.hello ]; };
+  v3 = otaLib.mkAppliance {
+    version = "3";
+    extraPackages = [ pkgs.hello ];
+    extraModules = overlayModules ++ [
+      { systemd.services.nixtache-rollback-canary.wantedBy = [ "multi-user.target" ]; }
+    ];
+  };
   v3Pkg = v3.config.system.build.sysupdate-package;
 in
 pkgs.testers.runNixOSTest {
   name = "ab-ota-rollback";
   globalTimeout = 5400;
 
-  nodes.deployer = otaLib.deployerNode { extraDependencies = [ v2Pkg v3Pkg ]; };
+  nodes.deployer = otaLib.deployerNode { extraDependencies = [ pkgs_1 pkgs_2 pkgs_4 v2Pkg v3Pkg ]; };
 
   testScript = ''
+    P2 = "${p2Path}"
+    P4 = "${p4Path}"
+
     def create_ab_machine(**kwargs):
         machine = create_machine(start_command="${otaLib.startCommand { image = v1Image; }}", **kwargs)
         driver.machines_qemu.append(machine)
@@ -64,17 +111,32 @@ pkgs.testers.runNixOSTest {
 
     deployer.start()
     deployer.wait_for_unit("nginx.service")
+    deployer.wait_for_unit("nix-serve.service")
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
 
     appliance = create_ab_machine(name="appliance")
     appliance.start(allow_reboot=True)
     appliance.wait_for_unit("multi-user.target")
     assert appliance.succeed("cat /etc/image-version").strip() == "1"
+    appliance.wait_until_succeeds("nix --version", timeout=300)
+    appliance.succeed("nix-store --realize " + P2, timeout=600)
+    appliance.succeed(P2 + "/bin/tool")
+    appliance.succeed("ln -sfn " + P2 + " /nix/var/nix/gcroots/rollback-canary")
+    appliance.succeed("test -d /var/lib/nix-overlay/upper/${baseNameOf p2Path}")
+    appliance.succeed("systemctl start nixtache-rollback-canary.service")
     # v1 must be blessed first: a blessed entry outranks raw tries, so the
     # fallback target after v2's failure is a KNOWN-good boot.
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet boot-complete.target", timeout=300
     )
-    print("OK: v1 booted and blessed")
+    v1_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+    v1_selected = appliance.succeed(
+      f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+    ).strip()
+    v1_db_before = appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip()
+    print("OK: v1 booted and blessed with an upper-hosted critical service")
 
     # -- Install the broken v2 (tries=2) ------------------------------------
     deployer.succeed(
@@ -85,6 +147,15 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_2", timeout=900)
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: broken v2 installed to slot B")
+    appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
+    v2_slot = appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip()
+    v2_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+    v2_target = f"/var/lib/nix-overlay/upper-slots/{v2_slot}/generations/{v2_generation}"
+    appliance.succeed(f"grep -q '^policy=reconcile$' {v2_target}/metadata")
+    appliance.succeed(f"test -L {v2_target}/host/state/gcroots/rollback-canary")
+    appliance.succeed(f"test -d {v2_target}/host/upper/${baseNameOf p1Path}")
+    appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf p1Path}")
+    print("OK: target-only reconcile preserved the canary root and repaired its old-lower dependency")
 
     # -- Burn both tries: boot v2 twice, each unblessed ---------------------
     for i in (1, 2):
@@ -97,10 +168,14 @@ pkgs.testers.runNixOSTest {
           "systemctl is-active --quiet nixtache-health-check.service", timeout=120
         )
         appliance.wait_until_succeeds(
+          "journalctl -u nixtache-rollback-canary.service -b --no-pager | grep -q 'rollback-tool-ok'",
+          timeout=60
+        )
+        appliance.wait_until_succeeds(
           "journalctl -u nixtache-rollback-canary.service -b --no-pager | grep -q 'failing on purpose'",
           timeout=60
         )
-        print(f"OK: v2 boot {i} unblessed (canary failed, no bless)")
+        print(f"OK: v2 boot {i} unblessed (upper tool ran, canary failed, no bless)")
 
     # -- Tries exhausted → the loader falls back to blessed v1 --------------
     # NOTE: the rolled-back v1 boot does NOT (re)reach boot-complete.target:
@@ -114,7 +189,16 @@ pkgs.testers.runNixOSTest {
     # exhausted entries carry the left-done form (+0 or +0-N)
     appliance.succeed("ls /boot/EFI/Linux/abtest_2+0*.efi > /dev/null")
     appliance.succeed("systemctl is-active --quiet sshd.service")
-    print("ROLLBACK OK: exhausted v2 (+0 tries left) skipped, blessed v1 boots")
+    assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == v1_slot
+    assert appliance.succeed(
+      f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+    ).strip() == v1_selected, "rollback prepared a replacement for the preserved v1 upper"
+    assert appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip() == v1_db_before, "rollback rewrote the preserved upper DB"
+    appliance.succeed("nix path-info " + P2)
+    appliance.succeed(P2 + "/bin/tool")
+    appliance.succeed("systemctl start nixtache-rollback-canary.service")
+    appliance.succeed("systemctl is-active --quiet nixtache-rollback-canary.service")
+    print("ROLLBACK OK: exhausted v2 skipped; v1 upper generation, DB and critical service are preserved")
 
     appliance.succeed("systemctl is-active --quiet sshd.service")
     appliance.succeed("systemctl is-active --quiet systemd-sysupdate.timer")
@@ -157,6 +241,67 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet boot-complete.target", timeout=300
     )
-    print("PASS: rollback → explicit recovery → fixed v3 boots and is blessed; running v1 was never overwritten")
+    print("OK: rollback → explicit recovery → fixed v3 boots and is blessed; running v1 was never overwritten")
+
+    # -- Manual older-slot selection keeps that slot's upper generation ------
+    appliance.succeed("mkdir -p /boot/loader/entries")
+    appliance.succeed(
+      "printf 'title Manual-v1\\nversion 99\\nsort-key abtest\\nuki /EFI/Linux/abtest_1.efi\\n' "
+      "> /boot/loader/entries/zz-manual-v1.conf"
+    )
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target")
+    assert appliance.succeed("cat /etc/image-version").strip() == "1"
+    assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == v1_slot
+    assert appliance.succeed(
+      f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+    ).strip() == v1_selected, "manual older-slot selection cloned or repaired the preserved upper"
+    appliance.succeed("nix path-info " + P2)
+    appliance.succeed(P2 + "/bin/tool")
+    print("MANUAL ROLLBACK OK: the older physical lower selects its own preserved upper and DB")
+
+    # -- Same-version slots retain distinct upper states ----------------------
+    active_device = appliance.succeed("findmnt -n -o SOURCE --target /nix/store | grep '^/dev/' | sort -u").strip()
+    target_device = appliance.succeed(
+      "lsblk -nrpo NAME,PARTUUID,PARTLABEL | "
+      f"awk -v active={v1_slot} 'BEGIN{{IGNORECASE=1}} $3 ~ /^nix-store_/ && tolower($2) != active {{print $1; exit}}'"
+    ).strip()
+    target_slot = appliance.succeed(
+      "lsblk -nrpo NAME,PARTUUID,PARTLABEL | "
+      f"awk -v active={v1_slot} 'BEGIN{{IGNORECASE=1}} $3 ~ /^nix-store_/ && tolower($2) != active {{print tolower($2); exit}}'"
+    ).strip()
+    appliance.succeed(f"dd if={active_device} of={target_device} bs=4M conv=fsync status=none", timeout=900)
+    target_number = target_device.rsplit("vda", 1)[-1]
+    appliance.succeed(f"sgdisk -c {target_number}:nix-store_1 /dev/vda && partprobe /dev/vda && udevadm settle")
+    appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
+    same_target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+    same_target = f"/var/lib/nix-overlay/upper-slots/{target_slot}/generations/{same_target_generation}"
+    appliance.succeed(f"grep -q '^image_version=1$' {same_target}/metadata")
+    appliance.succeed(f"grep -q '^state=ready$' {same_target}/metadata")
+    appliance.succeed("nix-store --realize " + P4, timeout=600)
+    appliance.succeed("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
+    appliance.fail(f"test -d {same_target}/host/upper/${baseNameOf p4Path}")
+    print("OK: both physical slots contain v1, with a marker only in the active slot's upper")
+
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target")
+    assert appliance.succeed("cat /etc/image-version").strip() == "1"
+    selected_same = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+    if selected_same == v1_slot:
+        assert appliance.succeed(
+          f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+        ).strip() == v1_selected
+        appliance.succeed(P4 + "/bin/busybox echo source-upper-selected")
+    elif selected_same == target_slot:
+        assert appliance.succeed(
+          f"readlink -f /var/lib/nix-overlay/upper-slots/{target_slot}/current"
+        ).strip() == same_target
+        appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
+        out = appliance.succeed(f"nix path-info {P4} 2>&1 || true")
+        assert "is not valid" in out, f"same-version target selected the source upper DB ({out!r})"
+    else:
+        raise AssertionError(f"unexpected physical slot selected: {selected_same}")
+    appliance.succeed(P2 + "/bin/tool")
+    print("PASS: automatic/manual rollback and same-version physical-slot upper selection")
   '';
 }

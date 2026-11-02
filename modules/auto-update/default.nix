@@ -33,6 +33,9 @@ let
   dt = nixtache.deploy-target or { };
   dtAb = dt.ab or { };
   abImage = nixtache.ab-image or { };
+  overlayCfg = nixtache.overlay-nix or { };
+  overlayEnabled = overlayCfg.enable or false;
+  overlaySlotsDir = "${dirOf (overlayCfg.upperDir or "/var/lib/nix-overlay/upper")}/upper-slots";
 
   dtEnabled = dt.enable or false;
   dtAbEnabled = dtAb.enable or false;
@@ -65,6 +68,18 @@ let
   stateDir = "/var/lib/nixtache";
   pendingFile = "${stateDir}/pending-system";
   rebootPendingFile = "${stateDir}/reboot-pending";
+  rebootPendingOverlay = "${stateDir}/reboot-pending-overlay";
+
+  sourceFingerprint = ''
+    fingerprint_source() {
+      local active_slot generation
+      active_slot=$(cat /run/nixtache-overlay/selected-slot) || return 1
+      generation=$(readlink -f "${overlaySlotsDir}/$active_slot/current") || return 1
+      [ -n "$active_slot" ] && [ -d "$generation" ] || return 1
+      printf '%s %s\n' "$active_slot" "$(basename "$generation")"
+      nix --extra-experimental-features nix-command hash path "$generation"
+    }
+  '';
 
   # git-style URLs take `?ref=<ref>`; shorthand refs (github:org/repo, plain
   # paths) take `/<ref>`. null = the ref is baked into the URL already.
@@ -153,6 +168,7 @@ let
   abPollScript = ''
     set -uo pipefail
     ${markerFn}
+    ${sourceFingerprint}
     t0=$(date '+%Y-%m-%d %H:%M:%S')
     marker "triggered sysupdate"
     if ! systemctl start --wait ${sysupdateService}; then
@@ -174,6 +190,18 @@ let
     else
       marker "no new image installed"
     fi
+    ${optionalString (isAb && overlayEnabled) ''
+      if [ "$installed" = 1 ] && systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
+        if ! systemctl start nixtache-overlay-prepare.service; then
+          marker "upper preparation failed — not rebooting"
+          exit 1
+        fi
+        ${optionalString (cfg.rebootPolicy == "window") ''
+          fingerprint_source > "${rebootPendingOverlay}.tmp" || { marker "could not record the prepared source generation"; exit 1; }
+          mv "${rebootPendingOverlay}.tmp" "${rebootPendingOverlay}"
+        ''}
+      fi
+    ''}
     ${abRebootClause}
   '';
 
@@ -461,6 +489,7 @@ in
         wants = [ "network-online.target" ];
         path = with pkgs; [ systemd coreutils gnugrep ]
           ++ optional isFlake config.nix.package
+          ++ optional (isAb && overlayEnabled) config.nix.package
           ++ optional (isFlake && cfg.flake.sshPrivateKeyFile != null) openssh;
         serviceConfig = {
           Type = "oneshot";
@@ -488,10 +517,11 @@ in
 
       systemd.services.nixtache-auto-update-reboot = {
         description = "nixtache auto-update: reboot inside the configured window when a reboot is pending";
-        path = with pkgs; [ systemd coreutils ];
+        path = with pkgs; [ systemd coreutils ] ++ optional (isAb && overlayEnabled) config.nix.package;
         serviceConfig.Type = "oneshot";
         script = ''
           set -u
+          ${sourceFingerprint}
           [ -f "${rebootPendingFile}" ] || { echo "nixtache-auto-update-reboot: no pending reboot — nothing to do"; exit 0; }
           now=$(date +%H:%M)
           start="${cfg.rebootWindow.start}"
@@ -504,8 +534,20 @@ in
             { [ "$now" \> "$start" ] || [ "$now" = "$start" ] || [ "$now" \< "$end" ]; } && inside=1
           fi
           if [ "$inside" = 1 ]; then
+            ${optionalString (isAb && overlayEnabled) ''
+              if systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
+                recorded=$(cat "${rebootPendingOverlay}" 2>/dev/null || true)
+                current=$(fingerprint_source) || { echo "nixtache-auto-update-reboot: cannot fingerprint the active upper generation" >&2; exit 1; }
+                if [ "$recorded" != "$current" ]; then
+                  echo "nixtache-auto-update-reboot: active upper changed during the reboot window — refreshing the target" >&2
+                  systemctl restart nixtache-overlay-prepare.service || { echo "nixtache-auto-update-reboot: upper refresh failed — staying pending" >&2; exit 1; }
+                  fingerprint_source > "${rebootPendingOverlay}.tmp" || exit 1
+                  mv "${rebootPendingOverlay}.tmp" "${rebootPendingOverlay}"
+                fi
+              fi
+            ''}
             echo "nixtache-auto-update-reboot: inside reboot window ($start-$end) — rebooting"
-            rm -f "${rebootPendingFile}"
+            rm -f "${rebootPendingFile}" "${rebootPendingOverlay}"
             systemctl reboot
           else
             echo "nixtache-auto-update-reboot: outside reboot window ($start-$end) — waiting for the next window"

@@ -65,6 +65,11 @@ let
     }
   ];
 
+  overlayAbMods = au: abMods au ++ [
+    self.nixosModules.overlay-nix
+    { services.nixtache.overlay-nix.enable = true; }
+  ];
+
   # Gating host: the gating unit reads services.nixtache.runner.forgejoPort, so
   # the runner module is imported for its OPTION surface only (left disabled) —
   # same trick as mkHostAb in tests/deploy-target.nix.
@@ -119,6 +124,8 @@ let
   auSvc = cfg: cfg.systemd.services."nixtache-auto-update" or { };
   auScript = cfg: (auSvc cfg).script or "";
   auTmr = cfg: cfg.systemd.timers."nixtache-auto-update" or { };
+  auRebootScript = cfg: cfg.systemd.services.nixtache-auto-update-reboot.script or "";
+  posOf = pat: s: lib.stringLength (builtins.head (lib.split pat s));
 
   # =========================================================================
   # sec. 1 wiring (AU-1...AU-14)
@@ -312,6 +319,37 @@ let
       {
         immediateReboot = lib.hasInfix "systemctl reboot" script;
         noPendingMarker = !(lib.hasInfix "/var/lib/nixtache/reboot-pending" script);
+      });
+
+  scenarioAu12Overlay = contract "AU-12/overlay: completed AB install prepares once before an immediate reboot"
+    (overlayAbMods { rebootPolicy = "if-needed"; })
+    (cfg:
+      let script = auScript cfg; in
+      {
+        prepareGuardedByInstall = lib.hasInfix ''if [ "$installed" = 1 ] && systemctl cat nixtache-overlay-prepare.service'' script;
+        prepareBeforeReboot =
+          (posOf "systemctl start nixtache-overlay-prepare.service" script)
+            < (posOf "systemctl reboot" script);
+        noDeferredFingerprint = !(lib.hasInfix "/var/lib/nixtache/reboot-pending-overlay" script);
+        noRestartInPoll = !(lib.hasInfix "systemctl restart nixtache-overlay-prepare.service" script);
+        failureStopsReboot = lib.hasInfix "upper preparation failed — not rebooting" script;
+      });
+
+  scenarioAu13Overlay = contract "AU-13/overlay: deferred reboot refreshes only a changed source generation"
+    (overlayAbMods { rebootPolicy = "window"; })
+    (cfg:
+      let
+        script = auScript cfg;
+        rebootScript = auRebootScript cfg;
+      in
+      {
+        recordsSourceFingerprint = lib.hasInfix "/var/lib/nixtache/reboot-pending-overlay.tmp" script;
+        hashesWholeGeneration = lib.hasInfix ''nix --extra-experimental-features nix-command hash path "$generation"'' script;
+        comparesSourceFingerprint = lib.hasInfix ''if [ "$recorded" != "$current" ]; then'' rebootScript;
+        refreshBeforeReboot =
+          (posOf "systemctl restart nixtache-overlay-prepare.service" rebootScript)
+            < (posOf "systemctl reboot" rebootScript);
+        failureStaysPending = lib.hasInfix "upper refresh failed — staying pending" rebootScript;
       });
 
   scenarioAu13 = contract "AU-13: rebootPolicy=window → marker + nixtache-auto-update-reboot.timer"
@@ -551,6 +589,8 @@ let
     scenarioAu11b
     scenarioAu12a
     scenarioAu12b
+    scenarioAu12Overlay
+    scenarioAu13Overlay
     scenarioAu13
     scenarioAu14
     scenarioAu15

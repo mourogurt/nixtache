@@ -30,6 +30,23 @@ let
   pkgs = nixpkgs.legacyPackages.${system};
   fixture = import ./ab-fixture.nix { inherit nixpkgs self system appliancePkgs; };
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
+  treeFixture = import ./overlay-tree-vm-lib.nix {
+    inherit nixpkgs self system appliancePkgs;
+    topology = "composed";
+    upperOnUpdate = "reconcile";
+  };
+  treeDependencyPaths = with treeFixture.fixturePaths; [
+    hostDependency
+    sharedDependency
+    leafDependency
+    commonDependency
+  ];
+  treeTopologyDependencies = builtins.filter
+    (package: builtins.elem package.outPath treeDependencyPaths)
+    treeFixture.deployerDependencies;
+  treeCacheDependencies = builtins.filter
+    (package: package.outPath != treeFixture.v2SysupdatePkg.outPath)
+    treeFixture.deployerDependencies;
 
   autoMod = self.nixosModules.auto-update;
 
@@ -173,6 +190,58 @@ let
       extraPackages = [ pkgs.hello ];
     }).config.system.build.sysupdate-package;
 
+  pkgs_1 = pkgs.runCommand "auto-update-runtime" { } ''
+    mkdir -p $out/bin
+    install -m 0755 ${pkgs.busybox}/bin/busybox $out/bin/busybox
+  '';
+  pkgs_2 = pkgs.runCommand "auto-update-tool" { } ''
+    mkdir -p $out/bin
+    printf '#!%s/bin/busybox sh\necho auto-update-tool-ok\n' "${pkgs_1}" > $out/bin/tool
+    chmod +x $out/bin/tool
+  '';
+  pkgs_4 = pkgs.runCommand "auto-update-window-marker" { } ''
+    mkdir -p $out/bin
+    install -m 0755 ${pkgs.busybox}/bin/busybox $out/bin/busybox
+  '';
+  p1Path = pkgs_1.outPath;
+  p2Path = pkgs_2.outPath;
+  p4Path = pkgs_4.outPath;
+
+  mkAutoAppliance = { version, rebootPolicy, extraPackages ? [ ], withTreeDependencies ? false }:
+    otaLib.mkAppliance {
+      inherit version;
+      storeSize = "1G";
+      extraPackages = extraPackages;
+      extraModules = [
+        autoMod
+        self.nixosModules.overlay-nix
+        treeFixture.runtimeModule
+        { system.extraDependencies = lib.optionals withTreeDependencies treeTopologyDependencies; }
+        ({ lib, ... }: {
+          networking.hosts = lib.mkForce { "192.168.1.7" = [ "deployer" ]; };
+          services.nixtache.overlay-nix = {
+            enable = true;
+            upperOnUpdate = "reconcile";
+          };
+          services.nixtache.auto-update = {
+            enable = true;
+            inherit rebootPolicy;
+            rebootWindow = lib.mkIf (rebootPolicy == "window") {
+              start = "00:00";
+              end = "23:59";
+            };
+          };
+        })
+      ];
+    };
+
+  v1Auto = mkAutoAppliance { version = "1"; rebootPolicy = "window"; extraPackages = [ pkgs_1 ]; withTreeDependencies = true; };
+  v1AutoImage = "${v1Auto.config.system.build.image}/abtest_1.raw";
+  v2Auto = mkAutoAppliance { version = "2"; rebootPolicy = "if-needed"; };
+  v2AutoPkg = v2Auto.config.system.build.sysupdate-package;
+  v3Auto = mkAutoAppliance { version = "3"; rebootPolicy = "never"; };
+  v3AutoPkg = v3Auto.config.system.build.sysupdate-package;
+
   stageDir = "/var/lib/nixtache/ab-stage/abtest";
   slotsDir = "/var/lib/nixtache/ab-slots";
 
@@ -222,6 +291,10 @@ pkgs.testers.runNixOSTest {
   name = "auto-update-vm";
 
   nodes = {
+    deployer = otaLib.deployerNode {
+      extraDependencies = [ pkgs_1 pkgs_2 pkgs_4 v2AutoPkg v3AutoPkg ] ++ treeCacheDependencies;
+    };
+
     # AU-F1...F3: flake path, healthy probe.
     target = flakeNode {
       criticalUnits = [ "multi-user.target" ];
@@ -439,7 +512,135 @@ pkgs.testers.runNixOSTest {
     print("AU-A4 OK: signed image accepted through the auto-update trigger")
     absigned.shutdown()
 
-    print("PASS: AU-F1..F4 (flake path) + AU-A1..A5 (ab path) behave per spec 09")
+    # -- AB + persistent overlay: prepare once and refresh a deferred source --
+    def create_auto_machine(**kwargs):
+        machine = create_machine(start_command="${otaLib.startCommand { image = v1AutoImage; }}", **kwargs)
+        driver.machines_qemu.append(machine)
+        return machine
+
+    def stage_auto(package):
+        deployer.succeed(
+          "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+          "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+          "cp " + package + "/* /var/lib/nixtache/ab-stage/abtest/"
+        )
+
+    import shlex
+
+    TREE_STORES = ${builtins.toJSON treeFixture.storeUrls}
+    TREE_STATES = ${builtins.toJSON treeFixture.stateDirs}
+    TREE_UPPERS = ${builtins.toJSON treeFixture.upperDirs}
+    TREE_CONSUMERS = ${builtins.toJSON treeFixture.consumersByNode}
+    TREE_EXTRA_ROOTS = ${builtins.toJSON treeFixture.extraRoots}
+
+    def tree_nix_store(node, args):
+        features = "ca-derivations local-overlay-store read-only-local-store"
+        return "nix-store --option experimental-features " + shlex.quote(features) + " --store " + shlex.quote(TREE_STORES[node]) + " " + args
+
+    def tree_realize(node, path):
+        auto.succeed(tree_nix_store(node, "--realize " + shlex.quote(path)), timeout=600)
+
+    def tree_add_root(node, path, name):
+        root = TREE_STATES[node] + "/gcroots/" + name
+        auto.succeed("mkdir -p " + shlex.quote(TREE_STATES[node] + "/gcroots") + " && ln -sfn " + shlex.quote(path) + " " + shlex.quote(root))
+
+    def tree_seed_consumers():
+        for node, path in TREE_CONSUMERS.items():
+            tree_realize(node, path)
+            tree_add_root(node, path, "overlay-tree-" + node)
+        for root in TREE_EXTRA_ROOTS:
+            tree_realize(root["node"], root["path"])
+            tree_add_root(root["node"], root["path"], root["name"])
+
+    def tree_add_deferred_marker():
+        for node in reversed(${builtins.toJSON treeFixture.nodeIds}):
+            tree_realize(node, "${p4Path}")
+            tree_add_root(node, "${p4Path}", "deferred-window")
+
+    def assert_tree_deferred_marker():
+        basename = "${baseNameOf p4Path}"
+        for node in TREE_STORES:
+            auto.succeed("test -e " + shlex.quote(TREE_UPPERS[node] + "/" + basename))
+            root = TREE_STATES[node] + "/gcroots/deferred-window"
+            assert auto.succeed("readlink " + shlex.quote(root)).strip() == "${p4Path}"
+        print("OK: deferred source refresh preserved the marker at host, intermediate, leaf and sibling")
+
+    def preparation_count(node):
+        return int(node.succeed(
+          "journalctl -u nixtache-overlay-prepare.service --no-pager | "
+          "grep -c 'Starting Prepare the inactive'"
+        ).strip())
+
+    def wait_fresh_boot(node, previous_id):
+        node.connected = False
+        node.wait_for_unit("multi-user.target")
+        current = node.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+        assert current != previous_id, "update did not produce a fresh boot"
+
+    deployer.start()
+    deployer.wait_for_unit("nginx.service")
+    deployer.wait_for_unit("nix-serve.service")
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
+    auto = create_auto_machine(name="auto")
+    auto.start(allow_reboot=True)
+    auto.wait_for_unit("multi-user.target")
+    auto.wait_until_succeeds("nix --version", timeout=300)
+    print("DIAG deployer addresses: " + deployer.succeed("ip -brief address"))
+    print("DIAG auto addresses/routes: " + auto.succeed("ip -brief address; ip route"))
+    auto.wait_until_succeeds("curl -sf http://deployer:5000/nix-cache-info", timeout=120)
+    auto.succeed("nix-store --realize ${p2Path}", timeout=600)
+    auto.succeed("ln -sfn ${p2Path} /nix/var/nix/gcroots/auto-update-tool")
+    auto.succeed("${p2Path}/bin/tool")
+    tree_seed_consumers()
+    stage_auto("${v2AutoPkg}")
+    auto.succeed("systemctl start nixtache-auto-update.service", timeout=900)
+    auto.succeed("test -f /var/lib/nixtache/reboot-pending")
+    auto.succeed("test -f /var/lib/nixtache/reboot-pending-overlay")
+    assert preparation_count(auto) == 1, "window installation did not prepare exactly once"
+    auto.succeed("systemctl start nixtache-auto-update.service", timeout=300)
+    assert preparation_count(auto) == 1, "no-op poll invoked upper preparation"
+    deferred_target = auto.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+    tree_add_deferred_marker()
+    deferred_boot = auto.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    auto.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
+    wait_fresh_boot(auto, deferred_boot)
+    assert auto.succeed("cat /etc/image-version").strip() == "2"
+    assert preparation_count(auto) == 2, "changed deferred source did not refresh exactly once"
+    auto.succeed("test ! -f /var/lib/nixtache/reboot-pending")
+    auto.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
+    auto.succeed("${p4Path}/bin/busybox echo deferred-source-present")
+    auto.succeed("${p2Path}/bin/tool")
+    current_deferred = auto.succeed(
+      "basename \"$(readlink -f /var/lib/nix-overlay/upper-slots/$(cat /run/nixtache-overlay/selected-slot)/current)\""
+    ).strip()
+    assert current_deferred != deferred_target, "deferred refresh reused the installation-time target generation"
+    assert_tree_deferred_marker()
+    print("AU-OVERLAY-WINDOW OK: no-op skips preparation; changed active generation refreshes the deferred target")
+
+    stage_auto("${v3AutoPkg}")
+    before_immediate = preparation_count(auto)
+    immediate_boot = auto.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    auto.succeed("systemctl start --no-block nixtache-auto-update.service", timeout=300)
+    wait_fresh_boot(auto, immediate_boot)
+    assert auto.succeed("cat /etc/image-version").strip() == "3"
+    assert preparation_count(auto) == before_immediate + 1, "immediate update did not prepare exactly once"
+    auto.succeed("${p4Path}/bin/busybox echo immediate-target-ready")
+    auto.succeed("${p2Path}/bin/tool")
+    assert_tree_deferred_marker()
+    immediate_count = preparation_count(auto)
+    after_immediate_boot = auto.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    deployer.succeed(
+      "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+      ": > /var/lib/nixtache/ab-stage/abtest/SHA256SUMS"
+    )
+    auto.succeed("systemctl start nixtache-auto-update.service", timeout=300)
+    assert preparation_count(auto) == immediate_count, "immediate no-op poll invoked preparation"
+    assert auto.succeed("cat /proc/sys/kernel/random/boot_id").strip() == after_immediate_boot
+    print("AU-OVERLAY-IMMEDIATE OK: completed install prepares once and reboots; no-op neither prepares nor reboots")
+
+    print("PASS: AU-F1..F4 (flake path) + AU-A1..A5 + overlay preparation/deferred refresh")
   '';
 }
 

@@ -326,14 +326,12 @@ let
     };
   };
   scenarioOverlayWiring = contract
-    "overlay-nix: enable=true → overlay daemon/mount service + tmpfiles for upper/work (O1)"
+    "overlay-nix: enable=true wires selection before the overlay mount"
     [ overlayMod overlayCfg ]
     (cfg: {
-      hasOverlayService =
-        (cfg.systemd.services ? "nix-daemon-overlay")
-        || (cfg.systemd.services ? "nix-daemon-overlay-mount");
-      hasOverlayTmpfiles =
-        builtins.any (r: lib.hasInfix "/var/lib/nix-overlay" r) cfg.systemd.tmpfiles.rules;
+      hasOverlayService = cfg.systemd.services ? nix-daemon-overlay-mount;
+      selectionCreatesRuntimePaths = lib.hasInfix "mkdir -p /var/lib/nix-overlay/upper /var/lib/nix-overlay/work"
+        cfg.systemd.services.nixtache-overlay-select.script;
     });
 
   # The local-overlay store's GC invokes the `remount-hook` (a store-level
@@ -368,126 +366,97 @@ let
     }
   ];
 
+  prepareScriptOf = cfg: builtins.readFile
+    (builtins.head (lib.splitString " " cfg.systemd.services.nixtache-overlay-prepare.script));
+
   scenarioOverlayLifecycleDefault = contract
-    "overlay-nix: default wipe lifecycle uses an independent image-version marker and no update-trigger units"
+    "overlay-nix: selection and preparation replace shared cutover lifecycle state"
     [ overlayMod overlayCfg ]
     (cfg: {
       defaultIsWipe = cfg.services.nixtache.overlay-nix.upperOnUpdate == "wipe";
-      hasLifecycle = cfg.systemd.services ? "nixtache-overlay-lifecycle";
+      hasSelection = cfg.systemd.services ? nixtache-overlay-select;
+      hasPreparation = cfg.systemd.services ? nixtache-overlay-prepare;
       noLegacyUnits =
-        !(cfg.systemd.services ? "nixtache-overlay-preupdate")
+        !(cfg.systemd.services ? "nixtache-overlay-lifecycle")
+        && !(cfg.systemd.services ? "nixtache-overlay-preupdate")
         && !(cfg.systemd.services ? "nixtache-overlay-reconcile");
-      noSysupdateWiring =
-        !(cfg.systemd.services ? "systemd-sysupdate")
-        || (
-          !(lib.elem "nixtache-overlay-preupdate.service"
-            (cfg.systemd.services."systemd-sysupdate".wants or [ ]))
-          && !(lib.elem "nixtache-overlay-preupdate.service"
-            (cfg.systemd.services."systemd-sysupdate".after or [ ]))
-        );
       readsRunningVersion = lib.hasInfix "cat /etc/image-version"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      markerWritesFailFast = lib.hasInfix "set -euo pipefail"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      ownsLifecycleMarker = lib.hasInfix "/var/lib/nixtache/last-boot-image-version"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      baselineOnAbsentMarker = lib.hasInfix "if [ ! -f \"$marker\" ]"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      lowerDbMarkerIndependent = !lib.hasInfix "lower-db-version"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      noDaemonRestart = !lib.hasInfix "systemctl stop nix-daemon"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
+        cfg.systemd.services.nixtache-overlay-select.script;
+      selectionFailsFast = lib.hasInfix "set -euo pipefail"
+        cfg.systemd.services.nixtache-overlay-select.script;
+      ownsSlotLayout = lib.hasInfix "/upper-slots/" cfg.systemd.services.nixtache-overlay-select.script;
+      noSharedVersionMarker = !lib.hasInfix "last-boot-image-version"
+        cfg.systemd.services.nixtache-overlay-select.script;
+      noDaemonRestartDuringSelection = !lib.hasInfix "systemctl stop nix-daemon"
+        cfg.systemd.services.nixtache-overlay-select.script;
     });
 
   scenarioOverlayLifecycleWipe = contract
-    "overlay-nix: wipe runs before the real lower-DB loader and overlay mount at cutover"
+    "overlay-nix: physical selection precedes lower metadata, mount, daemon and boot blessing"
     (overlayApplianceModules "wipe")
     (cfg: {
-      hasLifecycle = cfg.systemd.services ? "nixtache-overlay-lifecycle";
       imageVersionFileProvided = cfg.environment.etc."image-version".text == "1";
-      afterLocalFs = lib.elem "local-fs.target"
-        cfg.systemd.services.nixtache-overlay-lifecycle.after;
-      afterZfsMount = lib.elem "zfs-mount.service"
-        cfg.systemd.services.nixtache-overlay-lifecycle.after;
-      beforeLowerDbLoader = lib.elem "nixtache-lower-store-db-load.service"
-        cfg.systemd.services.nixtache-overlay-lifecycle.before;
-      beforeOverlayMount = lib.elem "nix-daemon-overlay-mount.service"
-        cfg.systemd.services.nixtache-overlay-lifecycle.before;
-      loaderRequiresLifecycle = lib.elem "nixtache-overlay-lifecycle.service"
+      selectionAfterLocalFs = lib.elem "local-fs.target"
+        cfg.systemd.services.nixtache-overlay-select.after;
+      selectionAfterZfs = lib.elem "zfs-mount.service"
+        cfg.systemd.services.nixtache-overlay-select.after;
+      selectionBeforeLowerDb = lib.elem "nixtache-lower-store-db-load.service"
+        cfg.systemd.services.nixtache-overlay-select.before;
+      selectionBeforeMount = lib.elem "nix-daemon-overlay-mount.service"
+        cfg.systemd.services.nixtache-overlay-select.before;
+      loaderRequiresSelection = lib.elem "nixtache-overlay-select.service"
         cfg.systemd.services.nixtache-lower-store-db-load.requires;
-      mountRequiresLifecycle = lib.elem "nixtache-overlay-lifecycle.service"
+      mountRequiresLoader = lib.elem "nixtache-lower-store-db-load.service"
         cfg.systemd.services.nix-daemon-overlay-mount.requires;
-      loaderOwnsDistinctMarker = lib.hasInfix "/var/lib/nixtache/lower-db-version"
+      readinessRequiresLoader = lib.elem "nixtache-lower-store-db-load.service"
+        cfg.systemd.targets.nixtache-overlay-ready.requires;
+      bootRequiresReadiness = lib.elem "nixtache-overlay-ready.target"
+        cfg.systemd.targets.boot-complete.requires;
+      loaderUsesSelectedLowerState = lib.hasInfix "state=/var/lib/nix-overlay/lower-state"
         cfg.systemd.services.nixtache-lower-store-db-load.script;
-      loaderCannotConsumeLifecycleRetry = !lib.hasInfix "last-boot-image-version"
+      loaderTracksDumpChecksum = lib.hasInfix "lower-db-sha256"
         cfg.systemd.services.nixtache-lower-store-db-load.script;
-      noLegacyUnits =
-        !(cfg.systemd.services ? "nixtache-overlay-preupdate")
-        && !(cfg.systemd.services ? "nixtache-overlay-reconcile");
+      stockRebootRequiresPreparation = lib.elem "nixtache-overlay-prepare.service"
+        cfg.systemd.services.systemd-sysupdate-reboot.requires;
+      stockRebootAfterPreparation = lib.elem "nixtache-overlay-prepare.service"
+        cfg.systemd.services.systemd-sysupdate-reboot.after;
+      noLegacyUnits = !(cfg.systemd.services ? "nixtache-overlay-lifecycle");
     });
 
   scenarioOverlayTmpfsReset = contract
-    "overlay-nix: tmpfs reset detects the upper filesystem and runs every boot before loader and mount"
-    [ overlayMod overlayCfg ]
+    "overlay-nix: ephemeral host state resets before selected lower loading and mounting"
+    (overlayApplianceModules "wipe")
     (cfg: {
-      hasReset = cfg.systemd.services ? "nixtache-overlay-tmpfs-reset";
-      wantedEveryBoot = lib.elem "multi-user.target"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.wantedBy;
+      selectionWantedEveryBoot = lib.elem "multi-user.target"
+        cfg.systemd.services.nixtache-overlay-select.wantedBy;
       detectsTmpfs = lib.hasInfix "findmnt -T /var/lib/nix-overlay/upper"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.script;
-      clearsUpperOwnedDb = lib.hasInfix "rm -rf /nix/var/nix/db*"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.script;
-      afterLocalFs = lib.elem "local-fs.target"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.after;
-      afterZfsMount = lib.elem "zfs-mount.service"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.after;
-      beforeLowerDbLoader = lib.elem "nixtache-lower-store-db-load.service"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.before;
-      beforeOverlayMount = lib.elem "nix-daemon-overlay-mount.service"
-        cfg.systemd.services.nixtache-overlay-tmpfs-reset.before;
-      loaderRequiresReset = lib.elem "nixtache-overlay-tmpfs-reset.service"
+        cfg.systemd.services.nixtache-overlay-select.script;
+      clearsUpperOwnedDb = lib.hasInfix "reset_dir \"/nix/var/nix/$name\""
+        cfg.systemd.services.nixtache-overlay-select.script;
+      loaderRequiresSelection = lib.elem "nixtache-overlay-select.service"
         cfg.systemd.services.nixtache-lower-store-db-load.requires;
-      mountRequiresReset = lib.elem "nixtache-overlay-tmpfs-reset.service"
+      mountRequiresSelection = lib.elem "nixtache-overlay-select.service"
         cfg.systemd.services.nix-daemon-overlay-mount.requires;
-      leavesMarkersIndependent =
-        !lib.hasInfix "lower-db-version" cfg.systemd.services.nixtache-overlay-tmpfs-reset.script
-        && !lib.hasInfix "last-boot-image-version" cfg.systemd.services.nixtache-overlay-tmpfs-reset.script;
     });
 
   scenarioOverlayLifecycleReconcile = contract
-    "overlay-nix: reconcile resolves roots live after the real lower-DB loader and keeps retry pending"
+    "overlay-nix: reconcile clones a source generation and verifies only a private target"
     (overlayApplianceModules "reconcile")
-    (cfg: {
-      hasLifecycle = cfg.systemd.services ? "nixtache-overlay-lifecycle";
-      afterLowerDbLoader = lib.elem "nixtache-lower-store-db-load.service"
-        cfg.systemd.services.nixtache-overlay-lifecycle.after;
-      afterOverlayMount = lib.elem "nix-daemon-overlay-mount.service"
-        cfg.systemd.services.nixtache-overlay-lifecycle.after;
-      requiresOverlayMount = lib.elem "nix-daemon-overlay-mount.service"
-        cfg.systemd.services.nixtache-overlay-lifecycle.requires;
-      resolvesRootsLive =
-        lib.hasInfix "roots=$(" cfg.systemd.services.nixtache-overlay-lifecycle.script
-        && lib.hasInfix "/nix/var/nix/gcroots" cfg.systemd.services.nixtache-overlay-lifecycle.script
-        && lib.hasInfix "/nix/var/nix/profiles/per-user" cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      noPrecapturedRoots =
-        !lib.hasInfix "roots.txt" cfg.systemd.services.nixtache-overlay-lifecycle.script
-        && !lib.hasInfix "overlay-capture" cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      noRootOnlyFallback = !lib.hasInfix "|| echo \"$root\""
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      successGatesMarkerWrite = lib.hasInfix "if [ \"$fail\" = 0 ]"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      failureLeavesRetry = lib.hasInfix "retry left pending"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      lowerDbMarkerIndependent =
-        !lib.hasInfix "lower-db-version" cfg.systemd.services.nixtache-overlay-lifecycle.script
-        && !lib.hasInfix "last-boot-image-version" cfg.systemd.services.nixtache-lower-store-db-load.script;
-      loaderOwnsDistinctMarker = lib.hasInfix "/var/lib/nixtache/lower-db-version"
-        cfg.systemd.services.nixtache-lower-store-db-load.script;
-      noLegacyMarker = !lib.hasInfix "overlay-reconcile-pending"
-        cfg.systemd.services.nixtache-overlay-lifecycle.script;
-      noLegacyUnits =
-        !(cfg.systemd.services ? "nixtache-overlay-preupdate")
-        && !(cfg.systemd.services ? "nixtache-overlay-reconcile");
+    (cfg: let
+      script = prepareScriptOf cfg;
+      verifyScript = builtins.readFile (builtins.head (lib.splitString "\n"
+        (builtins.elemAt (lib.splitString "unshare -m --propagation private " script) 1)));
+    in {
+      clonesSourceGeneration = lib.hasInfix "source_dir/host" script;
+      recordsSourceGeneration = lib.hasInfix "source_generation=$source_generation" script;
+      separatesLowerState = lib.hasInfix "$stage/host/lower-state" script;
+      verifiesInPrivateNamespace = lib.hasInfix "unshare -m --propagation private" script;
+      verifiesHostBeforeMetadata = lib.hasInfix "repair_store \"$host_url\" \"$stage/host/state\" \"$host_root\"" verifyScript;
+      unreadyUntilVerified = lib.hasInfix "state=unready" script
+        && lib.hasInfix "sed -i 's/^state=unready$/state=ready/'" script;
+      retryDiscardsOnlyStaging = lib.hasInfix "rm -rf \"$slot_dir\"/.staging-*" script;
+      checksumChangesInvalidate = lib.hasInfix "lower_sha256" cfg.systemd.services.nixtache-overlay-select.script;
+      noLiveLifecycle = !(cfg.systemd.services ? "nixtache-overlay-lifecycle");
     });
 
   scenarioOverlayLifecycleAssertBadMode = assertContract

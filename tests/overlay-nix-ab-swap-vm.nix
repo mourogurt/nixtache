@@ -186,6 +186,12 @@ pkgs.testers.runNixOSTest {
     print("OK: vim realized into the upper layer on v1")
 
     # -- Stage v2 + sysupdate → slot B ----------------------------------------
+    active_state_before = appliance.succeed(
+      "tar --sort=name --numeric-owner -cf - "
+      "/var/lib/nix-overlay/upper /nix/var/nix/db /nix/var/nix/gcroots "
+      "/nix/var/nix/profiles /nix/var/nix/temproots 2>/dev/null | "
+      "sha256sum | awk '{print $1}'"
+    ).strip()
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/"
@@ -196,6 +202,25 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_2", timeout=900)
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: sysupdate wrote v2 to slot B + ESP")
+
+    appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
+    target_slot = appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip()
+    target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+    target = f"/var/lib/nix-overlay/upper-slots/{target_slot}/generations/{target_generation}"
+    appliance.succeed(f"grep -q '^state=ready$' {target}/metadata")
+    appliance.succeed(f"grep -q '^policy=wipe$' {target}/metadata")
+    appliance.fail(f"test -e {target}/host/upper/${vimBasename}")
+    active_state_after = appliance.succeed(
+      "tar --sort=name --numeric-owner -cf - "
+      "/var/lib/nix-overlay/upper /nix/var/nix/db /nix/var/nix/gcroots "
+      "/nix/var/nix/profiles /nix/var/nix/temproots 2>/dev/null | "
+      "sha256sum | awk '{print $1}'"
+    ).strip()
+    assert active_state_after == active_state_before, "target wipe changed the active upper or its Nix state"
+    appliance.succeed("test -d /var/lib/nix-overlay/upper/${vimBasename}")
+    out = appliance.succeed("${vimPath}/bin/vim --version")
+    assert "VIM" in out, f"active vim broke during target preparation ({out!r})"
+    print("OK: target-only wipe is ready; active upper and Nix state are byte-identical")
 
     # -- Reboot → systemd-boot picks the highest-version UKI (abtest_2) -------
     appliance.reboot()
@@ -217,8 +242,9 @@ pkgs.testers.runNixOSTest {
     appliance.fail("test -d /var/lib/nix-overlay/upper/${vimBasename}")
     out = appliance.succeed("nix path-info ${vimPath} 2>&1 || true")
     assert "is not valid" in out, f"wipe left a DB entry for vim ({out!r})"
-    marker = appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip()
-    assert marker == "2", f"lower DB marker {marker!r}, expected '2' (v2 dump loaded)"
+    marker = appliance.succeed("cat /var/lib/nix-overlay/lower-state/lower-db-sha256").strip()
+    expected_marker = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_2.lower-db | awk '{print $1}'").strip()
+    assert marker == expected_marker, "the selected lower-state was not loaded from v2's dump"
     print("OK: wipe policy — upper cleared, vim's DB entry gone, DB re-seeded from v2")
 
     # -- v2 lower paths visible AND valid through the merged store ------------
