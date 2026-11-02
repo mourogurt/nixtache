@@ -15,9 +15,9 @@ An appliance slot is a squashFS/erofs image: `/nix/store` is a read-only
 mount populated with the system closure, and the image-based-appliance
 profile disables nix entirely (`nix.enable = false` — appliances are not
 rebuilt in place). Without the shipped dump and loader described below,
-nothing creates `/nix/var/nix/db`, the database that tells nix which paths
-exist and what their contents' hashes are. Three consumer surfaces break on
-such a store:
+nothing creates the lower-state database that tells nix which paths exist
+and what their contents' hashes are. Three consumer surfaces break on such
+a store:
 
 - **Runner container, clone mode** (`services.nixtache.runner.store.mode =
   "clone"`): the storage seeder enumerates "all valid paths" through the
@@ -32,21 +32,62 @@ such a store:
   downloads everything into the upper layer (no delta installs).
 
 The image therefore ships the closure's validity records (path, narHash,
-narSize, deriver, references per store path) as a dump on the ESP, and a
-boot-time loader seeds `/nix/var/nix/db` from it. On a nix-less appliance
-host the runner container also disables its internal nix module, renders
-`nix.conf` with the preserved settings plus `ca-derivations`, and ships the
-CLI explicitly. Clone mode then enumerates a scratch copy of the real host
-DB. Overlay mode binds the host store and DB read-only under
-`/run/nixtache-runner-lower` and uses that root as `lower-store` with the local
-store's `read-only=true` setting, so Nix does not try to change ownership or
-open the DB for writing. The separate path is required because the custom
-daemon rebinds `/nix` to the merged relocated store: a lower rooted at `/nix`
-would read the upper DB rather than the host DB. A daemon lower is not an
-alternative on appliances because no host daemon exists.
+narSize, deriver, references per store path) as a dump on the ESP. The
+boot-time loader imports them into the selected lower-state, or directly into
+`/nix/var/nix/db` without `overlay-nix`. On a nix-less appliance host the
+runner container also disables its internal nix module, renders `nix.conf`
+with the preserved settings plus `ca-derivations`, and ships the CLI
+explicitly. Clone mode then enumerates a scratch copy of the real host DB.
+Overlay mode binds the selected parent's store and metadata read-only under
+`/run/nixtache-runner-lower`. Without host `overlay-nix`, that root is a plain
+read-only local lower. With host `overlay-nix`, the runner opens a composite
+`local-overlay` lower there: the parent's merged store, lower-state and
+upper-owned DB, roots, profiles and temproots remain visible together. The
+physical lower-state opens with `read-only=true`. A `local-overlay` parent also
+registers newly visible lower paths in its upper DB during queries, so the
+runner copies the read-only parent state to `/run/nixtache-runner-parent-state`
+before starting its daemon. Those internal registrations touch only the scratch
+copy, never the selected parent's metadata. The dedicated root is required
+because the custom daemon rebinds `/nix` to the runner's merged relocated store:
+a lower rooted at `/nix` would read the runner's upper DB rather than the
+selected parent's metadata. A daemon lower is not an alternative on appliances
+because no host daemon exists.
+
+Clone mode is deliberately outside the upper-metaslot tree. Its single relocated
+store at `<hostBackup>/nix` already contains a complete writable local store and
+DB, not an OverlayFS upper with a separate lower/upper metadata role. A slot
+swap seeds the new lower additively into that same store, preserving prior CI
+outputs and avoiding a second multi-GB slot-owned copy. Overlay mode instead
+places each runner upper and its upper-owned state in the physical slot's tree,
+so target preparation and rollback select the host and runner layers together.
 
 The rest of this document covers the internals: how the dump is generated,
 how the store is imaged, and why the runtime workarounds exist.
+
+## Lower-state and upper-state are different metadata roles
+
+With `overlay-nix`, the host's `local-overlay` store opens two independent
+metadata sets for the physical slot selected by the lower partition's GPT
+`PARTUUID`:
+
+- `upper-slots/<partuuid>/generations/<generation>/host/lower-state` holds
+  the read-only records imported from that slot's lower dump. The loader
+  tracks the dump's SHA-256, so replacing a lower image with the same version
+  but different records still invalidates the old metadata.
+- `.../host/state` holds the writable upper database, roots, profiles and
+  temproots. Runtime installations change this upper-owned state, not the
+  lower-state.
+
+The stable `lower-state` link beside `upperDir` selects the first role;
+`/nix/var/nix/{db,gcroots,profiles,temproots}` selects the second. These
+selection links are installed before the lower loader, overlay mount and Nix
+daemon start. A plain reboot reselects the same generation, while booting an
+older physical slot selects that slot's own preserved lower-state and upper
+state together; no dump is merged into another slot's upper database.
+
+Without `overlay-nix`, the appliance keeps its ordinary local-store layout
+and the loader writes `/nix/var/nix/db` directly. In both layouts the ESP
+artifact and its registration format are identical.
 
 ## Dump generation: registered records, content-true via content-addressing
 
@@ -166,12 +207,11 @@ The three workarounds, each mapped to the behaviour that forces it:
   inside `unshare -m --propagation private` with a tmpfs-upper OverlayFS
   over `/nix/store`**: the store stays readable (the loader's own binaries
   resolve), the directory-init lands in the discarded namespace, and the
-  DB write to `/nix/var/nix` (on the writable root filesystem) persists.
-  The namespace trick is load-bearing for the swap case — records must
-  merge additively into the EXISTING database, so the DB cannot simply be
-  rebuilt elsewhere and swapped in. (A unit-level
-  `TemporaryFileSystem=/nix/store` cannot replace it: systemd would mask
-  the unit script's own store path at exec time — status 203/EXEC.)
+  selected lower-state on the writable root filesystem receives the records.
+  The store URL's `state` parameter directs that write away from the upper
+  database. (A unit-level `TemporaryFileSystem=/nix/store` cannot replace
+  the namespace: systemd would mask the unit script's own store path at exec
+  time — status 203/EXEC.)
 - **The runner container's clone seed reads the host DB through a writable
   scratch copy plus a `local?root=/&state=…&read-only=true` source URL**:
   sqlite cannot open the read-only bind-mounted DB file, so the seed

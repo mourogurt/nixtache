@@ -31,8 +31,9 @@ not by `nix flake check`.
 | `tests/ci-workflow-drift.nix` | real workflow/action contracts: sandbox ordering, private-input SSH wiring, consumer/self update profiles, online-`kvm` discovery with `test` fallback, KVM-gated full VM inventory and skip behavior, deferred LFS checkout and ordering, plus fake-endpoint LFS transport scenarios (SSH preference, HTTPS fallback, explicit endpoint preservation and redacted failure) | `checks.<system>.ci-workflow-drift` |
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` flag × documentation-completeness matrix | `checks.<system>.mkDocs` |
 
-`tests/ab-fixture.nix`, `tests/ab-anywhere-install.nix` and
-`tests/ab-ota-vm-lib.nix` are shared fixtures/helpers, not registered suites.
+`tests/ab-fixture.nix`, `tests/ab-anywhere-install.nix`,
+`tests/ab-ota-vm-lib.nix` and `tests/overlay-tree-vm-lib.nix` are shared
+fixtures/helpers, not registered suites.
 
 ### Layout — KVM-only VM suites (`vmTests.x86_64-linux`)
 
@@ -47,12 +48,14 @@ without building, and `suite` overrides `subset`. Full inventory:
 `ab-ota-anywhere-vm`, `ab-vm`, `ab-provision-vm`,
 `overlay-nix-vm`, `overlay-nix-install-vm`, `overlay-nix-ab-swap-vm`,
 `overlay-nix-ota-invalid-vm` (+ `-wipe`/`-reconcile`/`-reconcile-degraded`/
-`-tmpfs` variants), `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
+`-tmpfs` variants), `overlay-tree-{sibling,nested,composed}-{wipe,reconcile}-vm`,
+`overlay-tree-failure-{host,a,grand,b}-vm`, `overlay-tree-rollback-vm`,
+`overlay-tree-ephemeral-{host,a}-vm`, `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
 `ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `ab-ota-migrate-boot-vm` (+
 `-override` variant), `ab-data-pool-vm`, `ab-data-pool-wipe-vm`,
 `runner-store-mode-vm`,
 `runner-store-swap-clone-vm`, `runner-store-swap-overlay-vm`,
-`ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
+`runner-store-swap-overlay-ephemeral-vm`, `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
 `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
 
 Every `vmTests` suite belongs in the full matrix unless it is explicitly
@@ -138,10 +141,55 @@ containing a symlink path) and `overlay-nix-vm` (the symlink survives imaging
 and resolves through `nix path-info`).
 
 The `overlay-nix-ota-invalid` matrix covers empty and tampered update attempts,
-same-version persistent-upper reboots, live-root reconcile, degraded reconcile
-retry with independent lower-DB/lifecycle markers, and same-version tmpfs
-reset/reseed. `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` retain the
-default-wipe swap and non-appliance installation contracts.
+same-version persistent-upper reboots, target-only wipe/reconcile with GC roots
+and per-user profiles, interrupted preparation and unavailable-substituter
+retries with active upper/DB/lower-state checksum comparisons, failed
+`nixtache-ab-update` reboot suppression and direct boot recovery of an
+unprepared UKI, lower-dump checksum recovery into a fresh ready generation,
+and physical-slot reuse from the latest active upper. The tmpfs variant covers ephemeral state reset and
+lower reseeding. `overlay-nix-ab-swap-vm` and `overlay-nix-install-vm` retain
+the default-wipe swap and non-appliance installation contracts.
+
+The `overlay-tree-{sibling,nested,composed}-{wipe,reconcile}-vm` matrix uses the shared
+rooted-layer fixture to check parent/intermediate/leaf/sibling roots, exact
+repair placement and fetch order, independent sibling repairs, duplicated
+ancestor metadata, active-tree isolation, atomic unready generations and final
+whole-tree closure validation. Wipe variants assert empty target state and
+fresh writes after cutover; reconcile variants also cover unavailable-cache
+failure and retry. Canonical behavior:
+[`overlay-nix`](../../openspec/specs/overlay-nix/spec.md).
+
+The composed-tree groups extend that fixture to two host children and one nested
+grandchild. `overlay-tree-failure-{host,a,grand,b}-vm` inject clone
+interruption, repair failure and final metadata verification failure at the
+named node, followed by successful retry and physical-slot reuse with fresh
+registered writes. Lower-DB seed failure is covered only by
+`overlay-tree-failure-host-vm`; other nodes report `seed=N/A` because they have
+no lower-DB seed phase. The failure matrix runs `reconcile`: wipe has no source
+clone or repair, and is covered separately by the composed wipe suite's empty
+state and fresh-write assertions. Failure injection modifies test-owned copies
+of the generated preparation scripts, not the production module.
+`overlay-tree-rollback-vm` covers automatic and manual rollback with unchanged
+per-node generations and databases. `overlay-tree-ephemeral-{host,a}-vm` covers
+reset of the whole tree below the host and of only `a` plus its descendant,
+with persistent siblings unchanged. The composed auto-update VM verifies that
+deferred-source refresh carries window writes at the host, intermediate, leaf
+and sibling into the target.
+
+`ab-ota-rollback-vm` covers an upper-hosted critical service across failed boot
+health, automatic and manual rollback with the original upper generation/DB,
+and same-version physical-slot selection. `ab-data-pool-vm` and
+`ab-data-pool-wipe-vm` pin the same upper-preservation rule on ZFS independently
+of the policy applied to the new target.
+
+`runner-store-swap-overlay-vm` reconciles the host and runner upper chain,
+checks CI-write isolation between slots and restores the original runner
+upper and database after failed-boot rollback through the dedicated parent
+lower root. `runner-store-swap-overlay-ephemeral-vm` reboots with a tmpfs host
+upper and verifies that the runner descendant's upper, work directory and Nix
+state are reset before CI builds resume. `runner-store-swap-clone-vm` retains
+the additive, single relocated-store contract. Canonical behavior:
+[`runner`](../../openspec/specs/runner/spec.md).
 
 ### Pure-eval suite and scenario shape
 

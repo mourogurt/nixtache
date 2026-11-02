@@ -55,8 +55,36 @@ all definitions into the inner `eval-config` modules list).
 |---|---|
 | `modules/deploy-target/` | Target side of direct deploy: root `nixtache-apply.service` (activate → probe `criticalUnits` → rollback), polkit start-only rule, `nixtache-deploy` group + pointer dir, deploy-user provisioning with the SSH gate, Tier-0 health check, `ab.*` runtime (gating, partition provisioning). |
 | `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)). |
-| `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`, so appliance targets can install packages at runtime. |
-| `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, poll timer, reboot policy and a deferred-reboot timer in window mode. |
+| `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`; physical-slot upper metaslots, out-of-place target preparation and rollback-preserving selection. |
+| `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, poll timer, target preparation, and deferred-reboot source refresh in window mode. |
+| `modules/secrets.nix` | Secrets provider abstraction (`vars` + extensible `providers`). |
+
+### Lower installation versus upper readiness
+
+The A/B image and overlay modules own different steps of an update:
+
+- `ab-image`/sysupdate installs the inactive lower partition, UKI and lower
+  dump. Completing that write does not make the upper chain ready.
+- `overlay-nix` prepares only the inactive physical slot's upper generation.
+  Wipe creates empty upper-owned state; reconcile clones the current active
+  generation and repairs the copy in a private namespace. Readiness is
+  recorded only after the complete target validates.
+- `nixtache-ab-update` and the auto-update poll invoke that preparation after
+  confirmed lower installation and before reboot. The deferred-reboot path
+  fingerprints the complete active generation, so changes at any layer during
+  the window force a fresh target preparation; an unchanged source is not
+  prepared twice.
+- Early boot selects a ready generation from the mounted lower's GPT
+  `PARTUUID`, with lower-dump checksum validation. Upper consumers and
+  `boot-complete.target` require that selection. Recovery of an unprepared
+  target runs before consumers start; failure does not bless the boot.
+- Rollback selects the previous lower and its preserved upper generation and
+  DB. It never performs a reverse wipe or reconcile.
+
+Canonical contracts:
+[`ab-ota`](../../openspec/specs/ab-ota/spec.md),
+[`overlay-nix`](../../openspec/specs/overlay-nix/spec.md), and
+[`runner`](../../openspec/specs/runner/spec.md) for dependent runner overlays.
 
 Requirements (canonical) live in
 [`openspec/specs/`](../../openspec/specs/) — capabilities updated through
