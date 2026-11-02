@@ -77,6 +77,33 @@ let
             system.extraDependencies = [
               (pkgs.runCommand "symlink-fixture" { } "ln -s ${pkgs.hello} $out")
             ];
+
+            systemd.services.nixtache-overlay-legacy-fixture = {
+              description = "Populate a legacy shared upper before slot migration";
+              unitConfig.ConditionPathExists = "!/tmp/nixtache-legacy-tool-path";
+              after = [ "local-fs.target" ];
+              before = [ "nixtache-overlay-select.service" ];
+              path = with pkgs; [ coreutils findutils util-linux nix ];
+              serviceConfig.Type = "oneshot";
+              script = ''
+                set -euo pipefail
+                mkdir -p /var/lib/nix-overlay/upper /var/lib/nix-overlay/work /nix/var/nix/db /nix/var/nix/gcroots
+                printf '#!/bin/sh\necho LEGACY_TOOL_OK\n' > /tmp/nixtache-legacy-tool
+                chmod +x /tmp/nixtache-legacy-tool
+                mount -t overlay overlay -o lowerdir=/nix/store,upperdir=/var/lib/nix-overlay/upper,workdir=/var/lib/nix-overlay/work /nix/store
+                trap 'umount -l /nix/store 2>/dev/null || true' EXIT
+                p=$(nix-store --option experimental-features "ca-derivations local-overlay-store" --store 'local-overlay://?lower-store=local&upper-layer=/var/lib/nix-overlay/upper&check-mount=false' --add /tmp/nixtache-legacy-tool)
+                echo "$p" > /tmp/nixtache-legacy-tool-path
+                ln -s "$p" /nix/var/nix/gcroots/legacy-tool
+                umount -l /nix/store
+                trap - EXIT
+                mv /boot/EFI/nixtache/abtest_1.lower-db /boot/EFI/nixtache/abtest_1.lower-db.hold
+              '';
+            };
+            systemd.services.nixtache-overlay-select = {
+              after = [ "nixtache-overlay-legacy-fixture.service" ];
+              requires = [ "nixtache-overlay-legacy-fixture.service" ];
+            };
           }
         )
       ];
@@ -111,12 +138,19 @@ let
         p.expect(r"__E__\d+", timeout=180)
         return p.before.split("__B__", 1)[-1].strip()
 
+    print("RESULT_MIGRATION_FAILURE=" + run("if [ -f /tmp/nixtache-legacy-tool-path ] && [ -f /boot/EFI/nixtache/abtest_1.lower-db.hold ]; then mount -t overlay overlay -o lowerdir=/nix/store,upperdir=/var/lib/nix-overlay/upper,workdir=/var/lib/nix-overlay/work /nix/store && $(cat /tmp/nixtache-legacy-tool-path); rc=$?; umount -l /nix/store; test ! -L /var/lib/nix-overlay/upper && test $rc = 0 && echo legacy-usable || echo legacy-lost; else echo not-induced; fi"))
+    run("mv /boot/EFI/nixtache/abtest_1.lower-db.hold /boot/EFI/nixtache/abtest_1.lower-db && systemctl restart nixtache-overlay-select.service && systemctl start nixtache-overlay-ready.target")
+    print("RESULT_MIGRATED_TOOL=" + run("$(cat /tmp/nixtache-legacy-tool-path)"))
+    print("RESULT_MIGRATED_PATH_VALID=" + run("nix path-info $(cat /tmp/nixtache-legacy-tool-path) >/dev/null 2>&1 && echo valid || echo invalid"))
+    print("RESULT_MIGRATION_BACKUP=" + run("test -e /var/lib/nix-overlay/legacy-backup/host/upper/$(basename $(cat /tmp/nixtache-legacy-tool-path)) && test -f /var/lib/nix-overlay/legacy-backup/host/state/db/db.sqlite && echo preserved || echo missing"))
+    print("RESULT_OTHER_SLOT_UNREADY=" + run("find /var/lib/nix-overlay/upper-slots -mindepth 2 -maxdepth 2 -name unready | grep -q . && echo marked || echo missing"))
+
     # Give the overlay daemon time to come up after boot.
     run("for i in $(seq 1 30); do systemctl is-active --quiet nix-daemon-overlay 2>/dev/null || systemctl is-active --quiet nix-daemon-overlay-mount 2>/dev/null && break; sleep 2; done")
 
     # --- O1: an OverlayFS mount + the overlay daemon active --------------------
     print("RESULT_OVERLAY_MOUNT_COUNT=" + run("mount | grep -ci overlay"))
-    print("RESULT_OVERLAY_DAEMON=" + run("systemctl is-active nix-daemon-overlay nix-daemon-overlay-mount 2>/dev/null | grep -m1 active || echo inactive"))
+    print("RESULT_OVERLAY_DAEMON=" + run("systemctl is-active nix-daemon-overlay-mount 2>/dev/null || echo inactive"))
     print("RESULT_UPPER_DIR=" + run("test -d /var/lib/nix-overlay/upper && echo yes || echo no"))
     print("RESULT_WORK_DIR=" + run("test -d /var/lib/nix-overlay/work && echo yes || echo no"))
 
@@ -138,7 +172,11 @@ let
     # standard nix tooling.
     print("RESULT_LOWER_DUMP=" + run("test -f /boot/EFI/nixtache/abtest_1.lower-db && echo present || echo missing"))
     print("RESULT_LOWER_DB_LOADER=" + run("systemctl is-active nixtache-lower-store-db-load.service 2>/dev/null || echo inactive"))
-    print("RESULT_LOWER_DB_VERSION=" + run("cat /var/lib/nixtache/lower-db-version 2>/dev/null || echo missing"))
+    print("RESULT_LOWER_DB_CHECKSUM=" + run("test \"$(cat /var/lib/nix-overlay/lower-state/lower-db-sha256 2>/dev/null)\" = \"$(sha256sum /boot/EFI/nixtache/abtest_1.lower-db | awk '{print $1}')\" && echo current || echo stale"))
+    print("RESULT_METADATA_ROLES=" + run("test \"$(readlink -f /var/lib/nix-overlay/lower-state)\" != \"$(readlink -f /nix/var/nix/db)\" && test -f /nix/var/nix/db/db.sqlite && echo separate || echo shared"))
+    print("RESULT_SLOT_SELECTION=" + run("slot=$(blkid -s PARTUUID -o value $(findmnt -n -o SOURCE --target /nix/store | grep '^/dev/' | sort -u) | tr A-F a-f); test \"$(cat /run/nixtache-overlay/selected-slot)\" = \"$slot\" && echo selected || echo wrong"))
+    print("RESULT_INITIAL_GENERATION=" + run("readlink -f /var/lib/nix-overlay/upper"))
+    print("RESULT_MIGRATION_IDEMPOTENT=" + run("before=$(readlink -f /var/lib/nix-overlay/upper); systemctl restart nixtache-overlay-select.service; after=$(readlink -f /var/lib/nix-overlay/upper); test \"$before\" = \"$after\" && echo stable || echo changed"))
     # A lower path must resolve through standard nix tooling with no manual
     # seed. /run/current-system, not a host-side store path: the appliance
     # evaluates content-addressed, so its shipped paths hash differently
@@ -155,9 +193,28 @@ let
     print("RESULT_SYMLINK_TARGET=" + run("p=$(ls -d /nix/store/*-symlink-fixture 2>/dev/null | head -1); t=$(readlink \"$p\" 2>/dev/null); [ -n \"$t\" ] && [ -e \"$t\" ] && echo resolves || echo broken"))
     print("RESULT_SYMLINK_PATH_INFO=" + run("p=$(ls -d /nix/store/*-symlink-fixture 2>/dev/null | head -1); nix path-info \"$p\" >/dev/null 2>&1 && echo valid || echo invalid"))
 
-    # --- INFO (human visibility) -----------------------------------------------
+    print("RESULT_RUNTIME_INSTALL=" + run("printf '#!/bin/sh\\necho UPPER_TOOL_OK\\n' > /tmp/nixtache-upper-tool && chmod +x /tmp/nixtache-upper-tool && p=$(nix store add-path /tmp/nixtache-upper-tool) && echo \"$p\" > /tmp/nixtache-upper-tool-path && nix profile install \"$p\" >/dev/null 2>&1 && \"$p\""))
+
     print("INFO_MOUNTS=" + run("mount | grep -E 'overlay|/nix/store' | head -20"))
     print("INFO_LSBLK=" + run("lsblk -o NAME,PARTLABEL,FSTYPE,RO,MOUNTPOINT"))
+    print("INFO_SELECT_STATUS=" + run("systemctl status nixtache-overlay-select.service --no-pager -l 2>&1 | tail -30"))
+    print("INFO_PREPARE_JOURNAL=" + run("journalctl -u nixtache-overlay-legacy-fixture.service -u nixtache-overlay-select.service -u nixtache-lower-store-db-load.service --no-pager -n 100 2>&1"))
+
+    p.sendline("systemctl reboot")
+    p.expect(r"Welcome to NixOS|login:", timeout=240)
+    time.sleep(8)
+    p.sendline("echo ABTEST_REBOOTED_$$")
+    p.expect(r"ABTEST_REBOOTED_\d+", timeout=90)
+    p.sendline("stty -echo")
+    time.sleep(1)
+    p.sendline("echo SYNC_REBOOT_$$")
+    p.expect(r"SYNC_REBOOT_\d+", timeout=30)
+
+    print("RESULT_REBOOT_TOOL=" + run("$(cat /tmp/nixtache-upper-tool-path)"))
+    print("RESULT_REBOOT_PATH_VALID=" + run("nix path-info $(cat /tmp/nixtache-upper-tool-path) >/dev/null 2>&1 && echo valid || echo invalid"))
+    print("RESULT_REBOOT_PROFILE=" + run("readlink -f /nix/var/nix/profiles/per-user/root/profile | grep -q '^/nix/store/' && echo persistent || echo missing"))
+    print("RESULT_REBOOT_GENERATION=" + run("readlink -f /var/lib/nix-overlay/upper"))
+    print("RESULT_REBOOT_LOWER_VALID=" + run("nix path-info /run/current-system >/dev/null 2>&1 && echo valid || echo invalid"))
 
     p.sendline("poweroff")
     time.sleep(5)
@@ -191,11 +248,25 @@ pkgs.runCommand "overlay-nix-vm-test"
     echo "$(val LOWER_RO)" | grep -q ro && pass "lower /nix/store is read-only" || fail "lower /nix/store not ro ($(val LOWER_RO))"
     [ "$(val LOWER_DUMP)" = "RESULT_LOWER_DUMP=present" ] && pass "lower store DB dump present in the store partition" || fail "dump missing ($(val LOWER_DUMP))"
     [ "$(val LOWER_DB_LOADER)" = "RESULT_LOWER_DB_LOADER=active" ] && pass "lower DB loader oneshot ran at boot" || fail "loader not active ($(val LOWER_DB_LOADER))"
-    [ "$(val LOWER_DB_VERSION)" = "RESULT_LOWER_DB_VERSION=1" ] && pass "lower DB version marker = running image version" || fail "marker wrong ($(val LOWER_DB_VERSION))"
+    [ "$(val LOWER_DB_CHECKSUM)" = "RESULT_LOWER_DB_CHECKSUM=current" ] && pass "selected lower-state tracks the lower dump checksum" || fail "lower-state checksum wrong ($(val LOWER_DB_CHECKSUM))"
+    [ "$(val METADATA_ROLES)" = "RESULT_METADATA_ROLES=separate" ] && pass "lower-state and upper DB are separate selected metadata" || fail "metadata roles not separate ($(val METADATA_ROLES))"
+    [ "$(val SLOT_SELECTION)" = "RESULT_SLOT_SELECTION=selected" ] && pass "upper selection uses the physical lower PARTUUID" || fail "wrong slot selection ($(val SLOT_SELECTION))"
+    grep -aq "legacy-usable" driver.out && pass "failed migration leaves the legacy upper and DB usable" || fail "legacy migration failure was destructive ($(val MIGRATION_FAILURE))"
+    [ "$(val MIGRATED_TOOL)" = "RESULT_MIGRATED_TOOL=LEGACY_TOOL_OK" ] && pass "previously installed legacy tool works after migration" || fail "migrated legacy tool failed ($(val MIGRATED_TOOL))"
+    [ "$(val MIGRATED_PATH_VALID)" = "RESULT_MIGRATED_PATH_VALID=valid" ] && pass "migrated upper preserves DB validity" || fail "migrated upper DB record missing ($(val MIGRATED_PATH_VALID))"
+    [ "$(val MIGRATION_BACKUP)" = "RESULT_MIGRATION_BACKUP=preserved" ] && pass "migration retains a recovery backup of upper and state" || fail "migration backup missing ($(val MIGRATION_BACKUP))"
+    [ "$(val OTHER_SLOT_UNREADY)" = "RESULT_OTHER_SLOT_UNREADY=marked" ] && pass "the inactive physical slot is explicitly unready" || fail "other slot unready marker missing ($(val OTHER_SLOT_UNREADY))"
+    [ "$(val MIGRATION_IDEMPOTENT)" = "RESULT_MIGRATION_IDEMPOTENT=stable" ] && pass "selection and migration are idempotent" || fail "migration changed an established generation ($(val MIGRATION_IDEMPOTENT))"
     [ "$(val LOWER_PATH_VALID)" = "RESULT_LOWER_PATH_VALID=valid" ] && pass "lower path resolves nix path-info with no manual seed" || fail "lower path not valid ($(val LOWER_PATH_VALID))"
     [ "$(val SYMLINK_IS_LINK)" = "RESULT_SYMLINK_IS_LINK=link" ] && pass "top-level symlink closure path ships as a symlink" || fail "symlink closure path not a symlink in the image ($(val SYMLINK_IS_LINK))"
     [ "$(val SYMLINK_TARGET)" = "RESULT_SYMLINK_TARGET=resolves" ] && pass "symlink closure path's target exists in the image" || fail "symlink target broken ($(val SYMLINK_TARGET))"
     [ "$(val SYMLINK_PATH_INFO)" = "RESULT_SYMLINK_PATH_INFO=valid" ] && pass "symlink closure path resolves nix path-info (record matches shipped bytes)" || fail "symlink path-info invalid ($(val SYMLINK_PATH_INFO))"
+    val RUNTIME_INSTALL | grep -q "RESULT_RUNTIME_INSTALL=.*UPPER_TOOL_OK" && pass "runtime install lands in the selected upper" || fail "runtime install failed ($(val RUNTIME_INSTALL))"
+    [ "$(val REBOOT_TOOL)" = "RESULT_REBOOT_TOOL=UPPER_TOOL_OK" ] && pass "same-slot reboot preserves the installed tool" || fail "installed tool missing after reboot ($(val REBOOT_TOOL))"
+    [ "$(val REBOOT_PATH_VALID)" = "RESULT_REBOOT_PATH_VALID=valid" ] && pass "same-slot reboot preserves upper DB validity" || fail "upper DB record lost ($(val REBOOT_PATH_VALID))"
+    [ "$(val REBOOT_PROFILE)" = "RESULT_REBOOT_PROFILE=persistent" ] && pass "same-slot reboot preserves the selected profile" || fail "profile missing after reboot ($(val REBOOT_PROFILE))"
+    [ "$(val INITIAL_GENERATION | cut -d= -f2-)" = "$(val REBOOT_GENERATION | cut -d= -f2-)" ] && pass "same-slot reboot selects the same generation without preparation" || fail "generation changed on plain reboot"
+    [ "$(val REBOOT_LOWER_VALID)" = "RESULT_REBOOT_LOWER_VALID=valid" ] && pass "lower records remain valid after same-slot reboot" || fail "lower records invalid after reboot ($(val REBOOT_LOWER_VALID))"
 
     cat $out/report
     [ "$FAIL" = "0" ] || exit 1
