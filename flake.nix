@@ -151,6 +151,22 @@
         # tmpfs upper: same-version reboot clears stale upper-owned state and
         # reseeds the current lower DB; the swap leg checks overlay health too.
         overlay-nix-ota-invalid-tmpfs-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; overlayOptions.upperOnUpdate = "wipe"; upperTmpfs = true; };
+        # Reusable rooted-layer primitives: each topology and policy has an
+        # independently cached real-appliance suite for exact repair placement,
+        # atomic readiness and whole-tree closure validation.
+        overlay-tree-sibling-wipe-vm = import ./tests/overlay-tree-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "sibling"; upperOnUpdate = "wipe"; };
+        overlay-tree-sibling-reconcile-vm = import ./tests/overlay-tree-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "sibling"; upperOnUpdate = "reconcile"; };
+        overlay-tree-nested-wipe-vm = import ./tests/overlay-tree-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "nested"; upperOnUpdate = "wipe"; };
+        overlay-tree-nested-reconcile-vm = import ./tests/overlay-tree-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "nested"; upperOnUpdate = "reconcile"; };
+        overlay-tree-composed-wipe-vm = import ./tests/overlay-tree-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "composed"; upperOnUpdate = "wipe"; };
+        overlay-tree-composed-reconcile-vm = import ./tests/overlay-tree-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "composed"; upperOnUpdate = "reconcile"; };
+        overlay-tree-failure-host-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "host"; };
+        overlay-tree-failure-a-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "a"; };
+        overlay-tree-failure-grand-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "grand"; };
+        overlay-tree-failure-b-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "b"; };
+        overlay-tree-rollback-vm = import ./tests/overlay-tree-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
+        overlay-tree-ephemeral-host-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; ephemeralNode = "host"; };
+        overlay-tree-ephemeral-a-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; ephemeralNode = "a"; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style
@@ -200,12 +216,13 @@
         # pin). Signed staging.
         ab-data-pool-vm = import ./tests/ab-data-pool-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; upperOnUpdate = "reconcile"; };
         ab-data-pool-wipe-vm = import ./tests/ab-data-pool-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; upperOnUpdate = null; };
-        # runner-store-swap-vm: R4 un-skipped — the runner's relocated store
-        # (clone / overlay) on a REAL appliance across a slot swap: container
-        # up on both boots, build works pre/post swap, clone additive,
-        # overlay coherent. Signed staging.
+        # runner-store-swap-vm: the runner's relocated store on a real
+        # appliance. Clone stays additive; overlay reconciles a slot-scoped
+        # cascade, rolls back after failed boot health, and resets descendants
+        # of an ephemeral host upper. Signed staging.
         runner-store-swap-clone-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; storeMode = "clone"; };
         runner-store-swap-overlay-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; storeMode = "overlay"; };
+        runner-store-swap-overlay-ephemeral-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; storeMode = "overlay"; ephemeral = true; };
       };
 
       # --- This flake's own option docs -----------------------------------
