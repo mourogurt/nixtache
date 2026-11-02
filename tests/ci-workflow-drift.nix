@@ -32,6 +32,7 @@ let
     mkdir -p $out
     cp ${../.forgejo/workflows}/*.yml $out/
     cp ${../.forgejo/actions/lfs-fetch/action.yml} $out/lfs-fetch-action.yml
+    cp ${../.forgejo/actions/flake-validation/action.yml} $out/flake-validation-action.yml
   '';
 in
 pkgs.runCommand "ci-workflow-drift-test"
@@ -119,6 +120,21 @@ pkgs.runCommand "ci-workflow-drift-test"
                   bad("%s %s, but sandbox-probe runs later (step %d >= %d)" % (label, reason, probe_idx + 1, i + 1))
               else:
                   ok("%s %s — probed at step %d" % (label, reason, probe_idx + 1))
+
+  # flake-validation runs on the caller's native system. An implicit
+  # --all-systems build instead requires cross-build or binfmt support that a
+  # generic runner does not provide.
+  fv_path = os.path.join(src, "flake-validation-action.yml")
+  if os.path.exists(fv_path):
+      with open(fv_path) as f:
+          fv = yaml.safe_load(f) or {}
+      fv_run = "\n".join((s.get("run") or "") for s in (fv.get("runs") or {}).get("steps") or [])
+      if "--all-systems" in fv_run:
+          bad("flake-validation: implicit cross-system build requires unavailable runner support")
+      elif "nix flake check --show-trace $SANDBOX_FLAG" not in fv_run:
+          bad("flake-validation: native-system flake check is missing")
+      else:
+          ok("flake-validation checks only the runner's native system")
 
   # vmtests.yml builds suites with an INLINE nix build (no composite action):
   # pin that the step derives the flag from SANDBOX_OK and applies it to the
