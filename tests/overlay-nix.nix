@@ -1,12 +1,3 @@
-# Pure-evaluation tests for the overlay-nix module
-# (`services.nixtache.overlay-nix`).
-#
-# Pins the option-level contract without booting a VM: the upperOnUpdate
-# policy is a two-value enum with default "wipe", and the cutover lifecycle
-# unit's ordering follows the selected policy. Runtime behaviour across swaps
-# is covered by the VM suites (overlay-nix-ota-invalid-vm and variants).
-#
-# Exposed via the flake as `checks.<system>.overlay-nix`.
 {
   nixpkgs,
   self,
@@ -36,76 +27,159 @@ let
   cfgOf = host: host.config.services.nixtache.overlay-nix;
   servicesOf = host: host.config.systemd.services;
 
-  # --- scenario 1: default policy is "wipe" -----------------------------------
   hostDefault = mkHost { };
   svcDefault = servicesOf hostDefault;
+  selectScript = svcDefault.nixtache-overlay-select.script;
+  prepareCommand = svcDefault.nixtache-overlay-prepare.script;
+  prepareScript = builtins.readFile (builtins.head (lib.splitString " " prepareCommand));
+
   scenarioDefault = {
-    name = "upperOnUpdate unset: default \"wipe\" lifecycle runs before the lower-DB loader";
+    name = "persistent uppers use physical-slot metaslots and stable selection paths";
     checks = {
       defaultIsWipe = (cfgOf hostDefault).upperOnUpdate == "wipe";
-      lifecycleExists = svcDefault ? nixtache-overlay-lifecycle;
-      lifecycleSaysWipe = svcDefault ? nixtache-overlay-lifecycle
-        && lib.hasInfix "wipe the upper layer" svcDefault.nixtache-overlay-lifecycle.description;
-      lifecycleBeforeLowerDb = svcDefault ? nixtache-overlay-lifecycle
-        && builtins.elem "nixtache-lower-store-db-load.service" svcDefault.nixtache-overlay-lifecycle.before;
+      selectionExists = svcDefault ? nixtache-overlay-select;
+      preparationExists = svcDefault ? nixtache-overlay-prepare;
+      selectionBeforeMount = builtins.elem "nix-daemon-overlay-mount.service" svcDefault.nixtache-overlay-select.before;
+      mountRequiresSelection = builtins.elem "nixtache-overlay-select.service" svcDefault.nix-daemon-overlay-mount.requires;
+      daemonRequiresReadiness = builtins.elem "nixtache-overlay-ready.target" svcDefault.nix-daemon.requires;
+      slotLayout = lib.hasInfix "upper-slots" selectScript
+        && lib.hasInfix "/host/upper" selectScript
+        && lib.hasInfix "/host/lower-state" selectScript;
+      identityFailsClosed = lib.hasInfix "has no GPT PARTUUID" prepareScript
+        && lib.hasInfix "ambiguous PARTUUID" prepareScript;
+      noLegacyLifecycle = !(svcDefault ? nixtache-overlay-lifecycle);
       noPreupdateUnit = !(svcDefault ? nixtache-overlay-preupdate);
-      noLegacyReconcileUnit = !(svcDefault ? nixtache-overlay-reconcile);
     };
   };
 
-  # --- scenario 2: explicit "reconcile" ---------------------------------------
   hostReconcile = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "reconcile"; };
-  svcReconcile = servicesOf hostReconcile;
+  reconcileCommand = hostReconcile.config.systemd.services.nixtache-overlay-prepare.script;
+  reconcileScript = builtins.readFile (builtins.head (lib.splitString " " reconcileCommand));
   scenarioReconcile = {
-    name = "upperOnUpdate = \"reconcile\": lifecycle follows the lower-DB loader and requires the mount";
+    name = "reconcile clones a ready active generation and resumes writers before target repair";
     checks = {
       valueIsReconcile = (cfgOf hostReconcile).upperOnUpdate == "reconcile";
-      lifecycleSaysReconcile = svcReconcile ? nixtache-overlay-lifecycle
-        && lib.hasInfix "reconcile the upper layer" svcReconcile.nixtache-overlay-lifecycle.description;
-      lifecycleAfterLowerDb = svcReconcile ? nixtache-overlay-lifecycle
-        && builtins.elem "nixtache-lower-store-db-load.service" svcReconcile.nixtache-overlay-lifecycle.after;
-      lifecycleAfterMount = svcReconcile ? nixtache-overlay-lifecycle
-        && builtins.elem "nix-daemon-overlay-mount.service" svcReconcile.nixtache-overlay-lifecycle.after;
-      lifecycleRequiresMount = svcReconcile ? nixtache-overlay-lifecycle
-        && builtins.elem "nix-daemon-overlay-mount.service" svcReconcile.nixtache-overlay-lifecycle.requires;
-      noPreupdateUnit = !(svcReconcile ? nixtache-overlay-preupdate);
+      clonesActiveGeneration = lib.hasInfix "source_dir/host" reconcileScript;
+      quiescesWriters = lib.hasInfix "nix-daemon.socket" reconcileScript;
+      verifiesPrivateTarget = lib.hasInfix "unshare -m --propagation private" reconcileScript;
+      readinessIsExplicit = lib.hasInfix "state=unready" reconcileScript
+        && lib.hasInfix "state=ready" reconcileScript;
+      activeIsNeverRepairTarget = !(lib.hasInfix "repair_store \"$host_url\" \"/nix/var/nix\"" reconcileScript);
     };
   };
 
-  # --- scenario 3: explicit "wipe" --------------------------------------------
   hostWipe = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "wipe"; };
   scenarioWipe = {
-    name = "upperOnUpdate = \"wipe\" explicit: lifecycle configured without legacy units";
+    name = "wipe retains the two-value policy and prepares only a target generation";
     checks = {
       valueIsWipe = (cfgOf hostWipe).upperOnUpdate == "wipe";
-      lifecycleExists = (servicesOf hostWipe) ? nixtache-overlay-lifecycle;
-      noLegacyReconcileUnit = !((servicesOf hostWipe) ? nixtache-overlay-reconcile);
+      noLegacyLifecycle = !((servicesOf hostWipe) ? nixtache-overlay-lifecycle);
+      preparationUsesStaging = lib.hasInfix ".staging-" prepareScript;
+      readinessIsAtomic = lib.hasInfix "mv \"$stage\" \"$slot_dir/generations/$generation\"" prepareScript;
     };
   };
 
-  # --- scenario 4: the removed "none" value fails evaluation -------------------
-  # types.enum rejects the value at option-evaluation time; tryEval catches the
-  # throw. The enum error text names the valid values (a nixpkgs type-property,
-  # not pinnable from pure eval beyond the rejection itself).
+  layer = id: parent: {
+    inherit id parent;
+    upperDir = "/var/lib/layers/${id}/upper";
+    workDir = "/var/lib/layers/${id}/work";
+    stateDir = "/var/lib/layers/${id}/state";
+  };
+  hostWithLayers = layers: mkHost {
+    services.nixtache.overlay-nix = {
+      inherit layers;
+      upperOnUpdate = "reconcile";
+    };
+  };
+  scriptWithLayers = layers: let
+    host = hostWithLayers layers;
+  in builtins.readFile (builtins.head (lib.splitString " "
+    host.config.systemd.services.nixtache-overlay-prepare.script));
+  namespaceWithLayers = layers: let
+    script = scriptWithLayers layers;
+  in builtins.readFile (builtins.head (lib.splitString "\n"
+    (builtins.elemAt (lib.splitString "unshare -m --propagation private " script) 1)));
+  selectWithLayers = layers: (hostWithLayers layers).config.systemd.services.nixtache-overlay-select.script;
+  tryLayers = layers: builtins.tryEval
+    (hostWithLayers layers).config.system.build.toplevel.outPath;
+  posOf = pat: s: lib.stringLength (builtins.head (lib.splitString pat s));
+
+  siblingScript = scriptWithLayers [ (layer "a" null) (layer "b" null) ];
+  siblingNamespace = namespaceWithLayers [ (layer "a" null) (layer "b" null) ];
+  siblingSelection = selectWithLayers [ (layer "a" null) (layer "b" null) ];
+  scenarioSiblings = {
+    name = "sibling overlays share the host parent and one atomic readiness result";
+    checks = {
+      stagesBoth = lib.hasInfix "$stage/layers/a" siblingScript
+        && lib.hasInfix "$stage/layers/b" siblingScript;
+      hostFirst = (posOf "repair_store \"$host_url\"" siblingNamespace)
+        < (posOf "lower-states/a" siblingNamespace)
+        && (posOf "repair_store \"$host_url\"" siblingNamespace)
+          < (posOf "lower-states/b" siblingNamespace);
+      activatesBoth = lib.hasInfix "$generation/layers/a/upper" siblingSelection
+        && lib.hasInfix "$generation/layers/b/upper" siblingSelection;
+      topologyFingerprinted = lib.hasInfix "topology_sha256=" siblingScript;
+    };
+  };
+
+  nestedScript = namespaceWithLayers [ (layer "middle" null) (layer "leaf" "middle") ];
+  nestedPrepare = scriptWithLayers [ (layer "middle" null) (layer "leaf" "middle") ];
+  scenarioNested = {
+    name = "nested overlay consumes the prepared middle store and metadata";
+    checks = {
+      middleBeforeLeaf = (posOf "lower-states/middle" nestedScript)
+        < (posOf "lower-states/leaf" nestedScript);
+      leafUsesMiddle = lib.hasInfix "lower-states/middle" nestedScript
+        && lib.hasInfix "lowerdir=\"$scratch/layers/middle/nix/store\"" nestedScript;
+      leafHasOwnState = lib.hasInfix "$stage/layers/leaf/state" nestedPrepare;
+      finalWholeTreeCheck = lib.hasInfix "check_store \"$host_url\" \"$host_root\"" nestedScript
+        && lib.hasInfix "check_store \"$node_url\" \"$node_root\"" nestedScript;
+    };
+  };
+
+  composedScript = namespaceWithLayers [
+    (layer "a" null)
+    (layer "b" null)
+    (layer "grand" "a")
+  ];
+  scenarioComposed = {
+    name = "composed sibling and nested graph is prepared parent-before-child";
+    checks = {
+      aBeforeGrand = (posOf "lower-states/a" composedScript)
+        < (posOf "lower-states/grand" composedScript);
+      hostBeforeSiblings = (posOf "repair_store \"$host_url\"" composedScript)
+        < (posOf "lower-states/a" composedScript)
+        && (posOf "repair_store \"$host_url\"" composedScript)
+          < (posOf "lower-states/b" composedScript);
+      grandUsesA = lib.hasInfix "lower-states/a" composedScript;
+    };
+  };
+
+  scenarioDuplicateRejected = {
+    name = "duplicate overlay node identities are rejected";
+    checks.rejected = !(tryLayers [ (layer "a" null) (layer "a" null) ]).success;
+  };
+  scenarioMissingParentRejected = {
+    name = "an overlay with a missing parent is rejected";
+    checks.rejected = !(tryLayers [ (layer "a" "missing") ]).success;
+  };
+  scenarioCycleRejected = {
+    name = "an overlay parent cycle is rejected";
+    checks.rejected = !(tryLayers [ (layer "a" "b") (layer "b" "a") ]).success;
+  };
+
   hostNone = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "none"; };
   tryNone = builtins.tryEval (builtins.deepSeq (cfgOf hostNone).upperOnUpdate (cfgOf hostNone).upperOnUpdate);
   scenarioNoneRejected = {
-    name = "upperOnUpdate = \"none\" (removed value): evaluation fails";
-    checks = {
-      noneRejected = !tryNone.success;
-    };
+    name = "upperOnUpdate = \"none\" is rejected";
+    checks.noneRejected = !tryNone.success;
   };
 
-  # --- scenario 5: runtime daemon config carries the CA feature ---------------
-  # The fleet's closure is content-addressed — runtime evaluation (e.g.
-  # profile installs) must be able to evaluate CA derivations, and the daemon
-  # ignores client-side feature overrides, so the feature lives in the
-  # appliance's system nix.conf (nix.settings).
   scenarioCaFeature = {
-    name = "daemon config: ca-derivations enabled for the content-addressed fleet closure";
+    name = "daemon config enables the required store features";
     checks = {
-      caFeatureOn = builtins.elem "ca-derivations"
-        hostDefault.config.nix.settings.extra-experimental-features;
+      caFeatureOn = builtins.elem "ca-derivations" hostDefault.config.nix.settings.extra-experimental-features;
+      readOnlyLowerOn = builtins.elem "read-only-local-store" hostDefault.config.nix.settings.extra-experimental-features;
     };
   };
 
@@ -113,6 +187,12 @@ let
     scenarioDefault
     scenarioReconcile
     scenarioWipe
+    scenarioSiblings
+    scenarioNested
+    scenarioComposed
+    scenarioDuplicateRejected
+    scenarioMissingParentRejected
+    scenarioCycleRejected
     scenarioNoneRejected
     scenarioCaFeature
   ];

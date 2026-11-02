@@ -236,7 +236,8 @@ let
       loaderWanted = lowerDbSvc != null && builtins.elem "multi-user.target" lowerDbSvc.wantedBy;
       loaderBeforeDaemon = lowerDbSvc != null && builtins.elem "nix-daemon.service" lowerDbSvc.before;
       loaderReadsDump = lowerDbSvc != null && lib.hasInfix "/boot/EFI/nixtache/h_1.lower-db" lowerDbSvc.script;
-      loaderTracksMarker = lowerDbSvc != null && lib.hasInfix "/var/lib/nixtache/lower-db-version" lowerDbSvc.script;
+      loaderTracksMarker = lowerDbSvc != null && lib.hasInfix "state=/nix/var/nix" lowerDbSvc.script
+        && lib.hasInfix "marker=\"$state/lower-db-version\"" lowerDbSvc.script;
       loaderBakesVersion = versionedSvc != null && lib.hasInfix "/boot/EFI/nixtache/h_20260809120000.lower-db" versionedSvc.script;
     };
   };
