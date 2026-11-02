@@ -35,7 +35,7 @@ let
   # On a nix-less appliance host the container also disables its Nix module
   # and renders nix.conf directly. Standalone store branches then use a
   # scratch-DB local clone or a local lower instead of the system daemon.
-  hostNixDisabled = !config.nix.enable;
+  hostNixDisabled = !config.nix.enable || (config.services.nixtache.ab-image.enable or false);
 
   # Clone and overlay share daemon/bind wiring but differ in storage setup.
   useOverlay = customStore && cfg.store.mode == "overlay";
@@ -49,11 +49,18 @@ let
   # Appliance containers have no system daemon, so they open a dedicated
   # read-only bind of the host lower. That bind stays outside /nix: the custom
   # daemon rebinds /nix to the merged relocated store, so a lower rooted at
-  # /nix would read the upper DB instead of the host DB. The nested local
-  # store URL enables read-only mode so Nix does not try to change the bind's
-  # ownership or open its DB for writing. Writes and GC affect only the upper.
+  # /nix would read the upper DB instead of the host DB. With host overlay-nix
+  # the lower is the complete parent local-overlay, including its lower-state
+  # and upper-owned state rather than only the parent's upper DB.
   applianceLowerRoot = "/run/nixtache-runner-lower";
-  lowerStore = if hostNixDisabled
+  parentStateRoot = "/run/nixtache-runner-parent-state";
+  hostOverlayEnabled = config.services.nixtache.overlay-nix.enable or false;
+  encodeStoreUri = value: replaceStrings [ "%" "?" "&" "=" ] [ "%25" "%3F" "%26" "%3D" ] value;
+  hostLower = "local?root=${applianceLowerRoot}&state=${applianceLowerRoot}/nix/var/nix/lower-state&read-only=true";
+  parentLower = "local-overlay://?root=${applianceLowerRoot}&state=${parentStateRoot}&lower-store=${encodeStoreUri hostLower}&upper-layer=${config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper"}&check-mount=false";
+  lowerStore = if hostNixDisabled && hostOverlayEnabled
+    then encodeStoreUri parentLower
+    else if hostNixDisabled
     then "local%3Froot%3D${applianceLowerRoot}%26read-only%3Dtrue"
     else "daemon";
   lowerStoreDir = if hostNixDisabled then "${applianceLowerRoot}/nix/store" else "/nix/store";
@@ -107,7 +114,9 @@ in
 
         `clone` (default): `nix copy --all` creates a full writable copy at
         `<store.path>/nix`. Slow (multi-GB), but works on any Nix version. The
-        clone is additive across reboots (new paths added, old kept).
+        clone is additive across reboots and A/B slot swaps (new lower paths
+        added, old kept). It remains one relocated store and is not duplicated
+        into per-slot upper metaslots.
 
         `overlay`: an OverlayFS mount combines the read-only lower store
         (`/nix/store`) with a writable upper (`<store.path>/overlay/upper`),
@@ -194,6 +203,32 @@ in
         "host-nix-lower-db" = {
           mountPoint = "${applianceLowerRoot}/nix/var/nix/db";
           hostPath = "/nix/var/nix/db";
+          isReadOnly = true;
+        };
+      }) // (optionalAttrs (hostNixDisabled && hostOverlayEnabled && useOverlay) {
+        "host-nix-lower-gcroots" = {
+          mountPoint = "${applianceLowerRoot}/nix/var/nix/gcroots";
+          hostPath = "/nix/var/nix/gcroots";
+          isReadOnly = true;
+        };
+        "host-nix-lower-profiles" = {
+          mountPoint = "${applianceLowerRoot}/nix/var/nix/profiles";
+          hostPath = "/nix/var/nix/profiles";
+          isReadOnly = true;
+        };
+        "host-nix-lower-temproots" = {
+          mountPoint = "${applianceLowerRoot}/nix/var/nix/temproots";
+          hostPath = "/nix/var/nix/temproots";
+          isReadOnly = true;
+        };
+        "host-nix-lower-state" = {
+          mountPoint = "${applianceLowerRoot}/nix/var/nix/lower-state";
+          hostPath = "${config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper"}/../lower-state";
+          isReadOnly = true;
+        };
+        "host-nix-lower-upper" = {
+          mountPoint = config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper";
+          hostPath = config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper";
           isReadOnly = true;
         };
       });
@@ -399,6 +434,13 @@ in
               Type = "oneshot";
               RemainAfterExit = true;
               ExecStart = pkgs.writeShellScript "mount-nix-overlay" ''
+                ${optionalString (hostNixDisabled && hostOverlayEnabled) ''
+                  rm -rf ${parentStateRoot}
+                  mkdir -p ${parentStateRoot}
+                  for name in db gcroots profiles temproots; do
+                    cp -a ${applianceLowerRoot}/nix/var/nix/$name ${parentStateRoot}/$name
+                  done
+                ''}
                 mkdir -p ${cfg.store.path}/nix/var/nix/daemon-socket
                 mkdir -p ${cfg.store.path}/overlay/upper
                 mkdir -p ${cfg.store.path}/overlay/work

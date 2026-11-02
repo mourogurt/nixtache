@@ -80,6 +80,20 @@ let
       inherit system;
       modules = [
 self.nixosModules.runner
+        self.nixosModules.overlay-nix
+        baseModule
+        { services.nixtache.runner.store.path = storePath; }
+        extra
+      ];
+    };
+
+  mkApplianceHost = storePath: extra:
+    nixpkgs.lib.nixosSystem {
+      inherit system;
+      modules = [
+        self.nixosModules.runner
+        self.nixosModules.overlay-nix
+        self.nixosModules.ab-image
         baseModule
         { services.nixtache.runner.store.path = storePath; }
         extra
@@ -815,6 +829,52 @@ self.nixosModules.runner
     };
   };
 
+  hostCascadeOverlay = mkApplianceHost "/srv" {
+    services.nixtache.runner = {
+      enableSandbox = false;
+      store.mode = "overlay";
+    };
+    services.nixtache.overlay-nix.enable = true;
+    services.nixtache.ab-image.enable = true;
+    nix.enable = false;
+  };
+  scenarioCascadeLower = {
+    name = "host overlay cascade: runner consumes the complete parent local-overlay outside its relocated /nix";
+    checks = {
+      lowerIsComposite = lib.hasInfix
+        "lower-store=local-overlay://%%3Froot%%3D/run/nixtache-runner-lower"
+        (execOverlayOf hostCascadeOverlay);
+      lowerStateIncluded = lib.hasInfix
+        "lower-state%%2526read-only%%253Dtrue"
+        (execOverlayOf hostCascadeOverlay);
+      lowerStateScratch = lib.hasInfix
+        "state%%3D/run/nixtache-runner-parent-state"
+        (execOverlayOf hostCascadeOverlay);
+      lowerRootsBind =
+        (bindMountsOf hostCascadeOverlay)."host-nix-lower-gcroots".isReadOnly
+        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-gcroots".mountPoint
+          == "/run/nixtache-runner-lower/nix/var/nix/gcroots";
+      lowerProfilesBind =
+        (bindMountsOf hostCascadeOverlay)."host-nix-lower-profiles".isReadOnly
+        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-profiles".mountPoint
+          == "/run/nixtache-runner-lower/nix/var/nix/profiles";
+      lowerTemprootsBind =
+        (bindMountsOf hostCascadeOverlay)."host-nix-lower-temproots".isReadOnly
+        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-temproots".mountPoint
+          == "/run/nixtache-runner-lower/nix/var/nix/temproots";
+      lowerStateBind =
+        (bindMountsOf hostCascadeOverlay)."host-nix-lower-state".isReadOnly
+        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-state".mountPoint
+          == "/run/nixtache-runner-lower/nix/var/nix/lower-state";
+      lowerUpperBind =
+        (bindMountsOf hostCascadeOverlay)."host-nix-lower-upper".isReadOnly
+        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-upper".mountPoint
+          == "/var/lib/nix-overlay/upper";
+      containerRequiresReadiness = lib.elem "nixtache-overlay-ready.target"
+        hostCascadeOverlay.config.systemd.services."container@runner".requires;
+    };
+  };
+
   # --- scenario: gitHost → NIXTACHE_GIT_SSH_HOST env + known_hosts ---------
   # The FIRST hostName is the canonical SSH endpoint exported to every job as
   # NIXTACHE_GIT_SSH_HOST (update-flake push target). gitHost=null (hostSrv)
@@ -948,6 +1008,7 @@ self.nixosModules.runner
     scenarioApplianceClone
     scenarioApplianceHost
     scenarioOverlayLower
+    scenarioCascadeLower
     scenarioGitSshHost
     scenarioResources
     scenarioNginxCache

@@ -2,13 +2,12 @@
 # appliance slot swap, on a real mkAppliance image with the container baked in.
 #
 # Runs the shipped world: the appliance image carries the lower store DB
-# (ab-image; loaded at boot), so the clone seed enumerates the real host DB
-# and the overlay mode opens it as `lower-store=local` (a daemon lower would
-# self-reference — no system daemon exists in the appliance-mode container).
-# The container is ordered after the host's loader oneshot so a post-swap
-# start never enumerates a pre-merge DB. In the vmtests.yml CI matrix (both
-# modes); the host-side nspawn bind-path guarantee is pinned by
-# tests/runner.nix "appliance host (nix.enable=false)".
+# (ab-image; loaded at boot), so the clone seed enumerates the real host DB.
+# Overlay mode opens the selected host's composite local-overlay lower through
+# a dedicated read-only root outside the runner's relocated /nix. The container
+# is ordered after the host's loader oneshot so a post-swap start never reads a
+# pre-merge DB. In the vmtests.yml CI matrix (both modes); the host-side nspawn
+# bind-path guarantee is pinned by tests/runner.nix.
 #
 # Why: the runner host (the reference server) reboots under its own CI when
 # it self-updates; after every swap the lower store the container's store was
@@ -32,15 +31,16 @@
 # Signing is on (signVerify) — the runner host's pulls verify manifests.
 # Needs KVM. Hermetic: the deployer node stages the signed v2 package; the
 # build is a trivial derivation with substitute=false (no network).
-{ nixpkgs, self, system ? "x86_64-linux", storeMode ? "clone", appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, self, system ? "x86_64-linux", storeMode ? "clone", ephemeral ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
 
 let
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
   inherit (otaLib) fixture pkgs lib;
 
+  cascade = storeMode == "overlay";
   helloBasename = baseNameOf pkgs.hello.outPath;
 
-  mkRunnerAppliance = { version, extraPackages ? [ ] }:
+  mkRunnerAppliance = { version, extraPackages ? [ ], brokenBoot ? false }:
     otaLib.mkAppliance {
       inherit version;
       signVerify = true;
@@ -48,6 +48,7 @@ let
       extraPackages = extraPackages ++ [ pkgs.gptfdisk ];
       extraModules = [
         self.nixosModules.runner
+      ] ++ [ self.nixosModules.overlay-nix ] ++ [
         ({ lib, ... }: {
           networking.useDHCP = false;
           services.nginx.enable = true;
@@ -64,16 +65,36 @@ let
               tokenFile = toString /dev/null;
             };
             secrets.cachePrivateKey = toString /dev/null;
-            # The relocated store lives at /srv/nix (the persistent root).
             store.path = "/srv";
             store.mode = storeMode;
-            # nspawn without CAP_SYS_ADMIN cannot run the nix sandbox; the
-            # overlay mode needs the cap for the mount.
             enableSandbox = false;
-            additionalCapabilities = lib.optional (storeMode == "overlay") "CAP_SYS_ADMIN";
+            additionalCapabilities = lib.optional cascade "CAP_SYS_ADMIN";
           };
-          # The cache vhost defaults to HTTPS+ACME; force plain HTTP in the VM
-          # (mirrors tests/runner-store-mode-vm.nix).
+          services.nixtache.overlay-nix = lib.mkIf cascade ({
+            enable = true;
+            upperOnUpdate = "reconcile";
+          } // lib.optionalAttrs ephemeral {
+            upperDir = "/tmp/nix-overlay/upper";
+            workDir = "/tmp/nix-overlay/work";
+          });
+          services.nixtache.deploy-target = lib.mkIf (cascade && !ephemeral) {
+            criticalUnits = [ "nixtache-runner-rollback-canary.service" ];
+            healthCheckTimeout = lib.mkIf brokenBoot 20;
+          };
+          services.nixtache.ab-image.ukiTries = lib.mkIf brokenBoot 2;
+          systemd.services.nixtache-runner-rollback-canary = lib.mkIf (cascade && !ephemeral) {
+            wantedBy = [ "multi-user.target" ];
+            after = [ "container@runner.service" ];
+            requires = [ "container@runner.service" ];
+            serviceConfig.Type = "oneshot";
+            serviceConfig.RemainAfterExit = true;
+            script = if brokenBoot then "exit 1" else ":";
+          };
+          fileSystems."/tmp/nix-overlay" = lib.mkIf ephemeral {
+            device = "tmpfs";
+            fsType = "tmpfs";
+            options = [ "mode=755" ];
+          };
           services.nginx.virtualHosts."localhost".forceSSL = lib.mkForce false;
           services.nginx.virtualHosts."localhost".enableACME = lib.mkForce false;
         })
@@ -82,17 +103,24 @@ let
 
   v1 = mkRunnerAppliance { version = "1"; };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
-  v2 = mkRunnerAppliance { version = "2"; extraPackages = [ pkgs.hello ]; };
+  v2 = mkRunnerAppliance {
+    version = "2";
+    extraPackages = [ pkgs.hello ];
+    brokenBoot = cascade && !ephemeral;
+  };
   v2Pkg = v2.config.system.build.sysupdate-package;
 in
 pkgs.testers.runNixOSTest {
-  name = "runner-store-swap-${storeMode}";
+  name = "runner-store-swap-${storeMode}${lib.optionalString ephemeral "-ephemeral"}";
   globalTimeout = 7200;
 
-  nodes.deployer = otaLib.deployerNode { extraDependencies = [ v2Pkg ]; };
+  nodes.deployer = otaLib.deployerNode { extraDependencies = lib.optional (!ephemeral) v2Pkg; };
 
   testScript = ''
     import shlex
+
+    CASCADE = ${if cascade then "True" else "False"}
+    EPHEMERAL = ${if ephemeral then "True" else "False"}
 
     def create_runner_machine(**kwargs):
         machine = create_machine(start_command="${otaLib.startCommand { image = v1Image; }}", **kwargs)
@@ -102,6 +130,11 @@ pkgs.testers.runNixOSTest {
     # Run a command as root INSIDE the runner container. Returns stdout.
     def crun(inner):
         return appliance.succeed(
+            "nixos-container run runner -- /bin/sh -c " + shlex.quote(inner)
+        )
+
+    def cfail(inner):
+        return appliance.fail(
             "nixos-container run runner -- /bin/sh -c " + shlex.quote(inner)
         )
 
@@ -140,6 +173,8 @@ pkgs.testers.runNixOSTest {
     while True:
         try:
             jobs = appliance.succeed("systemctl list-jobs --no-legend | head -5 || true")
+            if appliance.succeed("systemctl is-active multi-user.target || true").strip() == "active":
+                break
             seed = appliance.succeed(
                 "nixos-container run runner -- sh -c '"
                 "systemctl is-active nix-daemon-storage; "
@@ -199,7 +234,56 @@ pkgs.testers.runNixOSTest {
         raise
     print(f"OK: pre-swap build through the relocated store: {proof_v1}")
 
-    # -- Stage v2 SIGNED → sysupdate → slot B → reboot -----------------------
+    if CASCADE and not EPHEMERAL:
+        v1_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+        v1_current = appliance.succeed(
+          f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+        ).strip()
+        v1_runner_upper = f"{v1_current}/layers/runner/upper"
+        v1_db_path = f"{v1_current}/layers/runner/state/db/db.sqlite"
+        proof_v1_name = proof_v1.rsplit("/", 1)[-1]
+        v1_proof_hash = appliance.succeed(
+          f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
+        ).strip()
+        v1_db_hash = appliance.succeed(
+          f"sha256sum {v1_db_path} | awk '{{print $1}}'"
+        ).strip()
+  '' + (if ephemeral then ''
+    proof_v1_name = proof_v1.rsplit("/", 1)[-1]
+    appliance.succeed("test -f /srv/bincache/overlay/upper/" + proof_v1_name)
+    appliance.succeed("systemctl stop container@runner.service")
+    ephemeral_paths = [
+      "/srv/bincache/overlay/upper",
+      "/srv/bincache/overlay/work",
+      "/srv/bincache/nix/var/nix/db",
+      "/srv/bincache/nix/var/nix/gcroots",
+      "/srv/bincache/nix/var/nix/profiles",
+      "/srv/bincache/nix/var/nix/temproots",
+    ]
+    for path in ephemeral_paths:
+        appliance.succeed(f"mkdir -p {path} && touch {path}/ephemeral-sentinel")
+
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
+    appliance.wait_until_succeeds(
+      "systemctl is-active --quiet container@runner.service", timeout=600
+    )
+    appliance.wait_until_succeeds(
+      "nixos-container run runner -- systemctl is-active nix-daemon-custom", timeout=600
+    )
+    for path in ephemeral_paths:
+        appliance.fail(f"test -e {path}/ephemeral-sentinel")
+    appliance.fail("test -e /srv/bincache/overlay/upper/" + proof_v1_name)
+    cfail(
+      "nix --extra-experimental-features nix-command path-info "
+      "--store unix:///srv/nix/var/nix/daemon-socket/socket " + proof_v1
+    )
+    crun("test -f /run/nixtache-runner-lower/nix/var/nix/lower-state/db/db.sqlite")
+    proof_reset = build_proof("after-ephemeral-reset")
+    assert crun("cat /srv/nix/store/" + proof_reset.rsplit("/", 1)[-1]).strip() == "after-ephemeral-reset"
+    print("PASS: ephemeral host upper resets the complete runner descendant and preserves a coherent parent lower")
+  '' else ''
+    # -- Stage v2 SIGNED → sysupdate → slot B -------------------------------
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
@@ -214,6 +298,21 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: signed v2 staged and written to slot B + ESP")
 
+    if CASCADE:
+        appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=3600)
+        v2_slot = appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip()
+        v2_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+        v2_target = f"/var/lib/nix-overlay/upper-slots/{v2_slot}/generations/{v2_generation}"
+        appliance.succeed(f"grep -q '^state=ready$' {v2_target}/metadata")
+        appliance.succeed(f"test -f {v2_target}/layers/runner/upper/{proof_v1_name}")
+        assert appliance.succeed(
+          f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
+        ).strip() == v1_proof_hash
+        assert appliance.succeed(
+          f"sha256sum {v1_db_path} | awk '{{print $1}}'"
+        ).strip() == v1_db_hash
+        print("OK: parent-first reconcile cloned the runner upper without mutating the active source")
+
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=3600)
     assert appliance.succeed("cat /etc/image-version").strip() == "2"
@@ -223,24 +322,24 @@ pkgs.testers.runNixOSTest {
     print("OK: v2 booted; runner container up post-swap")
   '' + (
     if storeMode == "clone" then ''
-      # -- clone: the re-clone after the swap is additive --------------------
       appliance.wait_until_succeeds(
         "nixos-container run runner -- systemctl is-active nix-daemon-custom",
         timeout=900
       )
-      # The pre-swap build output survived (old paths kept)...
       proof_v1_name = proof_v1.rsplit("/", 1)[-1]
       assert crun("cat /srv/nix/store/" + proof_v1_name).strip() == "v1"
-      # ...and the re-clone pulled the NEW lower's content (hello, baked only
-      # into v2's squashfs) into the clone and registered it in the store DB.
       crun(
         "nix --extra-experimental-features nix-command path-info "
         "--store unix:///srv/nix/var/nix/daemon-socket/socket "
         "/nix/store/${helloBasename} >/dev/null"
       )
       print("OK: clone is additive — old build output kept, new lower content arrived")
+      proof_v2 = build_proof("v2")
+      assert proof_v2 != proof_v1
+      proof_v2_name = proof_v2.rsplit("/", 1)[-1]
+      assert crun("cat /srv/nix/store/" + proof_v2_name).strip() == "v2"
+      print("PASS: runner clone store serves CI builds across an OTA swap")
     '' else ''
-      # -- overlay: remount over the new lower, upper intact -----------------
       appliance.wait_until_succeeds(
         "nixos-container run runner -- systemctl is-active nix-daemon-overlay-mount",
         timeout=600
@@ -249,25 +348,64 @@ pkgs.testers.runNixOSTest {
         "nixos-container run runner -- systemctl is-active nix-daemon-custom",
         timeout=600
       )
-      # The pre-swap build output (upper, no lower refs) is still visible...
-      proof_v1_name = proof_v1.rsplit("/", 1)[-1]
       assert crun("cat /srv/nix/store/" + proof_v1_name).strip() == "v1"
-      # ...and the NEW lower's hello is valid through the merged view.
       crun(
         "nix --extra-experimental-features nix-command path-info "
         "--store unix:///srv/nix/var/nix/daemon-socket/socket "
         "/nix/store/${helloBasename} >/dev/null"
       )
-      print("OK: overlay coherent post-swap — upper intact, new lower visible")
-    ''
-  ) + ''
-    # -- A CI build works post-swap (both modes) -----------------------------
-    proof_v2 = build_proof("v2")
-    assert proof_v2 != proof_v1
-    proof_v2_name = proof_v2.rsplit("/", 1)[-1]
-    assert crun("cat /srv/nix/store/" + proof_v2_name).strip() == "v2"
-    print(f"OK: post-swap build through the relocated store: {proof_v2}")
+      crun("test -f /run/nixtache-runner-lower/nix/var/nix/lower-state/db/db.sqlite")
+      print("OK: selected parent store and metadata remain coherent through the dedicated lower root")
 
-    print("PASS: runner store (${storeMode}) serves CI builds across an OTA swap")
-  '';
+      proof_v2 = build_proof("v2")
+      assert proof_v2 != proof_v1
+      proof_v2_name = proof_v2.rsplit("/", 1)[-1]
+      assert crun("cat /srv/nix/store/" + proof_v2_name).strip() == "v2"
+      appliance.fail(f"test -e {v1_runner_upper}/{proof_v2_name}")
+      assert appliance.succeed(
+        f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
+      ).strip() == v1_proof_hash
+      assert appliance.succeed(
+        f"sha256sum {v1_db_path} | awk '{{print $1}}'"
+      ).strip() == v1_db_hash
+      print("OK: v2 CI writes are isolated from the inactive v1 runner upper and DB")
+
+      for boot in (1, 2):
+          if boot == 2:
+              appliance.reboot()
+              appliance.wait_for_unit("multi-user.target", timeout=3600)
+              assert appliance.succeed("cat /etc/image-version").strip() == "2"
+          appliance.wait_until_succeeds(
+            "systemctl is-failed --quiet nixtache-runner-rollback-canary.service", timeout=120
+          )
+          appliance.wait_until_fails(
+            "systemctl is-active --quiet nixtache-health-check.service", timeout=120
+          )
+          print(f"OK: v2 boot {boot} ran the runner but remained unblessed")
+
+      appliance.reboot()
+      appliance.wait_for_unit("multi-user.target", timeout=3600)
+      assert appliance.succeed("cat /etc/image-version").strip() == "1"
+      appliance.wait_until_succeeds(
+        "systemctl is-active --quiet container@runner.service", timeout=600
+      )
+      appliance.wait_until_succeeds(
+        "nixos-container run runner -- systemctl is-active nix-daemon-custom", timeout=600
+      )
+      assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == v1_slot
+      assert appliance.succeed(
+        f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+      ).strip() == v1_current
+      appliance.succeed(f"test -f {v1_runner_upper}/{proof_v1_name}")
+      assert crun("cat /srv/nix/store/" + proof_v1_name).strip() == "v1"
+      cfail(
+        "nix --extra-experimental-features nix-command path-info "
+        "--store unix:///srv/nix/var/nix/daemon-socket/socket " + proof_v2
+      )
+      assert appliance.succeed(
+        f"sha256sum {v1_db_path} | awk '{{print $1}}'"
+      ).strip() == v1_db_hash
+      print("PASS: failed-boot rollback restores the original runner generation and DB without reverse repair")
+    ''
+  ));
 }
