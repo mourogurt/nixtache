@@ -17,6 +17,10 @@ with lib;
 
 let
   cfg = config.services.nixtache.ab-image;
+  overlayCfg = config.services.nixtache.overlay-nix or { };
+  overlayEnabled = overlayCfg.enable or false;
+  lowerStateDir = if overlayEnabled then "${dirOf overlayCfg.upperDir}/lower-state" else "/nix/var/nix";
+  lowerDbMarker = if overlayEnabled then "lower-db-sha256" else "lower-db-version";
   # True when the target is configured to verify staged manifests (a public key
   # is provided). Drives Transfer.Verify on every sysupdate transfer.
   verify = cfg.publicKeyFile != null || cfg.publicKey != null;
@@ -541,11 +545,9 @@ in
     # consumers, which re-enable nix anyway.
     environment.systemPackages = [ pkgs.nix ];
 
-    # Load the dump into /nix/var/nix/db when the DB is missing (first boot,
-    # or after upperOnUpdate="wipe" cleared it) or the recorded image version
-    # differs from the running one (a swap: the new slot's records merge in
-    # additively — stale old-slot records are deliberately left for
-    # `nix-store --verify` to report and the overlay reconcile pass to heal).
+    # The physical lower database is read-only metadata. With overlay-nix it
+    # lives in the selected slot's lower-state, separate from upper-owned Nix
+    # state; without an overlay it remains the appliance's regular local DB.
     systemd.services.nixtache-lower-store-db-load = {
       description = "Load the slot's lower store DB dump when missing or stale";
       wantedBy = [ "multi-user.target" ];
@@ -558,7 +560,7 @@ in
       # override dropped 15-lower-db, or a pre-DB image) → skip, leaving the
       # lower unregistered rather than failing the boot.
       unitConfig.ConditionPathExists = "/boot${lowerStoreDbEspPath}";
-      path = [ pkgs.nix pkgs.coreutils pkgs.util-linux ];
+      path = [ pkgs.nix pkgs.coreutils pkgs.util-linux pkgs.gawk ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -568,32 +570,35 @@ in
       # marker and the new slot's records load.
       script = ''
         set -euo pipefail
-        marker=/var/lib/nixtache/lower-db-version
-        db=/nix/var/nix/db/db.sqlite
+        state=${lowerStateDir}
+        marker="$state/${lowerDbMarker}"
+        db="$state/db/db.sqlite"
         version=${escapeShellArg config.system.image.version}
         dump=/boot${lowerStoreDbEspPath}
-        if [ -f "$db" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$version" ]; then
+        identity="$version"
+        ${optionalString overlayEnabled ''identity=$(sha256sum "$dump" | awk '{print $1}')''}
+        if [ -f "$db" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$identity" ]; then
           echo "lower store DB already current for image version $version"
           exit 0
         fi
-        mkdir -p /nix/var/nix/db /var/lib/nixtache
+        mkdir -p "$state/db"
         # `nix-store --load-db` initialises the store dir (creates .links),
         # which fails on the appliance's read-only squashFS — and must not
         # depend on overlay-nix's merged mount being up. The load itself is
         # zero-file-access (records carry absolute paths), so run it in a
         # private mount namespace with a tmpfs-upper OverlayFS over
         # /nix/store: the store stays readable (binaries resolve), the init
-        # lands in the discarded upper, the DB write to /nix/var/nix
-        # persists. (A unit-level TemporaryFileSystem=/nix/store cannot be
+        # lands in the discarded upper, while the selected state directory
+        # receives the lower records. (A TemporaryFileSystem=/nix/store cannot
         # used: it would mask this script's own store path at exec time.)
-        export dump
+        export dump state
         ${lib.getExe' pkgs.util-linux "unshare"} -m --propagation private ${pkgs.writeShellScript "lower-store-db-load" ''
           tmp=$(mktemp -d)
           mkdir -p "$tmp/upper" "$tmp/work"
           mount -t overlay overlay -o lowerdir=/nix/store,upperdir="$tmp/upper",workdir="$tmp/work" /nix/store
-          ${lib.getExe' pkgs.nix "nix-store"} --load-db < "$dump"
+          ${lib.getExe' pkgs.nix "nix-store"} --store "local?root=/&state=$state" --load-db < "$dump"
         ''}
-        echo "$version" > "$marker"
+        echo "$identity" > "$marker"
         echo "loaded lower store DB for image version $version"
       '';
     };
