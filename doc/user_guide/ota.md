@@ -40,13 +40,13 @@ deploy-map entry.
   `deploy-target.ab` on every A/B target). It runs the stock update unit to
   COMPLETION — the unit is Type=simple, so even `systemctl start --wait`
   returns long before a large slot write finishes, which is why the
-  completion is polled explicitly — and starts
-  `systemd-sysupdate-reboot.service` (the purely offline check that reboots
-  only when a NEWER version than the booted one is already installed) only
-  on journal evidence that THIS run installed a new version. A failed or
-  empty update leaves the target running and fails the trigger with the
-  sysupdate journal, so a deploy reports the real cause instead of a reboot
-  followed by timeouts on artifacts that never landed.
+  completion is polled explicitly. On journal evidence that THIS run installed
+  a new version, it prepares the inactive slot's persistent upper chain (when
+  `overlay-nix` is enabled) and only then starts
+  `systemd-sysupdate-reboot.service` (the offline check for a newer installed
+  version). Failed or empty updates, and failed upper preparation, leave the
+  target running and fail the trigger with the actual cause instead of
+  rebooting into an unready slot.
 - **Runtime versioning**: the version is assigned at deploy time (explicit
   `NIXTACHE_AB_VERSION` or a UTC calendar value), written to the repo's
   `image-version` file before `nix build` (wire it via
@@ -58,17 +58,19 @@ deploy-map entry.
 
 Every image carries its slot closure's *store DB dump* — the validity
 records (path, narHash, narSize, deriver, references per store path) that
-make the read-only lower store a first-class readable nix store. A boot-time loader
-(`nixtache-lower-store-db-load.service`) seeds `/nix/var/nix/db` from it:
+make the read-only lower store a first-class readable nix store. With
+`overlay-nix`, the boot-time loader imports it into the selected slot's
+lower-state, separate from the writable upper database:
 
 | moment | what happens |
 |---|---|
 | image build | the dump is the closure's registered validity records — content-true because the appliance evaluation is content-addressed ([`lower-store-db.md`](../technical_details/lower-store-db.md)) |
 | update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` (old slot's dump vacuumed with its UKI) |
-| first boot | the DB is missing → the dump loads, the image version is recorded in a marker |
-| same-slot reboot | the DB exists and its version marker matches → no import; the DB remains unchanged |
-| slot swap | the new slot's records merge in **additively**; stale old-slot records are left for `nix-store --verify` to report and the overlay reconcile pass to heal |
-| cutover boot with `upperOnUpdate = "wipe"` | upper-owned state is cleared before the loader, which re-seeds the DB from the running slot's dump during that same boot |
+| first boot | the selected generation has no matching lower-state → the dump loads and its SHA-256 is recorded |
+| same-slot reboot | physical slot identity and dump checksum match → the existing lower-state and upper state are selected unchanged |
+| target preparation | the new dump loads into the target's lower-state; cloned stale records remain only in the target for verification and repair, never merged into the active upper DB |
+| cutover with `upperOnUpdate = "wipe"` | the target has empty upper-owned state; the active slot's upper and DB were not cleared |
+| rollback | the previous slot's lower-state and upper state are selected together without an additive merge or another policy run |
 
 The image also ships the `nix` CLI — the loader runs on a nix-less
 appliance. This is what makes the runner container work on appliance hosts
@@ -240,13 +242,15 @@ write; the runner host cutover is idle-gated.
 
 | scenario | behaviour |
 |---|---|
-| healthy update | inactive slot written → reboot → boot counting blesses |
-| new boot broken | tries exhaust (default 3) → previous blessed entry boots; the machine stays stable and update-aware (Tier-0). Before another update, run the [post-rollback recovery](#post-rollback-recovery) so version-driven selection cannot target the running oldest slot |
-| same version staged | no-op: nothing written, trigger green |
+| healthy update | inactive slot written → upper chain prepared and ready → reboot → boot counting blesses |
+| upper preparation failed | installation stays on disk but the trigger does not reboot; the active upper remains usable, and a later retry prepares only the target |
+| unrelated reboot into an unprepared UKI | boot-time selection attempts target-only recovery before upper consumers start; failure leaves the boot unblessed so boot counting returns to the preserved slot |
+| new boot broken | tries exhaust (default 3) → previous blessed lower and its preserved upper chain boot without a reverse wipe/reconcile. Before another update, run the [post-rollback recovery](#post-rollback-recovery) so version-driven selection cannot target the running oldest slot |
+| same version staged | no-op: nothing written, no upper preparation, trigger green |
 | interrupted update | the active slot is never the write target; the half-written slot never boots; re-install is refused until `systemd-sysupdate vacuum` removes the partial instance, then the next update rewrites the slot |
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
 | tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |
-| timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls + reboots per `rebootPolicy` — see [`auto-update.md`](auto-update.md) |
+| timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls, prepares the upper chain and reboots per `rebootPolicy`; window mode records the source generation and refreshes a changed target before the deferred reboot — see [`auto-update.md`](auto-update.md) |
 
 ### Post-rollback recovery
 
@@ -297,8 +301,9 @@ happens to the writable upper layer across these updates
 
 Storage outside the A/B slots, such as a ZFS pool holding service state, is
 not rewritten by an update and must remain importable on either slot and after
-rollback. That persistence is independent of the overlay upper policy: the
-default `"wipe"` clears ad-hoc upper content at cutover, while `"reconcile"`
-preserves and repairs it when a substituter retains the old closure. Mount
+rollback. Upper metaslots follow the same preservation rule: the default
+`"wipe"` creates an empty target upper, while `"reconcile"` clones and repairs
+the active upper into that target. On rollback, the earlier slot's upper and
+DB are selected as preserved rather than wiped or reconciled back. Mount
 ordering and the external-upper contract are documented in
 [`overlay-nix.md`](overlay-nix.md).

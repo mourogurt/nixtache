@@ -143,6 +143,13 @@ land here only when their paths are not already valid in the lower. Its
 location and lifecycle policy decide persistence across reboots and updates.
 _Avoid_: writable store, delta dir
 
+**Upper metaslot**:
+The persistent upper chain belonging to one physical slot: the host upper
+and its Nix state, plus the corresponding runner-overlay upper and state
+when that layer is enabled. Layers stay distinct but are prepared, selected
+and rolled back as one coherent chain.
+_Avoid_: shared upper, versioned upper (the key is the partition, not its version)
+
 **Merged store**:
 The OverlayFS view at `/nix/store` that combines lower and upper — what
 every nix command on the appliance sees.
@@ -150,8 +157,9 @@ _Avoid_: combined store, overlay view
 
 **Lower store database**:
 The validity records (path, narHash, narSize, deriver, references) shipped
-inside the appliance image and seeded into `/nix/var/nix/db` at boot; what
-makes the read-only lower layer a first-class readable nix store.
+inside the appliance image and loaded into the selected slot's lower-state
+at boot; what makes the read-only lower layer a first-class readable nix
+store. It is distinct from the upper metaslot's writable upper database.
 _Avoid_: store dump (that is the carrier file on the ESP), nix db (any
 db.sqlite qualifies)
 
