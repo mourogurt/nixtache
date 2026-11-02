@@ -6,20 +6,20 @@ See `proposal.md` for motivation and `specs/` for the observable contracts.
 
 The current host overlay has one configured upper/work pair and one lifecycle marker. Its `/nix/var/nix` state survives independently of the lower slot and is cleared or repaired after a version-changing boot. The runner overlay adds a second OverlayFS upper under `store.path`, with its own upper state under the relocated `/nix`, while the host merged store and host database form its lower.
 
-Nix's `local-overlay` model distinguishes the lower store's filesystem and metadata from the upper layer directory and upper SQLite database. A lower store may itself be a local-overlay store, but a mounted lower filesystem must not be replaced or mutated underneath its consumers. The design therefore switches complete chains only across boots and prepares new chains in a private scratch mount topology.
+Nix's [`local-overlay` model](https://nix.dev/manual/nix/2.35/store/types/experimental-local-overlay-store.html) distinguishes the lower store's filesystem and metadata from the upper layer directory and upper SQLite database. A lower store may itself be a `local-overlay`, and multiple overlays may consume the same lower, so sibling and nested container topologies are valid compositions rather than special cases the module can prohibit. A mounted lower filesystem must not change beneath its consumers. An upper database may also duplicate ancestor metadata so its upper-object closures satisfy the local-store schema; copying only files or treating that database as exclusively node-local breaks those closures. The design therefore switches complete trees only across boots and prepares new trees in a private scratch mount topology.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Preserve a usable upper chain for every prepared physical slot without modifying it for a rollback.
-- Make target preparation atomic from the perspective of upper consumers and safe to interrupt.
-- Support the existing host-only and host-to-runner cascade shapes with their distinct databases and state.
-- Keep manual sysupdate, deferred reboots and unrelated reboots inside the same readiness contract.
+- Preserve a usable upper tree for every prepared physical slot without modifying it for a rollback.
+- Make target preparation atomic from the perspective of every upper consumer and safe to interrupt at any node.
+- Support single overlays, sibling overlays over one lower, nested overlays and their compositions, with distinct upper directories and state at every node.
+- Keep manual sysupdate, deferred reboots and unrelated reboots inside the same whole-tree readiness contract.
 
 **Non-Goals:**
 
-- No new arbitrary branch topology beyond the runner's existing single-overlay and cascade configurations.
+- No container orchestration or automatic discovery of arbitrary mounts; module-managed layers supply stable node and parent descriptors so any supported sibling/nested composition can participate in one transaction.
 - No per-slot copy of the runner's full `clone` store and no merging of distinct upper directories or databases into one store.
 - No A/B partitioning or post-rollback sysupdate instance-selection redesign; that remains with `server-ab-migration-prep`.
 - No snapshot semantics for application data outside the Nix upper/state chain.
@@ -34,56 +34,58 @@ This handles identical versions in two slots and partition relabelling during sy
 
 Alternative considered: A/B names or image versions. A/B aliases are convenient for diagnostics but become ambiguous when labels change; versions do not identify a physical slot and can repeat.
 
-### D2 — A metaslot bundles layers and both metadata roles
+### D2 — A metaslot bundles a rooted layer tree and both metadata roles
 
 Use a per-slot directory with this logical shape:
 
 ```text
 upper-slots/<partuuid>/
-  metadata                  # slot, image, dump checksum, policy, state
+  metadata                  # slot, image, dump checksum, policy, topology, state
   host/
     lower-state/            # read-only records from this slot's dump
-    upper/                  # host OverlayFS upper
-    work/
-    state/                  # host upper DB, roots, profiles, temproots
-  runner/                   # present only in runner overlay mode
-    upper/
-    work/
-    state/                  # runner upper DB, roots, profiles, temproots
+  layers/
+    <stable-node-id>/
+      upper/
+      work/
+      state/                # upper DB, roots, profiles, temproots
 ```
 
-The host lower database and host upper database have different roles. The host `local-overlay` reads the selected lower-state plus its writable upper state. The runner reads the host's selected upper database as the metadata of its composite lower, then uses its own runner upper state. Do not load every record into one shared database.
+The host upper is the root node over the physical lower. Every other node names its parent; siblings name the same parent, while a nested container names the container whose merged store it consumes. Cycles, duplicate node identities and missing parents are invalid. A topology fingerprint covers all node identities and parent edges so a generation prepared for one graph cannot be selected for another.
 
-Stable runtime paths become selection points managed before consumers start: the configured host upper/work paths, `/nix/var/nix`'s persistent upper-owned subset, and the runner's relocated upper/state paths. Early boot binds or symlinks these to the selected metaslot; daemon configuration does not need to contain a partition-specific path.
+The host lower database and every upper database have different roles. The host `local-overlay` reads the selected lower-state plus its writable upper state. Each descendant reads its parent's selected merged store and upper-owned metadata as its composite lower, then uses its own upper state. Nix may duplicate ancestor records inside a descendant upper database to keep closure metadata self-contained; preparation preserves and refreshes those records in the target instead of treating them as a shared database or stripping them as duplicates.
 
-Work directories are recreated, never cloned. Daemon sockets and logs remain outside the persistent upper-owned subset. OverlayFS upper and work directories for each layer stay on one filesystem.
+Stable runtime paths become selection points managed before consumers start: each configured upper/work path, each persistent upper-owned state subset and the host's `/nix/var/nix` paths. Early boot binds or symlinks these to one selected metaslot generation; daemon configuration does not need to contain a partition-specific path.
 
-Alternative considered: version-keyed directories and one shared `/nix/var/nix`. These reintroduce same-version ambiguity and cross-slot database contamination.
+Work directories are recreated, never cloned. Daemon sockets and logs remain outside the persistent upper-owned subset. OverlayFS upper and work directories for each node stay on one filesystem.
 
-### D3 — Preparation runs against a private target topology
+Alternatives considered: version-keyed directories and one shared `/nix/var/nix` reintroduce same-version ambiguity and cross-slot database contamination. A fixed `host/runner` pair cannot represent valid sibling or deeper `local-overlay` compositions and was rejected as the internal model.
+
+### D3 — Preparation traverses a private target tree parent-first
 
 After sysupdate reports a completed installation, record the source active slot and resolve the changed inactive partition. Refuse preparation if the active partition changed or the target is ambiguous. Prepare the target through a dedicated service shared by CI-triggered, idle-gated and timer-driven updates:
 
-1. Lock the target metaslot and create a staging directory beside it.
-2. For `wipe`, create empty upper/state layers and load the target lower dump.
-3. For `reconcile`, snapshot or clone the current active metaslot into staging, then load the target lower dump into the cloned target lower-state.
-4. Mount the new lower and target host upper in a private mount namespace. Seed and verify the host target, repairing only missing paths into the target host upper.
-5. If runner overlay is enabled, expose the prepared host merged store and host upper database as the runner lower, then verify and repair the runner target into its own upper.
-6. Verify readiness, write metadata, and atomically rename staging into the slot's prepared generation.
+1. Lock the target metaslot, validate its topology graph and create a staging directory beside it.
+2. For `wipe`, create empty upper/state at every node and load the target lower dump.
+3. For `reconcile`, snapshot or quiesce-and-clone the complete active tree into staging as one source generation, then load the target lower dump into the cloned target lower-state. Cloning every node before repair prevents a source child from observing different source-parent snapshots.
+4. Mount the new lower and target root upper in a private mount namespace. Seed and verify the root target, including its own roots and profiles, repairing only the target root upper and state.
+5. Visit every remaining node in topological order. Do not expose or mount a child's target view until its parent's target repair has completed and that parent view will remain unchanged while children consume it. Verify the current node's roots, profiles and closure against its prepared parent's merged store and metadata; fetch missing objects and duplicate required ancestor metadata only into the current target node.
+6. Recheck every node, including intermediate nodes with roots and every leaf. Write readiness metadata only if all nodes validate, then atomically rename staging into the slot's prepared generation.
 
-The active upper is never a repair target. Substituter accesses, database invalidation and GC-like deletions happen only in the target namespace and target state.
+A dependency rooted at an intermediate node is repaired there once and is visible to its descendants. A dependency needed only by a leaf is repaired into that leaf. Siblings cannot repair through one another: each is verified against the same frozen prepared parent and owns its subsequent repairs. Failure at any intermediate, leaf or sibling leaves the entire generation unready, never a partially ready branch.
 
-For clone consistency, prefer a same-filesystem snapshot when the storage supports it. The portable fallback is a quiesced copy of module-managed writers followed by full target verification; an unverifiable copy remains unready. Correctness never depends on a lucky copy of a live SQLite file because the active source remains untouched and the target is not exposed until validated.
+The active upper is never a repair target. Substituter accesses, database invalidation and GC-like deletions happen only in the target namespace and target state. No target parent is modified after its children begin verification.
 
-Alternative considered: replay only profiles into an empty target. This loses unprofiled roots and the actual upper state. Repairing the active upper in place was also rejected because it recreates the original rollback hazard.
+For clone consistency, prefer same-filesystem snapshots of the complete tree when the storage supports them. The portable fallback quiesces all module-managed writers before copying, followed by full target verification; an unverifiable copy remains unready. Correctness never depends on a lucky copy of a live SQLite file because the active source remains untouched and the target is not exposed until validated.
+
+Alternatives considered: replay only profiles into an empty target loses unprofiled roots and actual upper state. Verifying only leaves misses intermediate roots, while repairing a parent after cloning or mounting children can invalidate their duplicated lower metadata and violates the mounted-lower's immutability constraint. Repairing the active upper in place recreates the original rollback hazard.
 
 ### D4 — Readiness is a versioned generation, not a single mutable marker
 
-A prepared record contains at least the physical slot ID, image ID/version, lower-dump checksum, policy, topology, source slot and preparation generation. `ready` is written only after every layer validates. Staging directories and interrupted generations never count as ready.
+A prepared record contains at least the physical slot ID, image ID/version, lower-dump checksum, policy, topology fingerprint, source slot and preparation generation. The topology fingerprint includes every stable node identity and parent edge. `ready` is written only after every node validates against the selected graph. Staging directories, interrupted generations and generations whose topology does not match the configured graph never count as ready.
 
-A same-version lower rewrite invalidates readiness through the dump checksum. Reusing a slot creates a new generation from the then-current active chain; it never resurrects the target's old generation as the source.
+A same-version lower rewrite invalidates readiness through the dump checksum. Reusing a slot creates a new generation from the then-current active tree; it never resurrects the target's old generation as the source.
 
-When an update defers reboot to a window, record the source generation. Revalidate and, for reconcile, refresh the target from the active chain before the deferred reboot if the source changed. Installation-time preparation therefore does not silently drop upper changes made while waiting for the window.
+When an update defers reboot to a window, record the source generation. Revalidate and, for reconcile, refresh the complete target tree from the active tree before the deferred reboot if any source node changed. Installation-time preparation therefore does not silently drop upper changes made at an intermediate, leaf or sibling while waiting for the window.
 
 ### D5 — Boot selects first and blesses only a ready chain
 
@@ -99,11 +101,15 @@ Readiness orders module-managed upper consumers and `boot-complete.target` after
 
 Alternative considered: disarm the UKI whenever preparation fails. That may supplement operational cleanup but is insufficient as the sole mechanism because sysupdate and manual boot selection can bypass trigger-side bookkeeping.
 
-### D6 — The cascade is prepared host-first and reset at an ephemeral boundary
+### D6 — Sibling and nested overlays share one atomic readiness boundary
 
-The runner lower is the host merged store, not independently the physical lower. Host target repair therefore completes before runner target repair. Their directories and databases stay separate; only selection and readiness are shared.
+A runner lower is its parent's merged store, not independently the physical lower. The two primitive shapes are therefore a parent with two children and a parent-child-grandchild chain; larger supported trees are compositions of these shapes. Parent target repair completes before any child target repair, and siblings may proceed only after their common parent is stable. Their directories and databases stay separate; selection and readiness are shared by the whole tree.
 
-If the host upper is tmpfs, its files disappear on reboot. Any dependent runner upper is then inherently ephemeral too: reset its upper and upper-owned state at the same early-boot boundary instead of retaining dangling records. Persistent slot metaslots apply only below an entirely persistent chain.
+For a relocated runner store, bind each selected or target parent's merged store and upper-owned metadata read-only under a dedicated lower root outside that runner's `/nix`. Both the runner OverlayFS `lowerdir` and its `local-overlay` lower store use this root. The custom daemon rebinds `/nix` to the runner's merged store, so a parent lower rooted there would be shadowed and the runner would read its own upper database instead of the selected parent's metadata.
+
+Tests must exercise roots at intermediate nodes as well as leaves. In particular, a middle-and-leaf shared dependency proves that parent repair is visible to the child without a second repair, while a leaf-only dependency proves that repair does not leak into the parent. Two siblings rooting the same otherwise missing dependency prove both independence from the parent and isolation from each other. A final whole-tree verification catches stale duplicated metadata and cross-layer dangling references even when each node passed an earlier local check.
+
+If any upper is tmpfs, its files disappear on reboot. Every descendant upper is then inherently ephemeral too: reset the entire descendant subtree's upper and upper-owned state at the same early-boot boundary instead of retaining dangling records. Persistent slot metaslots apply only below an entirely persistent ancestor chain.
 
 Runner `clone` mode bypasses metaslot duplication and retains additive lower seeding.
 
@@ -120,7 +126,9 @@ A direct manual `systemd-sysupdate` remains supported through the boot-time reco
 - [A deferred reboot makes an installation-time clone stale] → Track the source generation and refresh the target before the deferred cutover when needed.
 - [Dynamic upper paths can race early-boot consumers] → Centralize selection in one unit and pin strict `requires`/`after` relationships for the lower loader, mount units, daemons, runner container and boot-completion.
 - [Custom upper-hosted services may start before readiness unless correctly wired] → Provide a stable readiness target for consumers and document that upper-hosted critical services must require and follow it as well as remain in `criticalUnits`.
-- [Nested overlays inherit lower-mutation restrictions] → Replace lower chains only across reboots and use private scratch mounts for preparation; do not rewrite a mounted active lower chain.
+- [Nested overlays inherit lower-mutation restrictions] → Replace lower trees only across reboots, finish each target parent before mounting target children and use private scratch mounts; never rewrite a mounted active lower or a target parent already consumed by a child.
+- [Duplicated ancestor records in child upper databases become stale after cloning] → Refresh closure metadata separately in each target child and perform a final whole-tree closure check instead of assuming valid files imply valid metadata.
+- [One repaired sibling can expose a partially usable but incoherent tree] → Publish no branch independently; one failed node keeps the complete generation unready and retry touches only that target generation.
 - [Migration mistakes can strand the only existing upper] → Preserve the legacy source until the active migrated metaslot validates, retain compatibility selection paths, and make migration idempotent.
 
 ## Migration Plan
