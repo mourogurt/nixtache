@@ -29,9 +29,11 @@ nix.settings.trusted-public-keys = [ "<cache public key>" ];
 
 ## The shipped lower DB
 
-Every nixtache appliance image ships its slot closure's store DB dump and
-seeds `/nix/var/nix/db` at boot (see [`ota.md`](ota.md)), making the
-read-only lower store a first-class readable nix store:
+Every nixtache appliance image ships its slot closure's store DB dump (see
+[`ota.md`](ota.md)). With `overlay-nix`, the boot loader imports that dump
+into the selected slot's read-only lower-state; Nix combines those records
+with the separate writable upper database. This makes the lower a first-class
+readable store:
 
 - runtime installs are a **delta**: realizing a path whose closure is
   already valid in the lower downloads only the missing paths into the
@@ -40,77 +42,116 @@ read-only lower store a first-class readable nix store:
   only in the OLD lower genuinely break (missing interpreter/library) and
   their DB entries dangle — `upperOnUpdate` below exists exactly for this.
 
-## Upper-layer persistence
+## Upper metaslots and persistence
 
-| `upperDir` on | Plain reboot | OTA cutover |
-|---|---|---|
-| persistent root FS | installs survive | `"wipe"` clears them; `"reconcile"` repairs them |
-| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same persistent-upper policy |
-| tmpfs | upper files vanish and stale upper-owned Nix state is reset | the same every-boot reset runs before the new lower DB loads |
+On an A/B appliance, the physical lower partition's GPT `PARTUUID` selects an
+independent upper metaslot. With the default paths, each prepared generation
+lives under:
 
-The upper layer may live on a ZFS dataset (e.g. a data pool with more space
-than the root partition): OverlayFS needs `d_type` + `renameat2`
-whiteout/exchange from the upper filesystem, which ZFS provides since
-OpenZFS 2.2 (older releases refuse or misbehave). `upperDir` and `workDir`
-must sit on the SAME dataset, and the overlay mounts after the pool import
-(`zfs-mount.service`) — both pinned on a real appliance swap by
-`ab-data-pool-vm`. On older ZFS, keep the upper on the ext4 root instead.
+```text
+/var/lib/nix-overlay/upper-slots/<partuuid>/generations/<generation>/
+  metadata
+  host/{upper,work,state,lower-state}
+```
 
-## Upper lifecycle across OTA updates: `upperOnUpdate`
+The slot's `current` link selects one generation. `/etc/image-version` alone
+is not an identity: two slots may contain the same version and different
+upper state. A plain reboot of the same slot selects its current upper and
+Nix state unchanged; booting an older prepared slot during rollback does the
+same, without a reverse wipe or reconcile.
 
-For a persistent upper, the lifecycle event is the **cutover boot**, not an
-update attempt. `nixtache-overlay-lifecycle.service` compares
-`/etc/image-version` with `/var/lib/nixtache/last-boot-image-version`:
+| `upperDir` on | Plain reboot | Prepared OTA update | Rollback |
+|---|---|---|---|
+| persistent root FS | installs survive | target policy applies | previous slot's upper is selected unchanged |
+| ZFS dataset (OpenZFS ≥ 2.2) | installs survive | same persistent-upper policy | same preservation rule |
+| tmpfs | upper and all dependent upper state reset | no persistent metaslot is retained | the ephemeral chain resets again |
 
-- an absent marker records the running version as a baseline without wiping or
-  reconciling existing installs;
-- a mismatch runs the selected policy and advances the marker only after
-  success, so booting an older slot during rollback applies the policy again;
-- a match leaves a persistent upper untouched. No-op polls, rejected updates
-  and timer ticks do not run the policy because they do not cause a cutover.
+The upper layer may live on a ZFS dataset: OverlayFS needs `d_type` and
+`renameat2` whiteout/exchange, provided by OpenZFS 2.2. `upperDir` and
+`workDir` must sit on the SAME filesystem, and the overlay mounts after the
+pool import (`zfs-mount.service`). On older ZFS, keep the upper on the ext4
+root instead.
 
-The lifecycle marker is deliberately separate from the loader's
-`/var/lib/nixtache/lower-db-version`. Loading the current lower DB cannot mark
-a reconcile pass complete: if reconcile fails, its older lifecycle marker
-still requests a retry after the loader has succeeded.
+## Target preparation across OTA updates
 
-The two persistent-upper policies are:
+After sysupdate installs a new lower in the inactive slot,
+`nixtache-overlay-prepare.service` prepares only that target while the old
+slot remains active. The stock reboot-assessment unit requires this service;
+after a manual `systemd-sysupdate` installation it can also be run directly:
 
-- `"wipe"` (default): early in the cutover boot, clear the upper layer, work
-  directory and overlay store state under `/nix/var/nix` before the lower-DB
-  loader and overlay mount run. The loader then reseeds the running slot's
-  records. This is deterministic and needs no substituter, but ad-hoc
-  installs do not survive a cutover.
-- `"reconcile"`: after the lower DB loads and the overlay mounts, resolve
-  gc-root and user-profile targets live from their persistent links. Run
-  `nix-store --verify` to invalidate records whose files vanished, then
-  `nix-store --repair-path` for only the missing closure paths of those roots;
-  present paths are not reinstalled. Recorded profile installables are then
-  replayed, so their user-facing tools run again. If the substituter cannot
-  serve a path, the unit reports it and fails without blocking the boot or deleting
-  unrelated upper content. The lifecycle marker remains pending, so the pass
-  retries on the next boot or after
-  `systemctl start nixtache-overlay-lifecycle.service` once the cache is
-  available.
+```bash
+systemctl start nixtache-overlay-prepare.service
+```
+
+The two policies are:
+
+- `"wipe"` (default): create an empty target upper, work directory and
+  upper-owned Nix state, then load the target lower dump. The active upper,
+  roots, profiles and databases are not cleared. The new slot starts without
+  ad-hoc installs and needs no substituter for preparation.
+- `"reconcile"`: quiesce module-managed Nix writers, clone the current active
+  upper and Nix state, resume those writers, and verify/repair only the clone
+  in a private mount namespace. Roots and per-user profiles are preserved;
+  missing closure paths are fetched into the target, never into the active
+  upper. Reusing a physical slot for another update clones the then-current
+  active generation, not the target's stale prior generation.
 
   `reconcile` requires a substituter that still serves the OLD references.
   `services.nixtache.runner.deploy.ab.retain` keeps five staged image versions
   by default, but that is separate from NAR retention: configure the binary
   cache and its store GC to retain the old closures needed for repair.
 
-For a tmpfs upper, `nixtache-overlay-tmpfs-reset.service` detects the upper's
-filesystem with `findmnt -T` and clears the upper-owned Nix state on **every**
-boot before the lower-DB loader and overlay mount. The loader reseeds the
-current slot even when its version marker is unchanged because the DB is
-missing. No upper roots survive to reconcile, and no image-version mismatch is
-required. Same-version reboots of persistent uppers remain untouched.
+Preparation copies with `--reflink=auto`: supported filesystems share
+unchanged blocks, while others need space for a full upper and database copy.
+It is not an atomic storage snapshot. Stop custom services that write
+directly to the upper rather than through the module-managed Nix daemon
+before running a manual reconcile, and keep capacity for the target copy.
 
-There is no carry-over value: with the shipped lower DB a carried upper
-deterministically dangles after a swap. **Upgrade note:** a configuration that
-still sets `"none"` fails evaluation with the enum naming the two valid
-values; a configuration that never set the option uses `"wipe"` (its persistent
-upper is cleared at the next cutover). To keep ad-hoc installs across updates,
-choose `"reconcile"` with a substituter configured.
+A generation becomes `state=ready` only after its complete target chain
+validates. An interrupted clone, unavailable substituter or unresolved path
+leaves an explicit `state=unready` generation and does not advance readiness
+or modify the active upper. Once the cause is fixed, discard that incomplete
+attempt by starting a fresh preparation:
+
+```bash
+systemctl reset-failed nixtache-overlay-prepare.service
+systemctl start nixtache-overlay-prepare.service
+```
+
+The retry removes incomplete staging/unready generations; reconcile clones
+the latest active state again, while wipe creates another empty target. The
+readiness record also contains the lower dump's SHA-256, so replacing a lower
+image with the same version but a different dump invalidates the old
+generation.
+
+At boot, `nixtache-overlay-select.service` resolves the mounted lower's
+`PARTUUID` and selects a ready generation with matching lower metadata. If
+the selected slot is unprepared or its dump checksum changed, it attempts
+target-only recovery before the lower loader, overlay mount, Nix daemon and
+runner consumers start. Failed recovery leaves the upper chain unready and
+prevents `boot-complete.target` from blessing the new slot, allowing boot
+counting to return to the preserved previous slot.
+
+## Ephemeral chains and migration
+
+With a tmpfs upper, selection resets the upper, work directory, lower-state
+and upper-owned Nix state on **every** boot. Dependent overlay layers,
+including a runner overlay and its state, are reset as well: no child may
+retain records for files lost from an ancestor upper. The loader then reseeds
+the current lower, with no image-version comparison or persistent metaslot.
+
+On the first boot after upgrading from a shared persistent upper, migration
+copies the existing upper and Nix state into the active physical slot's
+initial metaslot. The legacy directories are preserved under
+`/var/lib/nix-overlay/legacy-backup`; activation failures leave those sources
+available for recovery. The other slot stays unready until an update
+prepares it. Retain the backup until the migrated upper and a subsequent
+update/rollback cycle have been validated.
+
+There is no carry-over value: a configuration that still sets `"none"` fails
+evaluation with the enum naming the two valid values. An unset option uses
+`"wipe"`; to retain ad-hoc installs across updates, choose `"reconcile"`
+with a suitably retained substituter.
 
 ## Garbage collection
 
