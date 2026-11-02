@@ -73,7 +73,6 @@ from targeting the other daemon's processes. Canonical requirements:
 | `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)). |
 | `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`; physical-slot upper metaslots, out-of-place target preparation and rollback-preserving selection. |
 | `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, poll timer, target preparation, and deferred-reboot source refresh in window mode. |
-| `modules/secrets.nix` | Secrets provider abstraction (`vars` + extensible `providers`). |
 
 ### Lower installation versus upper readiness
 
