@@ -358,6 +358,10 @@ let
         (posOf "Successfully installed" abUpdateScript)
           < (posOf "systemd-sysupdate-reboot.service" abUpdateScript);
       abUpdateNoRebootOnNothing = lib.hasInfix "installed NOTHING — not rebooting" abUpdateScript;
+      abUpdatePreparesUpperBeforeReboot =
+        (posOf "systemctl start nixtache-overlay-prepare.service" abUpdateScript)
+          < (posOf "systemd-sysupdate-reboot.service" abUpdateScript);
+      abUpdateFailsWhenPreparationFails = lib.hasInfix "upper preparation failed — not rebooting" abUpdateScript;
       # gating off (default) → no nixtache-ab-apply path/service provisioned
       noAbPath = !(hostAb.config.systemd.paths ? "nixtache-ab-apply");
       noAbService = !(hostAb.config.systemd.services ? "nixtache-ab-apply");

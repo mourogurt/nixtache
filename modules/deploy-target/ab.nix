@@ -208,7 +208,13 @@ in
           update_journal >&2
           exit 1
         fi
-        echo "nixtache-ab-update: new version installed — triggering the reboot assessment"
+        if systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
+          if ! systemctl start nixtache-overlay-prepare.service; then
+            echo "nixtache-ab-update: upper preparation failed — not rebooting" >&2
+            exit 1
+          fi
+        fi
+        echo "nixtache-ab-update: new version installed and upper chain prepared — triggering the reboot assessment"
         systemctl start --no-block systemd-sysupdate-reboot.service \
           || echo "nixtache-ab-update: reboot trigger failed — new slot staged, reboot deferred" >&2
       '';

@@ -21,10 +21,10 @@
 #        reads, the probe unit is active, and v2's hello marker is visible
 #        through the merged store. Reconcile and default-wipe variants assert
 #        their respective upper outcomes independently of pool persistence.
-#     3. Rollback leg: rename the blessed v1 UKI to sort newest (simulates
-#        falling back to the previous slot; the boot-counting fallback itself
-#        is ab-ota-rollback-vm's domain) → v1 boots and the pool still imports
-#        (no zpool upgrade anywhere — slot version drift must not wedge data).
+#     3. Rollback leg: a Type#1 entry boots the blessed v1 UKI; the pool still
+#        imports and v1's original upper generation and DB are selected without
+#        reapplying wipe or reconcile (the automatic fallback is covered by
+#        ab-ota-rollback-vm; no zpool upgrade is allowed anywhere).
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test LAN.
 { nixpkgs
@@ -161,19 +161,18 @@ pkgs.testers.runNixOSTest {
 
     # -- First boot: the pool does not exist yet -----------------------------
     appliance.fail("zpool status tank")
-    # systemd-tmpfiles pre-created /tank/nix-overlay/{upper,work} on the root
-    # fs at boot (the overlay upperDir/workDir rules) and the overlay already
-    # mounts ONTO them — drop that mount before replacing /tank with the pool
-    # (a mounted overlay whose upperdir is unlinked serves ENOENT on writes).
-    # zpool also refuses to mount over a non-empty mountpoint. On later boots
-    # /tank is the pool and tmpfiles fills it if needed.
+    # The first boot selected a metaslot below the temporary root-filesystem
+    # /tank and bound its upper-owned Nix state into /nix/var/nix. Drop the
+    # store overlay before replacing that filesystem; selection below also
+    # unmounts the old state binds before activating the pool-resident chain.
     appliance.succeed("umount -l /nix/store")
     appliance.succeed("rm -rf /tank")
     appliance.succeed("zpool create -O mountpoint=/tank tank /dev/vdb")
     appliance.succeed("echo v1-state > /tank/state.txt")
-    appliance.succeed("mkdir -p /tank/nix-overlay/upper /tank/nix-overlay/work")
-    # The overlay mount ran at boot when /tank was absent — remount now that
-    # the pool dirs exist.
+    # Recreate and select the upper generation on the new pool before mounting
+    # its store. Restarting only the store mount would retain state binds whose
+    # sources were removed with the old /tank filesystem.
+    appliance.succeed("systemctl restart nixtache-overlay-select.service", timeout=600)
     appliance.succeed("systemctl restart nix-daemon-overlay-mount.service")
     appliance.succeed(
       "mount | grep 'overlay on /nix/store ' | grep -q 'upperdir=/tank/nix-overlay/upper'"
@@ -189,6 +188,10 @@ pkgs.testers.runNixOSTest {
     print("OK: vim realized into the pool-resident upper, runs via the merged store")
 
     # -- Stage v2 SIGNED + sysupdate → slot B → reboot -----------------------
+    v1_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+    v1_selected = appliance.succeed(
+      f"readlink -f /tank/nix-overlay/upper-slots/{v1_slot}/current"
+    ).strip()
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
@@ -203,6 +206,9 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: signed v2 staged and written to slot B + ESP")
 
+    # Prepare the inactive slot before cutover so this suite exercises the
+    # configured update policy rather than unprepared-slot boot recovery.
+    appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")
     assert appliance.succeed("cat /etc/image-version").strip() == "2"
@@ -218,7 +224,7 @@ pkgs.testers.runNixOSTest {
       "mount | grep 'overlay on /nix/store ' | grep -q 'upperdir=/tank/nix-overlay/upper'"
     )
     appliance.wait_until_succeeds(
-      "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=180
+      "systemctl is-active --quiet nixtache-overlay-ready.target", timeout=180
     )
     appliance.succeed("test -d /nix/store/${helloBasename}")
     print("OK: v2 booted — pool imported, state served, new lower visible")
@@ -255,20 +261,18 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("test \"$(cat /tank/state.txt)\" = 'v1-state'")
     appliance.succeed("systemctl is-active --quiet tank-probe.service")
     appliance.wait_until_succeeds(
-      "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=180
+      "systemctl is-active --quiet nixtache-overlay-ready.target", timeout=180
     )
-    print("OK: rolled back to v1 — pool still imports and serves state")
-  '' + (
-    if upperOnUpdate == null then ''
-      appliance.fail("test -e /tank/nix-overlay/upper/${vimBasename}")
-      appliance.fail("${vimPath}/bin/vim --version")
-      print("OK: default wipe kept the upper cleared after rollback")
-    '' else ''
-      out = appliance.succeed("${vimPath}/bin/vim --version")
-      assert "VIM" in out, f"upper-layer tool lost after rollback ({out!r})"
-      print("OK: reconcile kept the upper working after rollback")
-    ''
-  ) + ''
+    assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == v1_slot
+    assert appliance.succeed(
+      f"readlink -f /tank/nix-overlay/upper-slots/{v1_slot}/current"
+    ).strip() == v1_selected, "ZFS rollback replaced the preserved upper generation"
+    print("OK: rolled back to v1 — pool and its original upper generation are selected unchanged")
+  '' + ''
+    out = appliance.succeed("${vimPath}/bin/vim --version")
+    assert "VIM" in out, f"preserved v1 upper-layer tool lost after rollback ({out!r})"
+    appliance.succeed("nix path-info ${vimPath}")
+    print("OK: rollback selected the preserved v1 upper and DB without reapplying the update policy")
     print("PASS: data pool persistence + ${if upperOnUpdate == null then "default-wipe" else upperOnUpdate} upper policy across swap and rollback")
   '';
 }

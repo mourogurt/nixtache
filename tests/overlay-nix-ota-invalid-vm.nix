@@ -4,13 +4,13 @@
 # WHAT THIS SUITE PINS. With the slot closure's validity records shipped in
 # the image and loaded at boot, the lower store is a first-class readable
 # store: runtime installs are a DELTA (only paths missing from the merged
-# store land in the upper), and an OTA swap replaces the lower with paths
-# the upper may reference — leaving dangling references (binaries failing
-# with a missing interpreter, database entries claiming validity for files
-# absent from the merged view) unless a lifecycle policy acts. The suite
-# boots a real appliance, verifies the shipped DB works out of the box
-# (no manual seed), then swaps and pins the lifecycle behaviour
-# (upperOnUpdate = "wipe" | "reconcile"; the default is "wipe").
+# store land in the upper). An OTA swap can leave upper closures referencing
+# old-lower-only paths. The suite prepares the inactive slot with
+# upperOnUpdate = "wipe" | "reconcile" (default "wipe"), injects an
+# interrupted preparation and a changed lower-dump checksum, then reuses the
+# original slot for a second update. Active files and Nix state must remain
+# intact, incomplete generations must stay unready, and reconcile must clone
+# the latest active upper rather than a reused slot's stale generation.
 #
 # Mock packages (the pkgs_1 -> pkgs_2 -> pkgs_3 triangle):
 #   pkgs_1 (mock-runtime): a renamed busybox at $out/bin/busybox. Its refs
@@ -23,11 +23,10 @@
 #   pkgs_3: `hello` baked only into v2's lower — proves the new lower is
 #     visible through the remounted merged store.
 #
-# Profile leg (the spec's "recorded installables are replayed" scenario):
-#   pkgs_2 is additionally `nix profile install`ed into root's per-user
-#   profile pre-swap; reconcile resolves the profile link target live at
-#   cutover and asserts the tool runs through the profile link again
-#   post-swap (wipe variant asserts the negative).
+# Profile leg: pkgs_2 is additionally installed into root's per-user profile
+# pre-swap; reconcile preserves the profile target and its repaired closure,
+# while wipe removes both. pkgs_4 is installed only after the first swap and
+# identifies the latest active upper when the original physical slot is reused.
 #
 # Variant knobs (flake attr = suite instance):
 #   overlayOptions — merged into services.nixtache.overlay-nix (the
@@ -35,8 +34,9 @@
 #     module default, "wipe").
 #   upperTmpfs — move the upper layer to tmpfs (every reboot clears stale
 #     upper-owned state and reseeds the lower DB, even without a swap).
-#   reconcileDegraded — stop nix-serve before the swap so reconcile fails
-#     safely, then restore it and verify the pending retry heals.
+#   reconcileDegraded — run nixtache-ab-update with nix-serve stopped, prove
+#     failed upper preparation cannot reboot, then boot the unprepared UKI
+#     directly and verify target-only recovery after restoring the cache.
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test
 # LAN; no internet.
@@ -66,10 +66,17 @@ let
     chmod +x $out/bin/tool
   '';
 
+  pkgs_4 = pkgs.runCommand "mock-reuse-marker" { } ''
+    mkdir -p $out/bin
+    install -m 0755 ${pkgs.busybox}/bin/busybox $out/bin/busybox
+  '';
+
   p1Path = pkgs_1.outPath;
   p2Path = pkgs_2.outPath;
+  p4Path = pkgs_4.outPath;
   p1Basename = baseNameOf p1Path;
   p2Basename = baseNameOf p2Path;
+  p4Basename = baseNameOf p4Path;
   helloPath = pkgs.hello.outPath;
   helloBasename = baseNameOf helloPath;
 
@@ -135,6 +142,8 @@ let
   # pkgs_1: its lower store cannot satisfy pkgs_2's shebang after the swap.
   v2 = mkAppliance { version = "2"; extraPackages = [ pkgs.hello ]; };
   v2SysupdatePkg = v2.config.system.build.sysupdate-package;
+  v3 = mkAppliance { version = "3"; };
+  v3SysupdatePkg = v3.config.system.build.sysupdate-package;
 in
 pkgs.testers.runNixOSTest {
   name = "overlay-nix-ota-invalid";
@@ -160,18 +169,21 @@ pkgs.testers.runNixOSTest {
     virtualisation.diskSize = 8192;
     # pkgs_2 must be servable (realize fetch); pkgs_1's closure must be
     # servable (the reconcile repair re-fetch).
-    system.extraDependencies = [ pkgs_2 pkgs_1 v2SysupdatePkg ];
+    system.extraDependencies = [ pkgs_2 pkgs_1 pkgs_4 v2SysupdatePkg v3SysupdatePkg ];
     networking.firewall.enable = false;
   };
 
   testScript = ''
     P1 = "${p1Path}"
     P2 = "${p2Path}"
+    P4 = "${p4Path}"
     P1B = "${p1Basename}"
     P2B = "${p2Basename}"
+    P4B = "${p4Basename}"
     HELLO_P = "${helloPath}"
     HELLO_B = "${helloBasename}"
     UPPER = "${upperDir}"
+    LOWER_STATE = "${dirOf upperDir}/lower-state"
     MODE = ${if overlayOptions ? upperOnUpdate then builtins.toJSON overlayOptions.upperOnUpdate else ''"wipe"''}
     TMPFS = ${if upperTmpfs then "True" else "False"}
     DEGRADED = ${if reconcileDegraded then "True" else "False"}
@@ -193,6 +205,32 @@ pkgs.testers.runNixOSTest {
         deployer.succeed("mkdir -p /var/lib/nixtache/ab-stage/abtest")
         deployer.succeed("cp ${v2SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/")
         sign_stage()
+
+    def stage_v3():
+        deployer.succeed(
+          "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+          "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+          "cp ${v3SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/"
+        )
+        sign_stage()
+
+    # Directory mtimes change when this test adds and removes interruption
+    # padding; compare persistent names, contents, links and permissions instead.
+    def active_state_checksum():
+        return appliance.succeed(
+          "(tar --sort=name --numeric-owner --mtime=@0 -cf - -C \"${upperDir}\" .; "
+          "tar --sort=name --numeric-owner --mtime=@0 -cf - -C \"${dirOf upperDir}/lower-state\" .; "
+          "tar --sort=name --numeric-owner --mtime=@0 -cf - -C /nix/var/nix db gcroots profiles temproots) "
+          "2>/dev/null | sha256sum | awk '{print $1}'"
+        ).strip()
+
+    def inactive_slot():
+        return appliance.succeed(
+          "lsblk -nrpo PARTUUID,PARTLABEL | "
+          "awk -v active=\"$(cat /run/nixtache-overlay/selected-slot)\" "
+          "'BEGIN{IGNORECASE=1} $2 ~ /^nix-store_/ && tolower($1) != active "
+          "{print tolower($1); exit}'"
+        ).strip()
 
     deployer.start()
     deployer.wait_for_unit("nix-serve.service")
@@ -247,7 +285,7 @@ pkgs.testers.runNixOSTest {
     # capture documents which GC branch Nix takes on the appliance wiring.
     # the root file must be reboot-persistent (a /tmp root dies with the
     # plain-reboot control and would de-root pkgs_2 before the swap).
-    appliance.succeed(f"nix-store --add-root /var/lib/nixtache/tool-root -r {P2}")
+    appliance.succeed(f"ln -sfn {P2} /nix/var/nix/gcroots/tool-root")
 
     # -- Profile-install leg (the spec's "recorded installables are replayed"
     # scenario): install the tool into root's per-user profile. Reconcile
@@ -262,9 +300,14 @@ pkgs.testers.runNixOSTest {
 
     appliance.succeed(f"nix-store --realize {HELLO_P}", timeout=600)
     appliance.succeed(f"test -d {UPPER}/{HELLO_B}")
+    appliance.succeed("nix-store --gc --print-roots | grep -F /nix/var/nix/gcroots/tool-root")
+    # A merged-store GC pass can stop after a deletion batch when it encounters
+    # an already-invalid record. Repeat a bounded number of passes; the final
+    # upper-file assertion still requires the unrooted path to disappear.
     gc_journal = appliance.succeed(
-      "nix-collect-garbage 2>&1; journalctl -u nix-daemon --since -10min "
-      "| grep -i 'remount' || true"
+      f"for i in 1 2 3; do nix-collect-garbage 2>&1 || true; "
+      f"test -d {UPPER}/{HELLO_B} || break; done; "
+      "journalctl -u nix-daemon --since -10min | grep -i 'remount' || true"
     )
     print("INFO gc-remount-journal: " + gc_journal[-400:])
     appliance.fail(f"test -d {UPPER}/{HELLO_B}")
@@ -295,7 +338,6 @@ pkgs.testers.runNixOSTest {
         "systemctl start --wait systemd-sysupdate-update.service", timeout=900
       )
       assert_persistent_tool_intact()
-      assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
       print("OK: empty sysupdate poll left the upper, DB entry and profile intact")
 
     if not TMPFS:
@@ -304,7 +346,6 @@ pkgs.testers.runNixOSTest {
       appliance.wait_until_succeeds("nix --version", timeout=300)
       assert_persistent_tool_intact()
       assert appliance.succeed("cat /etc/image-version").strip() == "1"
-      assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
       print("OK: plain-reboot control — persistent upper survived, tool runs")
 
     if MODE == "wipe" and not TMPFS:
@@ -351,18 +392,81 @@ pkgs.testers.runNixOSTest {
       print("TMPFS OK: same-version reboot reset stale state, reseeded v1 and allowed re-realize")
 
     # -- Stage v2 + sysupdate → slot B → reboot into the new lower ---------
-    # The degraded variant cuts the substituter (nix-serve) before the swap:
-    # nginx (port 80) still serves the sysupdate staging, but the reconcile
-    # repair pass finds no cache — the unit must fail red without breaking
-    # the boot, keep its lifecycle marker behind and heal on the next boot
-    # once the cache returns, even though the lower-DB marker is current.
     if DEGRADED:
         deployer.succeed("systemctl stop nix-serve.service")
+    active_profile_before = appliance.succeed("readlink -f " + PROF).strip()
+    active_before_update = active_state_checksum() if not TMPFS else None
+    update_boot_id = appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     stage_v2()
-    appliance.succeed("systemctl start systemd-sysupdate.service", timeout=900)
+    if DEGRADED:
+        appliance.fail("systemctl start nixtache-ab-update.service", timeout=900)
+        assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == update_boot_id, "failed upper preparation rebooted the active slot"
+        appliance.succeed(
+          "journalctl -u nixtache-ab-update.service -b --no-pager | "
+          "grep -q 'upper preparation failed — not rebooting'"
+        )
+        print("OK: completed install plus failed upper preparation failed the trigger without rebooting")
+    else:
+        appliance.succeed("systemctl start systemd-sysupdate.service", timeout=900)
     appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_2", timeout=900)
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: sysupdate wrote v2 to slot B + ESP")
+
+    if not TMPFS:
+        target_slot = inactive_slot()
+        target_root = f"/var/lib/nix-overlay/upper-slots/{target_slot}"
+        if not DEGRADED:
+            padding = f"{UPPER}/{'a' * 32}-preparation-padding"
+            appliance.succeed(f"dd if=/dev/zero of={padding} bs=1M count=128 status=none")
+            active_before_failure = active_state_checksum()
+            appliance.succeed("systemctl start --no-block nixtache-overlay-prepare.service")
+            appliance.succeed(
+              "for i in $(seq 1 1000); do "
+              f"if find {target_root} -maxdepth 1 -name '.staging-*' | grep -q .; then "
+              "exec systemctl stop nixtache-overlay-prepare.service; fi; "
+              "sleep 0.01; done; exit 1", timeout=120
+            )
+            assert active_state_checksum() == active_before_failure, "interrupted clone modified active state"
+            appliance.succeed(f"rm -f {padding}")
+        appliance.wait_until_succeeds(
+          f"grep -l '^state=unready$' {target_root}/generations/*/metadata", timeout=120
+        )
+        unready_metadata = appliance.succeed(
+          f"grep -l '^state=unready$' {target_root}/generations/*/metadata"
+        ).strip().splitlines()
+        unready_generation = unready_metadata[0][:-len("/metadata")]
+        assert active_state_checksum() == active_before_update, "failed preparation modified active state"
+        assert_persistent_tool_intact()
+        print("OK: failed preparation left an explicit unready generation and preserved active state")
+
+        if DEGRADED:
+            deployer.succeed("systemctl start nix-serve.service")
+            print("OK: rebooting directly into the unprepared UKI for target-only boot recovery")
+        else:
+            active_before_retry = active_state_checksum()
+            appliance.succeed("systemctl reset-failed nixtache-overlay-prepare.service")
+            appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
+            appliance.fail(f"test -e {unready_generation}")
+            assert active_state_checksum() == active_before_retry, "target retry modified active state"
+            assert_persistent_tool_intact()
+            assert appliance.succeed("readlink -f " + PROF).strip() == active_profile_before
+            out = appliance.succeed(f"nix path-info {HELLO_P} 2>&1 || true")
+            assert "is not valid" in out, f"target lower records leaked into the active DB ({out!r})"
+            assert appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip() == target_slot
+            target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+            target = f"{target_root}/generations/{target_generation}"
+            appliance.succeed(f"grep -q '^state=ready$' {target}/metadata")
+            appliance.succeed(f"grep -q '^policy={MODE}$' {target}/metadata")
+            if MODE == "reconcile":
+                appliance.succeed(f"test -d {target}/host/upper/{P1B}")
+                appliance.succeed(f"test -d {target}/host/upper/{P2B}")
+                appliance.fail(f"test -d {UPPER}/{P1B}")
+                print("OK: old-lower dependency repaired only in the target; active DB/files unchanged")
+            appliance.succeed(
+              "cp /boot/EFI/nixtache/abtest_2.lower-db /run/nixtache-overlay/changed-lower-db && "
+              "cat /run/nixtache-overlay/changed-lower-db >> /boot/EFI/nixtache/abtest_2.lower-db"
+            )
+            print("OK: retry discarded the incomplete generation; installed lower dump checksum changed")
 
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")
@@ -378,6 +482,19 @@ pkgs.testers.runNixOSTest {
     # pkgs_3: the v2 lower is visible through the remounted merged store.
     appliance.succeed(f"test -d /nix/store/{HELLO_B}")
     print("OK: booted v2, overlay remounted over the new lower")
+    if not TMPFS:
+        v2_selected = appliance.succeed(f"readlink -f {target_root}/current").strip()
+        v2_generation = v2_selected.rsplit("/", 1)[-1]
+        appliance.succeed(f"grep -q '^state=ready$' {v2_selected}/metadata")
+        selected_sha = appliance.succeed("sed -n 's/^lower_sha256=//p' " + v2_selected + "/metadata").strip()
+        expected_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_2.lower-db | awk '{print $1}'").strip()
+        assert selected_sha == expected_sha, "boot recovery did not load the current lower dump"
+        if DEGRADED:
+            appliance.fail(f"test -e {unready_generation}")
+            print("OK: unrelated reboot recovered the unprepared target and blessed a complete upper chain")
+        else:
+            assert v2_generation != target_generation, "checksum change reused a stale ready generation"
+            print("OK: checksum mismatch produced a fresh ready generation during boot recovery")
 
     if MODE == "wipe":
         appliance.fail(f"test -d {UPPER}/{P2B}")
@@ -385,56 +502,76 @@ pkgs.testers.runNixOSTest {
         assert "is not valid" in out, f"wipe left DB entry ({out!r})"
         appliance.fail("test -e " + PROF)
         appliance.succeed("nix --version")
-        assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "2"
-        assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "2"
+        marker = appliance.succeed("cat " + LOWER_STATE + "/lower-db-sha256").strip()
+        expected_marker = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_2.lower-db | awk '{print $1}'").strip()
+        assert marker == expected_marker, "wipe did not load v2's lower records"
         print("WIPE OK: no stale upper content, DB entries or profiles; overlay functional")
     elif MODE == "reconcile":
-        assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "2"
-        if DEGRADED:
-            appliance.wait_until_succeeds(
-              "systemctl is-failed nixtache-overlay-lifecycle.service", timeout=600
-            )
-            appliance.fail(P2 + "/bin/tool")
-            assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
-            appliance.succeed("nix --version")
-            print("RECONCILE-DEGRADED OK: unit red, boot fine, lifecycle retry pending")
-            deployer.succeed("systemctl start nix-serve.service")
-            appliance.wait_until_succeeds(
-              "systemctl is-active --quiet boot-complete.target", timeout=300
-            )
-            appliance.reboot()
-            appliance.wait_for_unit("multi-user.target")
-            appliance.wait_until_succeeds("nix --version", timeout=300)
-            appliance.wait_until_succeeds(
-              "systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=180
-            )
-            appliance.wait_until_succeeds(
-              "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=600
-            )
-            assert appliance.succeed("cat /etc/image-version").strip() == "2"
-            assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "2"
-            assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "2"
-            out = appliance.succeed(P2 + "/bin/tool")
-            assert "tool-ok" in out, f"boot retry did not heal the tool ({out!r})"
-            appliance.succeed(f"test -d {UPPER}/{P1B}")
-            out = appliance.succeed(PROF + "/bin/tool")
-            assert "tool-ok" in out, f"boot retry did not heal the profile ({out!r})"
-            print("RECONCILE-RETRY OK: current lower-DB marker did not consume lifecycle retry")
+        marker = appliance.succeed("cat " + LOWER_STATE + "/lower-db-sha256").strip()
+        expected_marker = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_2.lower-db | awk '{print $1}'").strip()
+        assert marker == expected_marker, "reconcile did not load v2's lower records"
+        appliance.succeed(f"test -d {UPPER}/{P1B}")
+        out = appliance.succeed(P2 + "/bin/tool")
+        assert "tool-ok" in out, f"reconcile did not heal the tool ({out!r})"
+        out = appliance.succeed(PROF + "/bin/tool")
+        assert "tool-ok" in out, f"reconcile did not preserve the profile ({out!r})"
+        print("RECONCILE OK: target-only repair healed the old-lower dependency and preserved the profile")
+
+    if not TMPFS:
+        appliance.succeed("nix-store --realize " + P4, timeout=600)
+        out = appliance.succeed(P4 + "/bin/busybox echo reuse-marker-ok")
+        assert "reuse-marker-ok" in out, f"v2 reuse marker did not run ({out!r})"
+        appliance.succeed(f"test -d {UPPER}/{P4B}")
+        active_v2_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+        reused_slot = inactive_slot()
+        assert reused_slot != active_v2_slot
+        stale_current = appliance.succeed(
+          f"readlink -f /var/lib/nix-overlay/upper-slots/{reused_slot}/current"
+        ).strip()
+        stage_v3()
+        appliance.succeed("systemctl start systemd-sysupdate.service", timeout=900)
+        appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_3", timeout=900)
+        appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_3+*.efi", timeout=300)
+        active_before_reuse = active_state_checksum()
+        appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
+        assert appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip() == reused_slot
+        reused_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+        reused_target = f"/var/lib/nix-overlay/upper-slots/{reused_slot}/generations/{reused_generation}"
+        assert reused_target != stale_current, "slot reuse revived its stale generation"
+        appliance.succeed(f"grep -q '^state=ready$' {reused_target}/metadata")
+        appliance.succeed(f"grep -q '^source_slot={active_v2_slot}$' {reused_target}/metadata")
+        appliance.succeed(f"grep -q '^source_generation={v2_generation}$' {reused_target}/metadata")
+        if MODE == "reconcile":
+            appliance.succeed(f"test -d {reused_target}/host/upper/{P4B}")
+            appliance.succeed(f"test -d {reused_target}/host/upper/{P2B}")
         else:
-            appliance.wait_until_succeeds(
-              "systemctl is-active --quiet nixtache-overlay-lifecycle.service", timeout=600
-            )
-            assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "2"
-            appliance.succeed(f"test -d {UPPER}/{P1B}")
+            appliance.fail(f"test -d {reused_target}/host/upper/{P4B}")
+            appliance.fail(f"test -d {reused_target}/host/upper/{P2B}")
+        assert active_state_checksum() == active_before_reuse, "slot reuse modified the active v2 state"
+        out = appliance.succeed(P4 + "/bin/busybox echo reuse-marker-ok")
+        assert "reuse-marker-ok" in out, f"active v2 marker broke during slot reuse ({out!r})"
+        print("OK: reused slot prepared a fresh generation from the latest active upper")
+
+        appliance.reboot()
+        appliance.wait_for_unit("multi-user.target")
+        assert appliance.succeed("cat /etc/image-version").strip() == "3"
+        appliance.wait_until_succeeds("nix --version", timeout=300)
+        selected_reuse = appliance.succeed(
+          f"readlink -f /var/lib/nix-overlay/upper-slots/{reused_slot}/current"
+        ).strip()
+        assert selected_reuse == reused_target, "reused slot did not select its new generation"
+        if MODE == "reconcile":
+            out = appliance.succeed(P4 + "/bin/busybox echo reuse-marker-ok")
+            assert "reuse-marker-ok" in out, f"reused slot lost the latest active marker ({out!r})"
             out = appliance.succeed(P2 + "/bin/tool")
-            assert "tool-ok" in out, f"reconcile did not heal the tool ({out!r})"
-            jout = appliance.succeed(
-              "journalctl -u nixtache-overlay-lifecycle.service 2>&1 || true"
-            )
-            assert "disappeared" in jout, f"verify pass saw no danglers ({jout[-400:]!r})"
+            assert "tool-ok" in out, f"reused slot lost its repaired tool ({out!r})"
             out = appliance.succeed(PROF + "/bin/tool")
-            assert "tool-ok" in out, f"reconcile did not replay the profile ({out!r})"
-            print("RECONCILE OK: dangling ref healed (pkgs_1 re-fetched), profile replayed")
+            assert "tool-ok" in out, f"reused slot lost its profile ({out!r})"
+        else:
+            appliance.fail(f"test -d {UPPER}/{P4B}")
+            out = appliance.succeed(f"nix path-info {P4} 2>&1 || true")
+            assert "is not valid" in out, f"wipe reuse retained a stale DB entry ({out!r})"
+        print("OK: reused slot booted with the newly prepared upper generation")
 
     print("PASS: overlay-nix-ota-invalid matrix leg (mode=" + str(MODE) + ")")
   '';
