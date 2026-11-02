@@ -18,11 +18,13 @@ runs:
           echo "SANDBOX_OK!=1 → --no-sandbox (legacy/unprivileged runner)"
           SANDBOX_FLAG="--no-sandbox"
         fi
+        # Validate only the runner's native system. Cross-system builds require
+        # explicit binfmt or cross infrastructure that a generic runner lacks.
         # tee into artifacts/ so a failed validation leaves a downloadable log
         # in the always-run upload; pipefail (set above) keeps the non-zero
         # exit from nix flake check despite the pipe.
         mkdir -p artifacts
-        if ! nix flake check --show-trace --all-systems $SANDBOX_FLAG 2>&1 | tee artifacts/flake-check.log; then
+        if ! nix flake check --show-trace $SANDBOX_FLAG 2>&1 | tee artifacts/flake-check.log; then
           echo "Nix configuration validation failed!"
           exit 1
         fi
