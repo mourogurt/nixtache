@@ -170,6 +170,45 @@ The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`. Each
 - **WHEN** an upper resides on tmpfs and the machine reboots
 - **THEN** that ephemeral layer and every dependent upper layer are reset before the current lower records load, and no persistent upper metaslot is cloned or retained for the ephemeral chain
 
+### Requirement: Upper-tree preparation is parent-first and atomic
+
+A target metaslot MAY contain sibling or nested `local-overlay` uppers. Preparation MUST validate the graph and verify every node parent-before-child in a private target view. Each child MUST consume its prepared parent's merged store and metadata. Every node's roots, profiles and cross-layer closure metadata MUST validate before the complete tree becomes ready.
+
+#### Scenario: Sibling uppers reconcile independently over one parent
+
+- **WHEN** two sibling target uppers have separate roots over the same target parent
+- **THEN** the parent is repaired before either child, each sibling is verified against that stable parent view, and subsequent repair writes in one sibling are absent from the other sibling, the parent and the active tree
+
+#### Scenario: An intermediate upper reconciles before its child
+
+- **WHEN** an intermediate target node and its leaf both have roots, and the intermediate closure requires an object absent from the new lower
+- **THEN** the missing object is repaired into the target intermediate upper before the leaf is mounted or verified, and the active intermediate upper remains unchanged
+
+#### Scenario: A middle-and-leaf shared dependency is repaired at the middle
+
+- **WHEN** roots at both an intermediate node and its descendant require the same missing object and that object is repaired as part of the intermediate root closure
+- **THEN** the descendant resolves it through the prepared intermediate merged view without fetching a second copy into the descendant upper
+
+#### Scenario: A leaf-only dependency stays in the leaf
+
+- **WHEN** only a leaf root requires an object missing from its prepared parent view
+- **THEN** the object and any required duplicated closure metadata are added only to the target leaf upper and state, not to its parent or the active tree
+
+#### Scenario: Siblings requiring the same leaf-only object do not share repairs
+
+- **WHEN** roots in two siblings require the same object that is absent from their prepared parent and was not repaired as part of the parent's roots
+- **THEN** each sibling target is made coherent independently and neither sibling depends on the other's upper directory or upper database
+
+#### Scenario: Child closure metadata is validated after parent repair
+
+- **WHEN** a cloned child upper database contains duplicated ancestor metadata from the source tree and its target parent has since been repaired
+- **THEN** the child's files and duplicated closure records are refreshed or validated against the prepared parent before readiness, rather than accepting a file-only check
+
+#### Scenario: Any node failure blocks the complete target tree
+
+- **WHEN** verification or repair fails at an intermediate node, a leaf or either sibling
+- **THEN** no branch of that generation is marked ready, upper consumers do not start from a partially prepared tree, and the active tree remains usable and unmodified
+
 ### Requirement: Upper selection follows the physical lower slot
 
 The active upper metaslot MUST be selected from the physical store partition chosen by the bootloader, not solely from the image version. The selected upper, lower database and dependent upper layers MUST identify one coherent chain.
