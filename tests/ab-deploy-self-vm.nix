@@ -223,10 +223,10 @@ pkgs.testers.runNixOSTest {
     b2.succeed("test -f /var/lib/nixtache/ab-pending")  # NOT consumed on failure
     b2.succeed("journalctl -u nixtache-ab-apply --no-pager | grep 'for retry'")
     b2.succeed("rm /run/sysupdate-fail")
-    # Clear the intentional failures + rate-limit windows (BOTH the gating unit
-    # and the sysupdate unit it failed to start) so the REAL apply below is not
-    # blocked by start-limit-hit.
-    b2.succeed("systemctl reset-failed nixtache-ab-apply.service systemd-sysupdate.service")
+    # Clear the intentional failures + rate-limit windows across the gating,
+    # update and sysupdate units so the REAL apply below is not blocked by
+    # start-limit-hit.
+    b2.succeed("systemctl reset-failed nixtache-ab-apply.service nixtache-ab-update.service systemd-sysupdate.service")
     print("B2 OK (pre): failed sysupdate start keeps ab-pending for retry")
 
     stage_v2(b2)

@@ -221,11 +221,11 @@ pkgs.testers.runNixOSTest {
       };
     };
     systemd.tmpfiles.rules = [ "d /var/lib/nixtache/ab-stage 1777 root root -" ];
-    virtualisation.diskSize = 4096;
+    virtualisation.diskSize = 8192;
     # Writable store (overlayfs upper on tmpfs) so the fake-nix build stub can
     # materialise runtime-version-stamped "build outputs" as new store paths.
     virtualisation.writableStore = true;
-    virtualisation.memorySize = 4096;
+    virtualisation.memorySize = 8192;
     environment.systemPackages = with pkgs; [ curl gnupg openssh jq ];
     # The extracted action script + env + fake-nix, from the Nix store.
     environment.etc."deploy-action.sh".source = "${actionRunScript}";
