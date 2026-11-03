@@ -237,13 +237,18 @@ pkgs.testers.runNixOSTest {
         "build --no-link --print-out-paths "
         "--store unix:///srv/bincache/nix/var/nix/daemon-socket/socket "
         "--option sandbox false --option substitute false "
-        "--option build-users-group \"\" "
         "--expr 'derivation { name = \"ab-runner-compat-proof\"; "
         "system = \"${system}\"; builder = \"" + builder + "\"; "
-        "args = [ \"-c\" \"echo ok > $out\" ]; }' 2>&1"
+        "args = [ \"-c\" \"echo $UID > $out\" ]; }' 2>&1"
     ).strip().splitlines()[-1]
     print("R2 build output: " + out)
     assert "-ab-runner-compat-proof" in out, "unexpected build output path"
+    builder_uid = int(appliance.succeed(
+        "cat /srv/bincache/nix/store/" + out.rsplit("/", 1)[-1]
+    ).strip())
+    assert 32001 <= builder_uid <= 32032, \
+        f"custom daemon builder UID is not in the dedicated range: {builder_uid}"
+    print("R2 builder UID: " + str(builder_uid))
     print("DIAG host-side store dir:")
     print(appliance.succeed(
         "ls -d /srv/bincache/nix/store/*ab-runner-compat-proof 2>&1 || "

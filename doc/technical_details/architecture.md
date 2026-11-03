@@ -49,6 +49,22 @@ all definitions into the inner `eval-config` modules list).
 | `deploy.nix` | `deploy.targets.<name>` map → job env `NIXTACHE_DEPLOY_TARGETS` + per-target key bind-mounts / `LoadCredential` (`deploy_ssh_<name>[.pub]`). |
 | `ab.nix` | Runner-side A/B staging (`deploy.ab.*`): central staging dir + HTTPS distribution via the cache vhost, GPG manifest signing, retain-GC. |
 
+### Runner custom-daemon builder identities
+
+For a relocated store, `store.nix` declares the `nixtache-runner-bld` group
+(GID `32000`) and static builder users with UIDs from `32001` upward. The
+default is 32 users (`32001`–`32032`); larger numeric `max-jobs` values extend
+the set, capped at UID `61183`. Host evaluation rejects overlap with
+statically declared host user UIDs or group GIDs.
+
+Only `nix-daemon-custom` receives `build-users-group = nixtache-runner-bld`
+and `auto-allocate-uids = false` in its `NIX_CONFIG`. The global container
+`nix.conf`, system daemon and clone seeder keep their existing builder
+configuration. Because host and container processes share numeric UIDs, these
+separate identities are what prevent one daemon's UID-wide builder cleanup
+from targeting the other daemon's processes. Canonical requirements:
+[`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
+
 ### Sibling modules
 
 | Module | Owns |

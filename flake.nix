@@ -152,6 +152,7 @@
         # reseeds the current lower DB; the swap leg checks overlay health too.
         overlay-nix-ota-invalid-tmpfs-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; overlayOptions.upperOnUpdate = "wipe"; upperTmpfs = true; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style
         # container (no system nix-daemon) + the non-appliance mode.
         ab-runner-compat-vm = import ./tests/ab-runner-compat-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };

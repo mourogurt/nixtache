@@ -104,6 +104,7 @@ jobs:
           - overlay-nix-ota-invalid-reconcile-degraded-vm
           - overlay-nix-ota-invalid-tmpfs-vm
           - runner-store-mode-vm
+          - runner-builder-isolation-vm
     steps:
       - name: Checkout nixtache
         uses: actions/checkout@v4

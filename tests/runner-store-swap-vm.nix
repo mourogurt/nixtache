@@ -114,7 +114,6 @@ pkgs.testers.runNixOSTest {
             "build --no-link --print-out-paths "
             "--store unix:///srv/nix/var/nix/daemon-socket/socket "
             "--option sandbox false --option substitute false "
-            "--option build-users-group \"\" "
             "--expr 'derivation { name = \"runner-swap-proof-" + phase + "\"; "
             "system = \"${system}\"; builder = \"" + builder + "\"; "
             "args = [ \"-c\" \"echo " + phase + " > $out\" ]; }' 2>&1"

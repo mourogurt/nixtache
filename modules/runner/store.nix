@@ -41,6 +41,16 @@ let
   useOverlay = customStore && cfg.store.mode == "overlay";
   useClone = customStore && cfg.store.mode == "clone";
 
+  customBuilderCountFor = maxJobs: max 32 (if maxJobs == "auto" then 0 else maxJobs);
+  customBuilderCount = customBuilderCountFor (cfg.nixSettings.max-jobs or "auto");
+  customBuilderUids = genList (i: 32001 + i) customBuilderCount;
+  customBuilderUidCollisions = filterAttrs
+    (_: user: user.uid != null && elem user.uid customBuilderUids)
+    config.users.users;
+  customBuilderGidCollisions = filterAttrs
+    (_: group: group.gid != null && group.gid == 32000)
+    config.users.groups;
+
   # systemd BindPaths spec that re-exposes the relocated store (<path>/nix)
   # at /nix. nix itself reconstructs the /nix suffix for `nix copy --to <path>`.
   bindPath = "${cfg.store.path}/nix:/nix";
@@ -125,6 +135,34 @@ in
   config = mkIf cfg.enable {
     assertions = [
       {
+        assertion = !customStore || customBuilderCount <= 29183;
+        message = ''
+          services.nixtache.runner custom builder count ${toString customBuilderCount}
+          exceeds the 29183-account limit (last allowed UID 61183). Reduce
+          services.nixtache.runner.nixSettings.max-jobs.
+        '';
+      }
+      {
+        assertion = !customStore || customBuilderUidCollisions == { };
+        message = ''
+          services.nixtache.runner custom builder UIDs collide with host users:
+          ${concatStringsSep ", " (mapAttrsToList
+            (name: user: "${name} (UID ${toString user.uid})")
+            customBuilderUidCollisions)}.
+          Reassign the host accounts outside the selected custom-builder UIDs.
+        '';
+      }
+      {
+        assertion = !customStore || customBuilderGidCollisions == { };
+        message = ''
+          services.nixtache.runner custom builder GID 32000 collides with host groups:
+          ${concatStringsSep ", " (mapAttrsToList
+            (name: group: "${name} (GID ${toString group.gid})")
+            customBuilderGidCollisions)}.
+          Reassign the host groups outside GID 32000.
+        '';
+      }
+      {
         assertion = cfg.store.path != "";
         message = "services.nixtache.runner.store.path is mandatory and must not be empty (use \"/\" for the native /nix store).";
       }
@@ -198,7 +236,11 @@ in
         };
       });
 
-      config = { config, lib, pkgs, ... }: {
+      config = { config, lib, pkgs, ... }:
+      let
+        customBuilderCount = customBuilderCountFor config.nix.settings.max-jobs;
+      in
+      {
       # Appliance mode (host nix.enable=false): the container runs with its
       # own nix module disabled — a system nix-daemon cannot exist inside it
       # (the daemon-socket dir is a read-only host bind, so no socket can be
@@ -220,6 +262,22 @@ in
           inherit (config.nix.package) version;
         }).generate "nix.conf" config.nix.settings;
         systemPackages = [ config.nix.package ];
+      };
+
+      users = mkIf customStore {
+        groups."nixtache-runner-bld".gid = 32000;
+        users = lib.listToAttrs (lib.genList (i:
+          let n = i + 1; in
+          {
+            name = "nixtache-runner-bld${toString n}";
+            value = {
+              uid = 32000 + n;
+              isSystemUser = true;
+              group = "nixtache-runner-bld";
+              extraGroups = [ "nixtache-runner-bld" ];
+            };
+          }
+        ) customBuilderCount);
       };
 
       systemd.tmpfiles.rules = mkIf customStore [
@@ -266,12 +324,13 @@ in
               #   feature;
               # - the daemon realizes the fleet's content-addressed closure,
               #   so `ca-derivations` is always on here;
-              # - on appliance-style containers (nix.enable=false) no nixbld
-              #   build users exist, so the daemon builds as root.
-              nixConf = lib.concatStringsSep "\n" (
-                [ "extra-experimental-features = ca-derivations${lib.optionalString useOverlay " local-overlay-store read-only-local-store"}" ]
-                ++ lib.optional (!config.nix.enable) "build-users-group ="
-              );
+              # - dedicated static build users isolate this daemon's cleanup
+              #   from host and container system-daemon builders.
+              nixConf = lib.concatStringsSep "\n" [
+                "extra-experimental-features = ca-derivations${lib.optionalString useOverlay " local-overlay-store read-only-local-store"}"
+                "build-users-group = nixtache-runner-bld"
+                "auto-allocate-uids = false"
+              ];
             in
             {
               description = lib.mkForce "Nix Daemon with custom /nix bind mount";

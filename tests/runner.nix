@@ -94,6 +94,9 @@ self.nixosModules.runner
   loadCred = svc: svc."forgejo-runner-default".serviceConfig.LoadCredential or [ ];
   hasCredPrefix = prefix: creds: lib.any (c: lib.hasPrefix prefix c) creds;
   has = set: name: set ? ${name};
+  customBuilderUsers = host: lib.filterAttrs
+    (name: _: lib.hasPrefix "nixtache-runner-bld" name)
+    (containerCfg host).users.users;
 
   # --- scenario A: relocated store, SSH off -------------------------------
   # enableSandbox explicit (asserts on the cap below) — tests must not rely on
@@ -151,6 +154,89 @@ self.nixosModules.runner
       noForgejoBindPaths = (svcRoot."forgejo-runner-default".serviceConfig.BindPaths or [ ]) == [ ];
       noForgejoDep = !(lib.elem "nix-daemon-custom.service" (svcRoot."forgejo-runner-default".after or [ ]));
       noSrvMount = !(has (bindMountsOf hostRoot) "srv-nix");
+    };
+  };
+
+  hostExpandedBuilders = mkHost "/srv" {
+    services.nixtache.runner.nixSettings.max-jobs = 40;
+  };
+  hostAutoBuilders = mkHost "/srv" {
+    services.nixtache.runner.nixSettings.max-jobs = "auto";
+  };
+  scenarioCustomBuilders = {
+    name = "relocated store: dedicated static builder accounts scale with max-jobs";
+    checks = {
+      groupGid = (containerCfg hostSrv).users.groups."nixtache-runner-bld".gid == 32000;
+      defaultCount = lib.length (lib.attrNames (customBuilderUsers hostSrv)) == 32;
+      firstUid = (containerCfg hostSrv).users.users."nixtache-runner-bld1".uid == 32001;
+      lastDefaultUid = (containerCfg hostSrv).users.users."nixtache-runner-bld32".uid == 32032;
+      systemAccounts = lib.all
+        (user: user.isSystemUser
+          && user.group == "nixtache-runner-bld"
+          && user.extraGroups == [ "nixtache-runner-bld" ])
+        (lib.attrValues (customBuilderUsers hostSrv));
+      nativeUsersAbsent = customBuilderUsers hostRoot == { };
+      nativeGroupAbsent = !has (containerCfg hostRoot).users.groups "nixtache-runner-bld";
+      expandedCount = lib.length (lib.attrNames (customBuilderUsers hostExpandedBuilders)) == 40;
+      expandedLastUid = (containerCfg hostExpandedBuilders).users.users."nixtache-runner-bld40".uid == 32040;
+      autoCount = lib.length (lib.attrNames (customBuilderUsers hostAutoBuilders)) == 32;
+    };
+  };
+
+  hostAutoAllocatedBuilders = mkHost "/srv" {
+    services.nixtache.runner.nixSettings.auto-allocate-uids = true;
+  };
+  scenarioCustomDaemonBuilderConfig = {
+    name = "custom daemon: dedicated static builders without changing the system daemon";
+    checks = {
+      dedicatedGroup = lib.hasInfix "build-users-group = nixtache-runner-bld"
+        (svcSrv."nix-daemon-custom".environment.NIX_CONFIG or "");
+      automaticAllocationOff = lib.hasInfix "auto-allocate-uids = false"
+        (svcSrv."nix-daemon-custom".environment.NIX_CONFIG or "");
+      consumerAutomaticAllocationOverridden = lib.hasInfix "auto-allocate-uids = false"
+        ((servicesOf hostAutoAllocatedBuilders)."nix-daemon-custom".environment.NIX_CONFIG or "");
+      staticUsersKeptWithAutomaticAllocation =
+        lib.length (lib.attrNames (customBuilderUsers hostAutoAllocatedBuilders)) == 32;
+      systemDaemonUntouched = !(lib.hasInfix "nixtache-runner-bld"
+        (svcSrv."nix-daemon".environment.NIX_CONFIG or ""));
+      globalSettingsUntouched =
+        ((containerCfg hostSrv).nix.settings.build-users-group or "nixbld") == "nixbld";
+      storageUsesSystemDaemon = lib.elem "NIX_REMOTE=daemon"
+        (svcSrv."nix-daemon-storage".serviceConfig.Environment or [ ]);
+    };
+  };
+
+  hostBuilderUidCollision = mkHost "/srv" {
+    users.users.hostUidOccupant = {
+      uid = 32001;
+      isSystemUser = true;
+      group = "users";
+    };
+  };
+  hostBuilderGidCollision = mkHost "/srv" {
+    users.groups.hostGidOccupant.gid = 32000;
+  };
+  hostBuilderRangeExhaustion = mkHost "/srv" {
+    services.nixtache.runner.nixSettings.max-jobs = 29184;
+  };
+  failedBuilderAssertions = host: lib.filter
+    (assertion: !assertion.assertion && lib.hasInfix "custom builder" assertion.message)
+    host.config.assertions;
+  scenarioCustomBuilderCollisionGuards = {
+    name = "custom builder IDs: host collisions and range exhaustion fail evaluation";
+    checks = {
+      hostUserRejected = lib.any
+        (assertion: lib.hasInfix "hostUidOccupant" assertion.message
+          && lib.hasInfix "32001" assertion.message)
+        (failedBuilderAssertions hostBuilderUidCollision);
+      hostGroupRejected = lib.any
+        (assertion: lib.hasInfix "hostGidOccupant" assertion.message
+          && lib.hasInfix "32000" assertion.message)
+        (failedBuilderAssertions hostBuilderGidCollision);
+      rangeExhaustionRejected = lib.any
+        (assertion: lib.hasInfix "29184" assertion.message
+          && lib.hasInfix "61183" assertion.message)
+        (failedBuilderAssertions hostBuilderRangeExhaustion);
     };
   };
 
@@ -746,10 +832,13 @@ self.nixosModules.runner
       hasCustomDaemon = has svcAppliance "nix-daemon-custom";
       customDaemonStandalone =
         (svcAppliance."nix-daemon-custom".requires or [ ]) == [ "nix-daemon-storage.service" ];
-      # No nixbld build users exist without the system nix module — the
-      # daemon builds as root via NIX_CONFIG.
-      customDaemonBuildsAsRoot =
-        lib.hasInfix "build-users-group ="
+      applianceBuilderGroupGid = cfgAppliance.users.groups."nixtache-runner-bld".gid == 32000;
+      applianceBuilderCount = lib.length (lib.attrNames (customBuilderUsers hostApplianceHost)) == 32;
+      applianceBuilderFirstUid = cfgAppliance.users.users."nixtache-runner-bld1".uid == 32001;
+      customDaemonUsesDedicatedBuilders =
+        lib.hasInfix "build-users-group = nixtache-runner-bld"
+          (svcAppliance."nix-daemon-custom".environment.NIX_CONFIG or "")
+        && lib.hasInfix "auto-allocate-uids = false"
           (svcAppliance."nix-daemon-custom".environment.NIX_CONFIG or "");
     };
   };
@@ -923,6 +1012,9 @@ self.nixosModules.runner
   scenarios = [
     scenarioSrv
     scenarioRoot
+    scenarioCustomBuilders
+    scenarioCustomDaemonBuilderConfig
+    scenarioCustomBuilderCollisionGuards
     scenarioEmpty
     scenarioRegistration
     scenarioInstanceOptionSurface

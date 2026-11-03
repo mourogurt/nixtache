@@ -58,7 +58,21 @@ single check is decisive; correlate evidence around the failure time:
    `timeout-minutes`, and
    `journalctl -m --machine <name> -u forgejo-runner-<inst>` for cancellation
    records around the failure.
+5. **Cross-daemon UID cleanup.** When host and container builds run
+   concurrently, their daemons use independent userpool locks but the kernel
+   sees one shared numeric-UID namespace. If both daemons assign the same
+   builder UID, cleanup of either build can SIGKILL every process with that
+   UID, including the other daemon's builder and compiler processes. Compare
+   numeric UIDs with `ps -eo pid,uid,args` on the host and
+   `nixos-container run runner -- ps -eo pid,uid,args` in the container.
+   Correlate a finished or cancelled build with worker cleanup in host
+   `journalctl -u nix-daemon` and container
+   `journalctl -m --machine runner -u nix-daemon-custom`. The custom daemon's
+   dedicated identities and the evaluation guard for statically declared host
+   UID/GID collisions are documented in
+   [architecture](architecture.md#runner-custom-daemon-builder-identities) and
+   required by [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
 
-Missing resource evidence makes cancellation a candidate, not a certainty:
-counters may have reset, logs may have rotated, and different killers leave
-different evidence.
+Missing resource evidence makes cancellation or cross-daemon UID cleanup a
+candidate, not a certainty: counters may have reset, logs may have rotated,
+and different killers leave different evidence.

@@ -50,10 +50,16 @@ without building, and `suite` overrides `subset`. Full inventory:
 `-tmpfs` variants), `ab-ota-rollback-vm`, `ab-ota-noop-vm`,
 `ab-ota-interrupted-vm`, `ab-ota-migrate-vm`, `ab-ota-migrate-boot-vm` (+
 `-override` variant), `ab-data-pool-vm`, `ab-data-pool-wipe-vm`,
-`runner-store-mode-vm`,
+`runner-store-mode-vm`, `runner-builder-isolation-vm`,
 `runner-store-swap-clone-vm`, `runner-store-swap-overlay-vm`,
 `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
 `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
+
+`runner-builder-isolation-vm` runs host and custom-daemon builds concurrently
+and checks both cleanup directions: cancelling the host client leaves the
+container builder alive to finish its output, and cancelling the container
+client leaves the host builder alive to finish. The UID-isolation contract is
+in [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
 
 Every `vmTests` suite belongs in the full matrix unless it is explicitly
 parked. A parked suite remains locally buildable, its exclusion site names the
