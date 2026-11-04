@@ -43,14 +43,18 @@ let
     merge_scratch=$(mktemp -d "''${TMPDIR:-/tmp}/nixtache-overlay-materialize.XXXXXX")
     trap 'rm -rf "$merge_scratch"' EXIT
     mkdir -p "$stage/nodes" "$stage/layers" "$stage/host/lower-state" "$merge_scratch/root/nix/store"
-    declare -A ephemeral
+    declare -A logical_upper ephemeral
+    while IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton; do
+      [ -n "$physical_id" ] || continue
+      logical_upper[$logical_id]=$upper_dir
+    done < "$rows"
     : > "$stage/persistent-plan.rows"
     while IFS= read -r row; do
       [ -n "$row" ] || continue
       IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton <<< "$row"
       if [ "$parent" != - ] && [ "''${ephemeral[$parent]:-0}" = 1 ]; then
         ephemeral[$physical_id]=1
-      elif [ "$role" = runtime ] && [ "$(findmnt -T "$upper_dir" -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
+      elif [ "$(findmnt -T "''${logical_upper[$logical_id]}" -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
         ephemeral[$physical_id]=1
       else
         ephemeral[$physical_id]=0

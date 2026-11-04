@@ -206,7 +206,7 @@ in
         if ! update_journal | grep -q "Successfully installed"; then
           echo "nixtache-ab-update: systemd-sysupdate installed NOTHING — not rebooting, journal:" >&2
           update_journal >&2
-          exit 1
+          exit 0
         fi
         if systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
           if ! systemctl start nixtache-overlay-prepare.service; then
