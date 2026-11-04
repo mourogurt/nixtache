@@ -70,13 +70,14 @@ let
         set -euo pipefail
         mkdir -p ${stage}
         # 3 versions (retain=2 drops v1); each complete artifact set contains
-        # .raw, .efi, and the slot's .lower-db dump.
+        # .raw, .efi, the slot's .lower-db dump and its topology descriptor.
         for v in 1 2 3; do
           head -c $((100*1024)) /dev/urandom > ${stage}/abtest_''${v}.nix-store.raw
           head -c $(( 50*1024)) /dev/urandom > ${stage}/abtest_''${v}.efi
           head -c $(( 5*1024)) /dev/urandom > ${stage}/abtest_''${v}.lower-db
+          head -c $(( 2*1024)) /dev/urandom > ${stage}/abtest_''${v}.overlay-topology.json
         done
-        ( cd ${stage} && sha256sum *.raw *.efi *.lower-db > SHA256SUMS )
+        ( cd ${stage} && sha256sum *.raw *.efi *.lower-db *.overlay-topology.json > SHA256SUMS )
         # sign with the test key (both nodes start signed; nokey will have GC drop it)
         GNUPGHOME=$(mktemp -d); export GNUPGHOME
         gpg --batch --import "${testSignKey}/priv.asc" 2>/dev/null
@@ -110,12 +111,13 @@ pkgs.testers.runNixOSTest {
     withkey.fail("test -e ${stage}/abtest_1.nix-store.raw")
     withkey.fail("test -e ${stage}/abtest_1+*.efi")
     withkey.fail("test -e ${stage}/abtest_1.lower-db")
+    withkey.fail("test -e ${stage}/abtest_1.overlay-topology.json")
     withkey.succeed("test -f ${stage}/abtest_2.nix-store.raw")
     withkey.succeed("test -f ${stage}/abtest_3.nix-store.raw")
     withkey.succeed("test -f ${stage}/abtest_2.lower-db")
     withkey.succeed("test -f ${stage}/abtest_3.lower-db")
     # SHA256SUMS regenerated to match exactly the survivors
-    withkey.succeed("cd ${stage} && sha256sum *.raw *.efi *.lower-db | sort > /tmp/now && sort SHA256SUMS > /tmp/before && diff /tmp/before /tmp/now")
+    withkey.succeed("cd ${stage} && sha256sum *.raw *.efi *.lower-db *.overlay-topology.json | sort > /tmp/now && sort SHA256SUMS > /tmp/before && diff /tmp/before /tmp/now")
     # .gpg was RE-SIGNED (content changed) and the new signature VERIFIES
     post_gpg = withkey.succeed("sha256sum ${stage}/SHA256SUMS.gpg")
     assert pre_gpg != post_gpg, "withkey FAIL: .gpg not re-signed (still stale)"

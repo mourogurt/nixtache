@@ -381,7 +381,7 @@ pkgs.testers.runNixOSTest {
       "nix --extra-experimental-features nix-command path-info "
       "--store unix:///srv/nix/var/nix/daemon-socket/socket " + proof_v1
     )
-    crun("test -f /run/nixtache-runner-lower/nix/var/nix/lower-state/db/db.sqlite")
+    crun("test -f /run/nixtache-runner-lower/nix/var/nix/db/db.sqlite")
     proof_reset = build_proof("after-ephemeral-reset")
     assert crun("cat /srv/nix/store/" + proof_reset.rsplit("/", 1)[-1]).strip() == "after-ephemeral-reset"
     print("PASS: ephemeral host upper resets the complete runner descendant and preserves a coherent parent lower")
@@ -391,7 +391,7 @@ pkgs.testers.runNixOSTest {
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
       "cd /var/lib/nixtache/ab-stage/abtest && "
-      "sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS && "
+      "sha256sum *.raw *.efi *.lower-db *.overlay-topology.json > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS && "
       "export GNUPGHOME=$(mktemp -d) && "
       "${pkgs.gnupg}/bin/gpg --batch --import ${fixture.testSignKey}/priv.asc 2>/dev/null && "
       "${pkgs.gnupg}/bin/gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS"
@@ -457,7 +457,7 @@ pkgs.testers.runNixOSTest {
         "--store unix:///srv/nix/var/nix/daemon-socket/socket "
         "/nix/store/${helloBasename} >/dev/null"
       )
-      crun("test -f /run/nixtache-runner-lower/nix/var/nix/lower-state/db/db.sqlite")
+      crun("test -f /run/nixtache-runner-lower/nix/var/nix/db/db.sqlite")
       print("OK: selected parent store and metadata remain coherent through the dedicated lower root")
 
       proof_v2 = build_proof("v2")

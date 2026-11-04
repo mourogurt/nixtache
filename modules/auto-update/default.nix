@@ -72,10 +72,17 @@ let
 
   sourceFingerprint = ''
     fingerprint_source() {
-      local active_slot generation
-      active_slot=$(cat /run/nixtache-overlay/selected-slot) || return 1
+      local active_slot generation upper_fs
+      upper_fs=$(findmnt -T ${overlayCfg.upperDir or "/var/lib/nix-overlay/upper"} -n -o FSTYPE 2>/dev/null || echo unknown)
+      active_slot=$(cat /run/nixtache-overlay/selected-slot 2>/dev/null || cat /run/nixtache-overlay/prepared-slot 2>/dev/null) || return 1
+      [ -n "$active_slot" ] || return 1
+      if [ "$upper_fs" = tmpfs ]; then
+        printf '%s ephemeral\n' "$active_slot"
+        sha256sum "/boot/EFI/nixtache/${abImage.imageId or "nixtache"}_$(cat /etc/image-version).lower-db" | awk '{print $1}'
+        return 0
+      fi
       generation=$(readlink -f "${overlaySlotsDir}/$active_slot/current") || return 1
-      [ -n "$active_slot" ] && [ -d "$generation" ] || return 1
+      [ -d "$generation" ] || return 1
       printf '%s %s\n' "$active_slot" "$(basename "$generation")"
       nix --extra-experimental-features nix-command hash path "$generation"
     }
@@ -490,6 +497,7 @@ in
         path = with pkgs; [ systemd coreutils gnugrep ]
           ++ optional isFlake config.nix.package
           ++ optional (isAb && overlayEnabled) config.nix.package
+          ++ optional (isAb && overlayEnabled) util-linux
           ++ optional (isFlake && cfg.flake.sshPrivateKeyFile != null) openssh;
         serviceConfig = {
           Type = "oneshot";
@@ -517,7 +525,7 @@ in
 
       systemd.services.nixtache-auto-update-reboot = {
         description = "nixtache auto-update: reboot inside the configured window when a reboot is pending";
-        path = with pkgs; [ systemd coreutils ] ++ optional (isAb && overlayEnabled) config.nix.package;
+        path = with pkgs; [ systemd coreutils ] ++ optional (isAb && overlayEnabled) config.nix.package ++ optional (isAb && overlayEnabled) util-linux;
         serviceConfig.Type = "oneshot";
         script = ''
           set -u
