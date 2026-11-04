@@ -21,15 +21,18 @@ let
   nodesById = topology.byId;
   sortedTopology = map (id: nodesById.${id}) topology.order;
   parentId = node: if node.parent == null then "host" else node.parent;
+  evalParent = node:
+    let parent = topology.frozenParentByLogical.${node.id} or null; in
+    if parent == null then "-" else parent;
   consumerNode = node: topology.consumerNodeByLogical.${node.id} or node.id;
   graphFingerprint = topology.generationFingerprint;
   runnerLayers = optionals abEnabled (filter (node: node ? containerName) sortedTopology);
   frozenMounts = optionals abEnabled topology.frozenMounts;
+  inherit (topology) parentRoot physicalHostRoot;
   frozenMountByPhysical = topology.frozenMountByPhysical;
-  frozenParentMount = node: frozenMountByPhysical.${topology.frozenParentByLogical.${node.id}};
   runtimeBackup = "${runtimeState}/activation-backup";
 
-  activateFrozenGenerationSnippets = concatMapStrings (mount: ''
+  legacyFrozenActivation = concatMapStrings (mount: ''
     if [ "''${ephemeral_layers[${mount.logicalId}]}" = 1 ]; then
       activate_frozen_state ${if mount.parent == null then lowerStateLink else frozenMountByPhysical.${mount.parent}.stateDir} ${mount.stateDir} ${runtimeBackup}/frozen/${mount.id}
     else
@@ -38,16 +41,55 @@ let
     fi
   '') frozenMounts;
 
-  activateRunnerLowerSnippets = concatMapStrings (node:
-    let mount = frozenParentMount node; in ''
-      if [ "''${ephemeral_layers[${mount.logicalId}]}" = 1 ]; then
-        activate_frozen_state ${mount.stateDir} ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
-      else
-        selected_frozen=$(select_frozen_generation "${mount.id}" "${mount.logicalId}")
-        activate_frozen_state "$selected_frozen/state" ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
-      fi
-    ''
-  ) runnerLayers;
+  activateFrozenGenerationSnippets = ''
+    if [ -f "$generation/plan.rows" ]; then
+      while IFS='|' read -r physical_id logical_id role parent rest; do
+        [ -n "$physical_id" ] || continue
+        [ "$role" = frozen-lower ] || continue
+        frozen_root="${runtimeState}/frozen/$physical_id"
+        if [ "''${ephemeral_layers[$logical_id]}" = 1 ]; then
+          if [ "$parent" = - ]; then
+            frozen_source=${lowerStateLink}
+          else
+            frozen_source="${runtimeState}/frozen/$parent/nix/var/nix"
+          fi
+          activate_frozen_state "$frozen_source" "$frozen_root/nix/var/nix" "${runtimeBackup}/frozen/$physical_id"
+        else
+          selected_frozen="$generation/nodes/$physical_id"
+          [ -d "$selected_frozen" ] || { echo "nixtache-overlay: selected frozen node is missing: $physical_id" >&2; exit 1; }
+          activate_frozen_state "$selected_frozen/state" "$frozen_root/nix/var/nix" "${runtimeBackup}/frozen/$physical_id"
+        fi
+      done < "$generation/plan.rows"
+    else
+      :
+      ${legacyFrozenActivation}
+    fi
+  '';
+
+  activatePhysicalHostSnippet = ''
+    mkdir -p ${physicalHostRoot}/nix/store ${physicalHostRoot}/nix/var/nix
+    if ! mountpoint -q ${physicalHostRoot}/nix/store; then
+      mount --bind /nix/store ${physicalHostRoot}/nix/store
+    fi
+    mount -o remount,ro,bind ${physicalHostRoot}/nix/store
+    activate_frozen_state ${lowerStateLink} ${physicalHostRoot}/nix/var/nix ${runtimeBackup}/physical-host
+  '';
+
+  activateParentLowerSnippets = concatMapStrings (node: ''
+    parent_physical=${evalParent node}
+    if [ -f "$generation/plan.rows" ]; then
+      parent_physical=$(plan_consumer_parent ${node.id})
+    fi
+    if [ "$parent_physical" = - ]; then
+      parent_root=${physicalHostRoot}
+    else
+      parent_root="${runtimeState}/frozen/$parent_physical"
+    fi
+    activate_path "$parent_root" ${parentRoot node.id} ${runtimeBackup}/parents/${node.id}
+    ${optionalString (node ? containerName) ''
+      activate_frozen_state "$parent_root/nix/var/nix" ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
+    ''}
+  '') sortedTopology;
 
   resetFrozenSnippets = concatMapStrings (mount: ''
     reset_dir ${mount.upperDir}
@@ -58,11 +100,7 @@ let
 
   activateEphemeralFrozenSnippets = concatMapStrings (mount: ''
     bind_frozen_state ${if mount.parent == null then lowerStateLink else frozenMountByPhysical.${mount.parent}.stateDir} ${mount.stateDir}
-  '') frozenMounts + concatMapStrings (node:
-    let mount = frozenParentMount node; in ''
-      bind_frozen_state ${mount.stateDir} ${node.lowerRoot}/nix/var/nix
-    ''
-  ) runnerLayers;
+  '') frozenMounts;
 
   activationLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
     consumer_generation=""
@@ -128,6 +166,7 @@ let
     activation_started=0
     activation_complete=0
     activation_log=${runtimeState}/activation.log
+    generation=""
     ${migration.rollbackActivationSnippet}
     trap rollback_activation EXIT
 
@@ -168,6 +207,18 @@ let
       printf '%s\n' "$candidate"
     }
 
+    plan_consumer_parent() {
+      local wanted=$1 physical_id logical_id role parent rest
+      while IFS='|' read -r physical_id logical_id role parent rest; do
+        if [ "$logical_id" = "$wanted" ] && [ "$role" = runtime ]; then
+          printf '%s\n' "$parent"
+          return 0
+        fi
+      done < "$generation/plan.rows"
+      echo "nixtache-overlay: selected plan has no runtime row for $wanted" >&2
+      return 1
+    }
+
     activate_generation() {
       local generation=$1 name
       activation_started=1
@@ -180,7 +231,8 @@ let
       done
       ${activationLayerSnippets}
       ${activateFrozenGenerationSnippets}
-      ${activateRunnerLowerSnippets}
+      ${activatePhysicalHostSnippet}
+      ${activateParentLowerSnippets}
       printf '%s\n' "$1" > ${runtimeState}/selected-generation
       touch ${runtimeState}/selected-chain-ready
       activation_complete=1
@@ -201,6 +253,10 @@ let
       fi
       ${resetFrozenSnippets}
       ${activateEphemeralFrozenSnippets}
+      ${optionalString abEnabled ''
+        ${activatePhysicalHostSnippet}
+        ${activateParentLowerSnippets}
+      ''}
       touch ${runtimeState}/selected-chain-ready
       exit 0
     fi
@@ -214,6 +270,8 @@ let
       ${resetAllLayerSnippets}
       ${resetFrozenSnippets}
       ${activateEphemeralFrozenSnippets}
+      ${activatePhysicalHostSnippet}
+      ${activateParentLowerSnippets}
       touch ${runtimeState}/selected-chain-ready
       exit 0
     fi
