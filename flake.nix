@@ -21,6 +21,11 @@
         overlays = [
           (_: prev: {
             tzdata = prev.tzdata.overrideAttrs (_: { doCheck = false; });
+            gcc = prev.gcc.overrideAttrs (old: {
+              preFixup = (old.preFixup or "") + ''
+                eval "$(declare -f moveToOutput | sed 's/mv /cp -a /g')"
+              '';
+            });
           })
         ];
       };
