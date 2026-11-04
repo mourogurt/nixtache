@@ -177,6 +177,11 @@
         overlay-nix-fault-retention-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "retention"; };
         overlay-tree-parent-root-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "grand"; faultScenarios = [ "parent-root" ]; };
         overlay-tree-refs-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "host"; faultScenarios = [ "refs" ]; };
+        overlay-topology-operations-reconcile-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "reconcile"; };
+        overlay-topology-operations-wipe-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "wipe"; };
+        overlay-topology-operations-storage-reset-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "storage-reset"; };
+        overlay-topology-operations-descriptor-missing-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "descriptor-missing"; };
+        overlay-topology-operations-descriptor-mismatch-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "descriptor-mismatch"; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style

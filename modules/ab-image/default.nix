@@ -58,6 +58,22 @@ let
   lowerStoreDb = "${slotStoreSnapshot}/lower-db";
   lowerStoreDbName = "${cfg.imageId}_${config.system.image.version}.lower-db";
   lowerStoreDbEspPath = "/EFI/nixtache/${lowerStoreDbName}";
+  overlayTopologyName = "${cfg.imageId}_${config.system.image.version}.overlay-topology.json";
+  overlayTopologyEspPath = "/EFI/nixtache/${overlayTopologyName}";
+  overlayTopologyDescriptor = pkgs.runCommandNoCC "overlay-topology-${cfg.imageVersion}" {
+    descriptor = builtins.toJSON {
+      schema = "nixtache.overlay-topology/v1";
+      imageId = cfg.imageId;
+      imageVersion = config.system.image.version;
+      lowerDbSha256 = "@lowerDbSha256@";
+      logicalTopology = overlayCfg._topology.descriptor;
+    };
+    passAsFile = [ "descriptor" ];
+  } ''
+    lower_db_sha256=$(sha256sum ${lowerStoreDb})
+    lower_db_sha256=''${lower_db_sha256%% *}
+    sed "s/@lowerDbSha256@/$lower_db_sha256/" "$descriptorPath" > $out
+  '';
 
   # Default sysupdate transfers. `@v` carries the version; Path is STATIC
   # (sysupdate.d(5)). Local-self uses a plain-path regular-file source; a
@@ -112,6 +128,23 @@ let
         MatchPattern = [ "${cfg.imageId}_@v+@l.efi" ];
         Mode = "0444";
         Path = "/EFI/Linux";
+        PathRelativeTo = "boot";
+        Type = "regular-file";
+      };
+      Transfer.Verify = if verify then "yes" else "no";
+    };
+  } // optionalAttrs overlayEnabled {
+    "17-overlay-topology" = {
+      Source = {
+        Path = srcPath;
+        Type = srcType;
+        MatchPattern = [ "${cfg.imageId}_@v.overlay-topology.json" ];
+      };
+      Target = {
+        InstancesMax = 2;
+        MatchPattern = [ "${cfg.imageId}_@v.overlay-topology.json" ];
+        Mode = "0444";
+        Path = "/EFI/nixtache";
         PathRelativeTo = "boot";
         Type = "regular-file";
       };
@@ -426,6 +459,8 @@ in
             "/loader/loader.conf".source = pkgs.writeText "loader.conf" ''
               timeout 3
             '';
+          } // optionalAttrs overlayEnabled {
+            "${overlayTopologyEspPath}".source = overlayTopologyDescriptor;
           };
           repartConfig = {
             Type = "esp"; Label = "boot"; Format = "vfat";
@@ -526,6 +561,7 @@ in
         cp ${config.system.build.uki}/${config.system.boot.loader.ukiFile} $out/
         cp ${config.system.build.image}/${cfg.imageId}_${cfg.imageVersion}.nix-store.raw $out/
         cp ${lowerStoreDb} $out/${lowerStoreDbName}
+        ${optionalString overlayEnabled "cp ${overlayTopologyDescriptor} $out/${overlayTopologyName}"}
         cd $out && sha256sum * > SHA256SUMS
       '';
 

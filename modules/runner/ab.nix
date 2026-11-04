@@ -57,7 +57,7 @@ in
       description = ''
         Host directory holding the central image store. Bind-mounted into the
         container at the same path (CI writes here). Layout:
-        `<stagingPath>/<cfg>/<imageId>_<version>.{nix-store.raw,efi,lower-db}` +
+        `<stagingPath>/<cfg>/<imageId>_<version>.{nix-store.raw,efi,lower-db,overlay-topology.json}` +
         `SHA256SUMS` (+ `.gpg`). The basename of this path MUST equal the
         basename of `nginx.location` (the vhost `root` maps one onto the other).
       '';
@@ -220,12 +220,12 @@ in
             | sed -nE 's/.*_([0-9]+)\.nix-store\.raw$/\1/p' \
             | sort -rn | awk "NR>''${retain}")
           for v in $versions; do
-            rm -f "$cfgdir"*_"$v".nix-store.raw "$cfgdir"*_"$v".efi "$cfgdir"*_"$v".lower-db
+            rm -f "$cfgdir"*_"$v".nix-store.raw "$cfgdir"*_"$v".efi "$cfgdir"*_"$v".lower-db "$cfgdir"*_"$v".overlay-topology.json
           done
           # Regenerate SHA256SUMS from the survivors. Empty subdir → no manifest.
-          # nullglob: a hand-rolled consumer prep may stage no .lower-db.
+          # nullglob: hand-rolled consumer preps may omit optional artifacts.
           if ls "$cfgdir"*.nix-store.raw >/dev/null 2>&1; then
-            ( cd "$cfgdir" && shopt -s nullglob && sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
+            ( cd "$cfgdir" && shopt -s nullglob && sha256sum *.raw *.efi *.lower-db *.overlay-topology.json > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
             # Re-sign so targets with Transfer.Verify=yes don't reject a stale .gpg.
             ${optionalString (cfg.signingKeyFile != null) ''
               GNUPGHOME=$(mktemp -d); export GNUPGHOME

@@ -129,14 +129,12 @@ let
   injectedSelectionText =
     if scenario == "migration-mv" then
       replaceChecked "legacy upper mv"
-        ''mv "$link" "$backup"''
+        ''if ! mv "$link" "$backup"; then''
         ''
           if overlay_test_fault migration-mv && [ "$link" = "${upperDir}" ]; then
-                echo "nixtache-overlay-test: injected mv failure after the M record" >&2
-                false
-              else
-                mv "$link" "$backup"
-              fi''
+                echo "nixtache-overlay-test: injected mv failure before the M record" >&2
+                return 1
+              elif ! mv "$link" "$backup"; then''
         selectionWithFaultFunction
     else if scenario == "activation-state" then
       replaceChecked "state activation"
@@ -344,7 +342,7 @@ pkgs.testers.runNixOSTest {
         appliance.wait_until_succeeds("test -f /tmp/nixtache-legacy-tool-path", timeout=120)
         appliance.succeed(
           "journalctl -u nixtache-overlay-select.service --no-pager | "
-          "grep -q 'injected mv failure after the M record'"
+          "grep -q 'injected mv failure before the M record'"
         )
         m_record = appliance.succeed(
           "grep -q '^M|" + UPPER + "|' /run/nixtache-overlay/activation.log && echo logged || echo missing"
@@ -367,7 +365,7 @@ pkgs.testers.runNixOSTest {
         ready_marker = appliance.succeed(
           "test ! -e /run/nixtache-overlay/selected-chain-ready && echo absent || echo present"
         ).strip()
-        assert m_record == "logged", "activate_path did not log M before the injected mv failure"
+        assert m_record == "missing", "failed mv was journaled before it succeeded"
         assert legacy_upper == "preserved", "rollback did not preserve a usable legacy upper"
         assert legacy_db == "preserved", "rollback damaged the legacy upper database"
         assert legacy_root == "preserved", "rollback damaged the legacy gcroot"

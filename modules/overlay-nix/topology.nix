@@ -70,6 +70,17 @@ let
     (map (node: { inherit (node) id parent; }) sortedTopology));
   physicalLib = import ./physical.nix { inherit lib; };
   physicalTopology = physicalLib.derive { logicalNodes = sortedTopology; };
+  logicalDescriptor = {
+    fingerprint = topologyFingerprint;
+    order = sortedNodeIds;
+    nodes = map (node: {
+        inherit (node) id parent upperDir workDir stateDir lowerRoot;
+      } // optionalAttrs (node ? containerName) {
+        inherit (node) containerName;
+      } // optionalAttrs (node ? isSingleton) {
+        inherit (node) isSingleton;
+      }) sortedTopology;
+  };
 in
 {
   config = mkIf cfg.enable {
@@ -78,8 +89,13 @@ in
       byId = nodesById;
       order = sortedNodeIds;
       fingerprint = topologyFingerprint;
+      descriptor = logicalDescriptor;
       rebase = args: physicalLib.derive ({
         logicalNodes = sortedTopology;
+        previousPhysical = physicalTopology.physical.nodes;
+      } // args);
+      transition = args: physicalLib.transition ({
+        sourceLogical = sortedTopology;
         previousPhysical = physicalTopology.physical.nodes;
       } // args);
     };

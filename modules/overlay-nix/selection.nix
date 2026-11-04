@@ -21,8 +21,21 @@ let
   nodesById = topology.byId;
   sortedTopology = map (id: nodesById.${id}) topology.order;
   parentId = node: if node.parent == null then "host" else node.parent;
+  consumerNode = node: topology.consumerNodeByLogical.${node.id} or node.id;
+  graphFingerprint = topology.generationFingerprint;
 
   activationLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
+    consumer_generation=""
+    if [ -f "$generation/plan.rows" ]; then
+      while IFS='|' read -r physical_id logical_id role rest; do
+        if [ "$logical_id" = "${node.id}" ] && [ "$role" = runtime ]; then
+          consumer_generation="$generation/nodes/$physical_id"
+          break
+        fi
+      done < "$generation/plan.rows"
+    fi
+    if [ -z "$consumer_generation" ]; then consumer_generation="$generation/nodes/${consumerNode node}"; fi
+    if [ ! -d "$consumer_generation" ]; then consumer_generation="$generation/layers/${node.id}"; fi
     if [ "''${ephemeral_layers[${parentId node}]}" = 1 ] || [ "$(findmnt -T ${node.upperDir} -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
       ephemeral_layers[${node.id}]=1
       reset_dir ${node.upperDir}
@@ -31,13 +44,13 @@ let
     else
       ephemeral_layers[${node.id}]=0
       ${if node.isSingleton or false then ''
-        activate_state_dir "$generation/layers/${node.id}" ${dirOf node.upperDir} ${legacyBackup}/layers/${node.id}/overlay
+        activate_state_dir "$consumer_generation" ${dirOf node.upperDir} ${legacyBackup}/layers/${node.id}/overlay
       '' else ''
-        activate_path "$generation/layers/${node.id}/upper" ${node.upperDir} ${legacyBackup}/layers/${node.id}/upper
-        activate_path "$generation/layers/${node.id}/work" ${node.workDir} ${legacyBackup}/layers/${node.id}/work
+        activate_path "$consumer_generation/upper" ${node.upperDir} ${legacyBackup}/layers/${node.id}/upper
+        activate_path "$consumer_generation/work" ${node.workDir} ${legacyBackup}/layers/${node.id}/work
       ''}
       for name in ${concatStringsSep " " stateNames}; do
-        activate_state_dir "$generation/layers/${node.id}/state/$name" "${node.stateDir}/$name" "${legacyBackup}/layers/${node.id}/state/$name"
+        activate_state_dir "$consumer_generation/state/$name" "${node.stateDir}/$name" "${legacyBackup}/layers/${node.id}/state/$name"
       done
     fi
   '') sortedTopology;
@@ -138,7 +151,18 @@ let
     ready=0
     if [ -n "$generation" ] && [ "$(sed -n 's/^state=//p' "$generation/metadata" 2>/dev/null)" = ready ]; then
       if [ "$(sed -n 's/^topology_sha256=//p' "$generation/metadata")" = "${topologyFingerprint}" ]; then
-        if [ ! -f "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" ] || [ "$(sed -n 's/^lower_sha256=//p' "$generation/metadata")" = "$(sha256sum "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" | awk '{print $1}')" ]; then ready=1; fi
+        metadata_graph=$(sed -n 's/^graph_sha256=//p' "$generation/metadata")
+        metadata_descriptor=$(sed -n 's/^descriptor_sha256=//p' "$generation/metadata")
+        current_descriptor="/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).overlay-topology.json"
+        identity_ready=0
+        if [ -n "$metadata_descriptor" ]; then
+          if [ -f "$current_descriptor" ] && [ "$metadata_descriptor" = "$(sha256sum "$current_descriptor" | awk '{print $1}')" ]; then identity_ready=1; fi
+        elif [ -z "$metadata_graph" ] || [ "$metadata_graph" = "${graphFingerprint}" ]; then
+          identity_ready=1
+        fi
+        if [ "$identity_ready" = 1 ]; then
+          if [ ! -f "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" ] || [ "$(sed -n 's/^lower_sha256=//p' "$generation/metadata")" = "$(sha256sum "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" | awk '{print $1}')" ]; then ready=1; fi
+        fi
       fi
     fi
     if [ "$ready" = 0 ]; then
@@ -191,13 +215,22 @@ in
 
   readyGenerationSnippet = ''
     ready_generation() {
-      local slot=$1 generation metadata dump_sha current_sha
+      local slot=$1 generation metadata dump_sha current_sha metadata_graph metadata_descriptor current_descriptor
       generation=$(readlink -f "${slotsDir}/$slot/current" 2>/dev/null || true)
       [ -n "$generation" ] && [ -d "$generation" ] || return 1
       metadata="$generation/metadata"
       [ "$(metadata_value "$metadata" state)" = "ready" ] || return 1
       [ "$(metadata_value "$metadata" slot)" = "$slot" ] || return 1
       [ "$(metadata_value "$metadata" topology_sha256)" = "${topologyFingerprint}" ] || return 1
+      metadata_graph=$(metadata_value "$metadata" graph_sha256)
+      metadata_descriptor=$(metadata_value "$metadata" descriptor_sha256)
+      current_descriptor="/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).overlay-topology.json"
+      if [ -n "$metadata_descriptor" ]; then
+        [ -f "$current_descriptor" ] || return 1
+        [ "$metadata_descriptor" = "$(sha256sum "$current_descriptor" | awk '{print $1}')" ] || return 1
+      else
+        [ -z "$metadata_graph" ] || [ "$metadata_graph" = "${graphFingerprint}" ] || return 1
+      fi
       if [ -f "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" ]; then
         dump_sha=$(metadata_value "$metadata" lower_sha256)
         current_sha=$(sha256sum "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" | awk '{print $1}')

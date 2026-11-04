@@ -63,7 +63,6 @@ in
         path = with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux systemd nix sqlite ];
         serviceConfig = {
           Type = "oneshot";
-          RemainAfterExit = true;
           TimeoutStartSec = "1h";
         };
         script = "${prepareScript} --installed";
