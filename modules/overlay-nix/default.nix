@@ -121,6 +121,8 @@ let
   topologyFingerprint = builtins.hashString "sha256" (builtins.toJSON
     (map (node: { inherit (node) id parent; }) sortedTopology));
   topologyName = concatStringsSep "," sortedNodeIds;
+  physicalLib = import ./physical.nix { inherit lib; };
+  physicalTopology = physicalLib.derive { logicalNodes = sortedTopology; };
 
   stateDir = "/var/lib/nixtache";
   runtimeState = "/run/nixtache-overlay";
@@ -369,6 +371,7 @@ let
     policy=${cfg.upperOnUpdate}
     topology=${topologyName}
     topology_sha256=${topologyFingerprint}
+    graph_sha256=${physicalTopology.generationFingerprint}
     source_slot=$source_slot
     source_generation=$source_generation
     generation=$generation
@@ -745,11 +748,15 @@ in
 
   config = mkIf cfg.enable (mkMerge [
     {
-      services.nixtache.overlay-nix._topology = {
+      services.nixtache.overlay-nix._topology = physicalTopology // {
         nodes = topologyNodes;
         byId = nodesById;
         order = sortedNodeIds;
         fingerprint = topologyFingerprint;
+        rebase = args: physicalLib.derive ({
+          logicalNodes = sortedTopology;
+          previousPhysical = physicalTopology.physical.nodes;
+        } // args);
       };
       assertions = [
         {
