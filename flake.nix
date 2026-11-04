@@ -26,6 +26,11 @@
                 eval "$(declare -f moveToOutput | sed 's/mv /cp -a /g')"
               '';
             });
+            haskellPackages = prev.haskellPackages.override (old: {
+              overrides = lib.composeExtensions (old.overrides or (_: _: { })) (_: hsPrev: {
+                pandoc-server = prev.haskell.lib.compose.dontHaddock hsPrev.pandoc-server;
+              });
+            });
           })
         ];
       };
