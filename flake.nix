@@ -21,7 +21,7 @@
         overlays = [
           (_: prev: {
             tzdata = prev.tzdata.overrideAttrs (_: { doCheck = false; });
-            gcc = prev.gcc.overrideAttrs (old: {
+            gcc-unwrapped = prev.gcc-unwrapped.overrideAttrs (old: {
               preFixup = (old.preFixup or "") + ''
                 eval "$(declare -f moveToOutput | sed 's/mv /cp -a /g')"
               '';
