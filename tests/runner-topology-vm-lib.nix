@@ -326,9 +326,13 @@ let
         )
         if blessed:
             appliance.wait_until_succeeds("systemctl is-active --quiet boot-complete.target", timeout=300)
-        for physical_id in set(EXPECTED_GRAPH["frozenLowerByLogical"].values()):
-            unit = "nixtache-overlay-frozen-" + physical_id + ".service"
-            appliance.wait_until_succeeds("systemctl is-active --quiet " + unit, timeout=300)
+        appliance.wait_until_succeeds(
+          "systemctl is-active --quiet nixtache-overlay-frozen.service", timeout=300
+        )
+        ready_requires = appliance.succeed(
+          "systemctl show nixtache-overlay-ready.target -p Requires --value"
+        )
+        assert "nixtache-overlay-frozen.service" in ready_requires.split()
         selected = selected_generation()
         for node, settings in RUNNERS.items():
             unit = "container@" + settings["containerName"] + ".service"
@@ -343,9 +347,6 @@ let
             )
             required = appliance.succeed("systemctl show " + unit + " -p Requires --value")
             assert "nixtache-overlay-ready.target" in required.split()
-            parent = "host" if settings["parent"] is None else settings["parent"]
-            frozen = EXPECTED_GRAPH["frozenLowerByLogical"][parent]
-            assert "nixtache-overlay-frozen-" + frozen + ".service" in required.split()
             options = crun(node, "findmnt -n -o OPTIONS " + q(settings["path"] + "/nix/store"))
             assert "lowerdir=" + settings["lowerRoot"] + "/nix/store" in options, options
             upper = appliance.succeed("readlink -f " + q(runtime_upper(node))).strip()
