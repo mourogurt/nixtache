@@ -131,6 +131,11 @@ jobs:
           - overlay-tree-rollback-vm
           - overlay-tree-ephemeral-host-vm
           - overlay-tree-ephemeral-a-vm
+          - overlay-topology-operations-reconcile-vm
+          - overlay-topology-operations-wipe-vm
+          - overlay-topology-operations-storage-reset-vm
+          - overlay-topology-operations-descriptor-missing-vm
+          - overlay-topology-operations-descriptor-mismatch-vm
           - runner-store-mode-vm
           - runner-builder-isolation-vm
     steps:

@@ -189,6 +189,11 @@
         overlay-tree-rollback-vm = import ./tests/overlay-tree-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
         overlay-tree-ephemeral-host-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; ephemeralNode = "host"; };
         overlay-tree-ephemeral-a-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; ephemeralNode = "a"; };
+        overlay-topology-operations-reconcile-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; scenario = "reconcile"; };
+        overlay-topology-operations-wipe-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; scenario = "wipe"; };
+        overlay-topology-operations-storage-reset-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; scenario = "storage-reset"; };
+        overlay-topology-operations-descriptor-missing-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; scenario = "descriptor-missing"; };
+        overlay-topology-operations-descriptor-mismatch-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; scenario = "descriptor-mismatch"; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style

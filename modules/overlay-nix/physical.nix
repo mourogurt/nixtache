@@ -86,11 +86,73 @@ rec {
       });
     in
     {
+      nodes = sortedLogical;
+      byId = logicalById;
+      order = map (node: node.id) sortedLogical;
       physical = {
         nodes = physicalNodes;
         byId = physicalById;
         order = map (node: node.id) physicalNodes;
       };
       inherit consumerNodeByLogical frozenLowerByLogical lineageByPhysical generationFingerprint;
+    };
+
+  transition =
+    { sourceLogical
+    , previousPhysical
+    , targetLogical
+    , policy ? "reconcile"
+    , viewFingerprints ? { }
+    }:
+    let
+      derived = derive {
+        logicalNodes = targetLogical;
+        inherit previousPhysical viewFingerprints;
+      };
+      sourceById = lib.listToAttrs (map (node: lib.nameValuePair node.id node) sourceLogical);
+      targetById = lib.listToAttrs (map (node: lib.nameValuePair node.id node) targetLogical);
+      allIds = lib.lists.unique ((map (node: node.id) sourceLogical) ++ (map (node: node.id) targetLogical));
+      operationFor = id:
+        if !(targetById ? ${id}) then
+          "remove"
+        else if !(sourceById ? ${id}) then
+          "add"
+        else if sourceById.${id}.upperDir != targetById.${id}.upperDir
+          || sourceById.${id}.stateDir != targetById.${id}.stateDir then
+          "storage-reset"
+        else if sourceById.${id}.parent != targetById.${id}.parent then
+          "reparent"
+        else if !(builtins.elem "${id}-lower" (map (node: node.id) previousPhysical))
+          && derived.physical.byId ? "${id}-lower" then
+          "promote"
+        else if sourceById.${id}.workDir != targetById.${id}.workDir
+          || (sourceById.${id}.lowerRoot or null) != (targetById.${id}.lowerRoot or null)
+          || (sourceById.${id}.containerName or null) != (targetById.${id}.containerName or null) then
+          "rewire"
+        else
+          "unchanged";
+      operations = lib.listToAttrs (map (id: lib.nameValuePair id (operationFor id)) allIds);
+      dispositionFor = node:
+        if node.role == "frozen-lower" then
+          "freeze"
+        else if policy == "wipe" then
+          "empty"
+        else if operations.${node.logicalId} == "add"
+          || operations.${node.logicalId} == "storage-reset" then
+          "empty"
+        else if node.id == "${node.logicalId}-runtime" then
+          "empty-continuation"
+        else
+          "clone-and-repair";
+      dispositions = lib.listToAttrs (map (node:
+        lib.nameValuePair node.id (dispositionFor node)
+      ) derived.physical.nodes);
+    in
+    derived // {
+      inherit operations dispositions;
+      transition = nextArgs: transition ({
+        sourceLogical = targetLogical;
+        previousPhysical = derived.physical.nodes;
+      } // nextArgs);
     };
 }

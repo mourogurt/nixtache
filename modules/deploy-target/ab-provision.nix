@@ -54,6 +54,7 @@ let
   # so it never throws on a missing option path.
   abImagePresent = builtins.hasAttr "ab-image" config.services.nixtache;
   abImage = if abImagePresent then config.services.nixtache.ab-image else { };
+  overlayCfg = config.services.nixtache.overlay-nix or { };
   imageId = abImage.imageId or "nixtache";
 
   slotA = partitions.slot_a;
@@ -91,6 +92,7 @@ let
   # consumer to override).
   haveSource = partitions.source != null;
   abImageActive = abImagePresent && (abImage.enable or false);
+  overlayActive = abImageActive && (overlayCfg.enable or false);
   srcIsUrl = haveSource && hasPrefix "http" partitions.source;
   srcPath =
     if !haveSource then "/run/nixtache-stage/"
@@ -161,6 +163,19 @@ let
       } else {
         Path = partitions.bootTarget;
       });
+    } // mkVerify;
+  };
+
+  topologyTransfer = optionalAttrs overlayActive {
+    "17-overlay-topology" = mkSource "${imageId'}_@v.overlay-topology.json" // {
+      Target = {
+        InstancesMax = 2;
+        MatchPattern = [ "${imageId'}_@v.overlay-topology.json" ];
+        Mode = "0444";
+        Path = "/EFI/nixtache";
+        PathRelativeTo = "boot";
+        Type = "regular-file";
+      };
     } // mkVerify;
   };
 
@@ -441,12 +456,13 @@ let
       exit 1
     fi
     LOWER_DB="$LOWER_DB_DIR/''${IMAGE_ID}_''${FAILED_VERSION}.lower-db"
+    TOPOLOGY_DESCRIPTOR="$LOWER_DB_DIR/''${IMAGE_ID}_''${FAILED_VERSION}.overlay-topology.json"
 
     remove_artifacts() {
       if [ "$UKI_COUNT" -eq 1 ]; then
         rm -f -- "$UKI_MATCHES"
       fi
-      rm -f -- "$LOWER_DB"
+      rm -f -- "$LOWER_DB" "$TOPOLOGY_DESCRIPTOR"
     }
 
     resolve_disk() {
@@ -844,7 +860,7 @@ in
     # ab-image). sysupdate itself is enabled here (mkDefault) so a target
     # needs no manual `systemd.sysupdate` block at all.
     systemd.sysupdate.enable = mkDefault true;
-    systemd.sysupdate.transfers = storeTransfers // bootTransfer;
+    systemd.sysupdate.transfers = storeTransfers // topologyTransfer // bootTransfer;
 
     # Signature verification spawns `gpg2` from the service's PATH. nixpkgs
     # only equips the D-Bus `systemd-sysupdated` with gnupg — the plain

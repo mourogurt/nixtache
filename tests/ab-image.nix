@@ -44,6 +44,18 @@ let
       ];
     };
 
+  mkOverlayHost = extra:
+    nixpkgs.lib.nixosSystem {
+      inherit system;
+      modules = [
+        self.nixosModules.ab-image
+        self.nixosModules.overlay-nix
+        baseModule
+        caModule
+        extra
+      ];
+    };
+
   parts = host: host.config.image.repart.partitions;
   transfers = host: host.config.systemd.sysupdate.transfers;
 
@@ -242,6 +254,36 @@ let
     };
   };
 
+  hostOverlayFixed = mkOverlayHost {
+    services.nixtache.ab-image = {
+      enable = true;
+      imageId = "h";
+      imageVersion = "1";
+      storeSize = "2G";
+      rootSize = "5G";
+    };
+    services.nixtache.overlay-nix.enable = true;
+  };
+  overlayEspContents = hostOverlayFixed.config.image.repart.partitions.esp.contents;
+  overlayDescriptorContent = overlayEspContents."/EFI/nixtache/h_1.overlay-topology.json" or null;
+  overlayTopologyTransfer = (transfers hostOverlayFixed)."17-overlay-topology" or null;
+  overlayDescriptorJson = builtins.toJSON hostOverlayFixed.config.services.nixtache.overlay-nix._topology.descriptor;
+  scenarioOverlayTopologyDescriptor = {
+    name = "overlay topology: versioned JSON descriptor ships on ESP and sysupdate with a JSON-safe logical projection";
+    checks = {
+      descriptorShipped = overlayDescriptorContent != null;
+      descriptorTransfer = overlayTopologyTransfer != null
+        && overlayTopologyTransfer.Source.MatchPattern == [ "h_@v.overlay-topology.json" ]
+        && overlayTopologyTransfer.Target.MatchPattern == [ "h_@v.overlay-topology.json" ]
+        && overlayTopologyTransfer.Target.InstancesMax == 2;
+      descriptorProjectionJsonSafe = !(lib.hasInfix "rebase" overlayDescriptorJson)
+        && lib.hasInfix "\"fingerprint\"" overlayDescriptorJson
+        && lib.hasInfix "\"nodes\"" overlayDescriptorJson;
+      plainImageOmitsDescriptor = !(builtins.hasAttr "/EFI/nixtache/h_1.overlay-topology.json" espContents)
+        && !((transfers hostFixed) ? "17-overlay-topology");
+    };
+  };
+
   scenarios = [
     scenarioFixed
     scenarioAbsoluteStoreSize
@@ -249,6 +291,7 @@ let
     scenarioSigned
     scenarioVersionFile
     scenarioLowerStoreDb
+    scenarioOverlayTopologyDescriptor
     scenarioStoreTreeFaithful
   ];
 

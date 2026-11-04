@@ -59,7 +59,7 @@ let
     name = "reconcile clones a ready active generation and resumes writers before target repair";
     checks = {
       valueIsReconcile = (cfgOf hostReconcile).upperOnUpdate == "reconcile";
-      clonesActiveGeneration = lib.hasInfix "source_dir/host" reconcileScript;
+      clonesActiveGeneration = lib.hasInfix ''"$materializer" "$stage/plan.rows" "$source_dir" "$stage"'' reconcileScript;
       quiescesWriters = lib.hasInfix "nix-daemon.socket" reconcileScript;
       verifiesPrivateTarget = lib.hasInfix "unshare -m --propagation private" reconcileScript;
       readinessIsExplicit = lib.hasInfix "state=unready" reconcileScript
@@ -116,6 +116,74 @@ let
   };
   topologyWithLayers = layers: (cfgOf (hostWithLayers layers))._topology;
   posOf = pat: s: lib.stringLength (builtins.head (lib.splitString pat s));
+  indexOf = id: values: let
+    go = index: remaining:
+      if remaining == [ ] then -1
+      else if builtins.head remaining == id then index
+      else go (index + 1) (builtins.tail remaining);
+  in go 0 values;
+
+  descriptorValidator = builtins.head (lib.splitString "\n"
+    (builtins.elemAt (lib.splitString "descriptor_validator=" prepareScript) 1));
+  descriptorLowerSha = builtins.concatStringsSep "" (lib.genList (_: "a") 64);
+  otherLowerSha = builtins.concatStringsSep "" (lib.genList (_: "b") 64);
+  validDescriptor = pkgs.writeText "valid-overlay-topology.json" (builtins.toJSON {
+    schema = "nixtache.overlay-topology/v1";
+    imageId = "nixtache";
+    imageVersion = "1";
+    lowerDbSha256 = descriptorLowerSha;
+    logicalTopology = (cfgOf hostDefault)._topology.descriptor;
+  });
+  malformedDescriptor = pkgs.writeText "malformed-overlay-topology.json" "{";
+  wrongSchemaDescriptor = pkgs.writeText "wrong-schema-overlay-topology.json" (builtins.toJSON ({
+    schema = "nixtache.overlay-topology/v1";
+    imageId = "nixtache";
+    imageVersion = "1";
+    lowerDbSha256 = descriptorLowerSha;
+    logicalTopology = (cfgOf hostDefault)._topology.descriptor;
+  } // { schema = "other/v1"; }));
+  wrongGraphDescriptor = pkgs.writeText "wrong-graph-overlay-topology.json" (builtins.toJSON {
+    schema = "nixtache.overlay-topology/v1";
+    imageId = "nixtache";
+    imageVersion = "1";
+    lowerDbSha256 = descriptorLowerSha;
+    logicalTopology = (cfgOf hostDefault)._topology.descriptor // {
+      fingerprint = otherLowerSha;
+    };
+  });
+  descriptorValidationCheck = pkgs.runCommand "overlay-descriptor-validation-test" {
+    inherit descriptorValidator validDescriptor malformedDescriptor wrongSchemaDescriptor wrongGraphDescriptor;
+    inherit descriptorLowerSha otherLowerSha;
+  } ''
+    set -euo pipefail
+    "$descriptorValidator" "$validDescriptor" 1 "$descriptorLowerSha"
+    expect_failure() {
+      local name=$1
+      shift
+      if "$@" >"/tmp/$name.log" 2>&1; then
+        echo "descriptor case unexpectedly passed: $name" >&2
+        exit 1
+      fi
+    }
+    expect_failure missing "$descriptorValidator" /does-not-exist.overlay-topology.json 1 "$descriptorLowerSha"
+    expect_failure malformed "$descriptorValidator" "$malformedDescriptor" 1 "$descriptorLowerSha"
+    expect_failure schema "$descriptorValidator" "$wrongSchemaDescriptor" 1 "$descriptorLowerSha"
+    expect_failure image "$descriptorValidator" "$validDescriptor" 2 "$descriptorLowerSha"
+    expect_failure lower "$descriptorValidator" "$validDescriptor" 1 "$otherLowerSha"
+    expect_failure graph "$descriptorValidator" "$wrongGraphDescriptor" 1 "$descriptorLowerSha"
+    touch "$out"
+  '';
+  scenarioDescriptorValidation = {
+    name = "target descriptors are validated before staging and bound into readiness metadata";
+    checks = {
+      missingAndMalformedRejected = lib.isDerivation descriptorValidationCheck;
+      descriptorHashRecorded = lib.hasInfix "descriptor_sha256" prepareScript;
+      logicalFingerprintValidated = lib.isDerivation plannerTransitionCheck;
+      imageAndLowerValidated = lib.isDerivation descriptorValidationCheck;
+      validationBeforeStaging = (posOf ''"$descriptor_validator" "$target_descriptor"'' prepareScript)
+        < (posOf ''mkdir -p "$slot_dir/generations"'' prepareScript);
+    };
+  };
 
   scenarioPublicLayersRejected = {
     name = "low-level overlay layers are not a consumer-facing option";
@@ -125,42 +193,45 @@ let
   };
 
   siblingScript = scriptWithLayers [ (layer "a" null) (layer "b" null) ];
-  siblingNamespace = namespaceWithLayers [ (layer "a" null) (layer "b" null) ];
   siblingSelection = selectWithLayers [ (layer "a" null) (layer "b" null) ];
   siblingTopology = topologyWithLayers [ (layer "a" null) (layer "b" null) ];
   scenarioSiblings = {
     name = "sibling overlays share the host parent and one atomic readiness result";
     checks = {
-      stagesBoth = lib.hasInfix "$stage/layers/a" siblingScript
-        && lib.hasInfix "$stage/layers/b" siblingScript;
-      hostFirst = (posOf "repair_store \"$host_url\"" siblingNamespace)
-        < (posOf "lower-states/a" siblingNamespace)
-        && (posOf "repair_store \"$host_url\"" siblingNamespace)
-          < (posOf "lower-states/b" siblingNamespace);
-      activatesBoth = lib.hasInfix "$generation/layers/a/upper" siblingSelection
-        && lib.hasInfix "$generation/layers/b/upper" siblingSelection;
-      topologyFingerprinted = lib.hasInfix "topology_sha256=" siblingScript;
+      stagesBoth = lib.isDerivation plannerTransitionCheck;
+      hostFirst = indexOf "host-lower" siblingTopology.physical.order
+        < indexOf "a" siblingTopology.physical.order
+        && indexOf "host-runtime" siblingTopology.physical.order
+          < indexOf "b" siblingTopology.physical.order;
+      activatesBoth = lib.hasInfix "$generation/nodes/a" siblingSelection
+        && lib.hasInfix "$generation/nodes/b" siblingSelection
+        && lib.hasInfix "$generation/layers/a" siblingSelection
+        && lib.hasInfix "$generation/layers/b" siblingSelection;
+      topologyFingerprinted = lib.hasInfix "plan.metadata" siblingScript
+        && lib.isDerivation plannerTransitionCheck;
       derivedNodeIds = lib.sort (a: b: a < b) (map (node: node.id) siblingTopology.nodes) == [ "a" "b" "host" ];
       derivedParents = siblingTopology.byId.a.parent == null && siblingTopology.byId.b.parent == null;
     };
   };
 
   nestedScript = namespaceWithLayers [ (layer "middle" null) (layer "leaf" "middle") ];
-  nestedPrepare = scriptWithLayers [ (layer "middle" null) (layer "leaf" "middle") ];
+  nestedTopology = topologyWithLayers [ (layer "middle" null) (layer "leaf" "middle") ];
   scenarioNested = {
     name = "nested overlay consumes the prepared middle store and metadata";
     checks = {
-      middleBeforeLeaf = (posOf "lower-states/middle" nestedScript)
-        < (posOf "lower-states/leaf" nestedScript);
-      leafUsesMiddle = lib.hasInfix "lower-states/middle" nestedScript
-        && lib.hasInfix "lowerdir=\"$scratch/layers/middle/nix/store\"" nestedScript;
-      leafHasOwnState = lib.hasInfix "$stage/layers/leaf/state" nestedPrepare;
-      finalWholeTreeCheck = lib.hasInfix "check_store \"$host_url\" \"$host_root\"" nestedScript
-        && lib.hasInfix "check_store \"$node_url\" \"$node_root\"" nestedScript;
+      middleBeforeLeaf = indexOf "middle-lower" nestedTopology.physical.order
+        < indexOf "leaf" nestedTopology.physical.order
+        && indexOf "middle-runtime" nestedTopology.physical.order
+          < indexOf "leaf" nestedTopology.physical.order;
+      leafUsesMiddle = nestedTopology.physical.byId.leaf.parent == "middle-lower"
+        && lib.hasInfix "parent_root=\"$(physical_root \"$parent\")/nix/store\"" nestedScript;
+      leafHasOwnState = lib.hasInfix ''destination="$stage/nodes/$physical_id"'' materializerSource;
+      finalWholeTreeCheck = lib.hasInfix "check_store \"$node_url\" \"$node_root\"" nestedScript
+        && lib.hasInfix "unmount_all" nestedScript;
     };
   };
 
-  composedScript = namespaceWithLayers [
+  composedTopology = topologyWithLayers [
     (layer "a" null)
     (layer "b" null)
     (layer "grand" "a")
@@ -168,13 +239,15 @@ let
   scenarioComposed = {
     name = "composed sibling and nested graph is prepared parent-before-child";
     checks = {
-      aBeforeGrand = (posOf "lower-states/a" composedScript)
-        < (posOf "lower-states/grand" composedScript);
-      hostBeforeSiblings = (posOf "repair_store \"$host_url\"" composedScript)
-        < (posOf "lower-states/a" composedScript)
-        && (posOf "repair_store \"$host_url\"" composedScript)
-          < (posOf "lower-states/b" composedScript);
-      grandUsesA = lib.hasInfix "lower-states/a" composedScript;
+      aBeforeGrand = indexOf "a-lower" composedTopology.physical.order
+        < indexOf "grand" composedTopology.physical.order
+        && indexOf "a-runtime" composedTopology.physical.order
+          < indexOf "grand" composedTopology.physical.order;
+      hostBeforeSiblings = indexOf "host-lower" composedTopology.physical.order
+        < indexOf "a-lower" composedTopology.physical.order
+        && indexOf "host-runtime" composedTopology.physical.order
+          < indexOf "b" composedTopology.physical.order;
+      grandUsesA = composedTopology.physical.byId.grand.parent == "a-lower";
     };
   };
 
@@ -255,6 +328,131 @@ let
       movedLineageChanges = reparented.lineageByPhysical.e != unrelatedTopology.lineageByPhysical.e;
       unrelatedStable = reparented.lineageByPhysical.c == unrelatedTopology.lineageByPhysical.c;
       graphFingerprintChanges = reparented.generationFingerprint != unrelatedTopology.generationFingerprint;
+    };
+  };
+
+  operationSource = topologyWithLayers [ (layer "b" null) (layer "e" null) ];
+  addedChild = operationSource.transition {
+    targetLogical = (topologyWithLayers [
+      (layer "b" null)
+      (layer "c" "b")
+      (layer "e" null)
+    ]).nodes;
+    policy = "reconcile";
+  };
+  movedBranch = addedChild.transition {
+    targetLogical = (topologyWithLayers [
+      (layer "b" null)
+      (layer "c" "b")
+      ((layer "e" null) // { parent = "b"; })
+    ]).nodes;
+    policy = "reconcile";
+  };
+  removedBranch = movedBranch.transition {
+    targetLogical = (topologyWithLayers [
+      (layer "b" null)
+      (layer "c" "b")
+    ]).nodes;
+    policy = "reconcile";
+  };
+  changedStorage = operationSource.transition {
+    targetLogical = (topologyWithLayers [
+      ((layer "b" null) // { upperDir = "/var/lib/layers/b/new-upper"; })
+      ((layer "e" null) // { workDir = "/var/lib/layers/e/new-work"; })
+    ]).nodes;
+    policy = "reconcile";
+  };
+  wipedStorage = changedStorage.transition {
+    targetLogical = changedStorage.nodes;
+    policy = "wipe";
+  };
+  addedSibling = addedChild.transition {
+    targetLogical = (topologyWithLayers [
+      (layer "b" null)
+      (layer "c" "b")
+      (layer "d" "b")
+      (layer "e" null)
+    ]).nodes;
+    policy = "reconcile";
+  };
+  wipedChild = operationSource.transition {
+    targetLogical = addedChild.nodes;
+    policy = "wipe";
+  };
+  descriptorNode = node: {
+    inherit (node) id parent upperDir workDir stateDir lowerRoot;
+  } // lib.optionalAttrs (node ? containerName) {
+    inherit (node) containerName;
+  } // lib.optionalAttrs (node ? isSingleton) {
+    inherit (node) isSingleton;
+  };
+  logicalDescriptorFor = nodes: {
+    fingerprint = builtins.hashString "sha256" (builtins.toJSON
+      (map (node: { inherit (node) id parent; }) nodes));
+    order = map (node: node.id) nodes;
+    nodes = map descriptorNode nodes;
+  };
+  graphProjection = transition: {
+    inherit (transition) nodes byId order physical consumerNodeByLogical;
+    inherit (transition) frozenLowerByLogical lineageByPhysical generationFingerprint;
+  };
+  transitionProjection = transition: graphProjection transition // {
+    inherit (transition) operations dispositions;
+  };
+  plannerCase = source: target: policy: {
+    source = logicalDescriptorFor source.nodes;
+    target = logicalDescriptorFor target.nodes;
+    sourcePhysical = source.physical.nodes;
+    sourceConsumer = source.consumerNodeByLogical;
+    sourceExpected = graphProjection source;
+    inherit policy;
+    expected = transitionProjection target;
+  };
+  plannerOracleBundle = pkgs.writeText "overlay-transition-oracles.json" (builtins.toJSON {
+    cases = {
+      add-first-child = plannerCase operationSource addedChild "reconcile";
+      add-sibling = plannerCase addedChild addedSibling "reconcile";
+      reparent = plannerCase addedChild movedBranch "reconcile";
+      remove = plannerCase movedBranch removedBranch "reconcile";
+      storage-reset = plannerCase operationSource changedStorage "reconcile";
+      wipe = plannerCase operationSource wipedChild "wipe";
+    };
+  });
+  scriptAssignment = name: builtins.head (lib.splitString "\n"
+    (builtins.elemAt (lib.splitString "\n${name}=" prepareScript) 1));
+  planner = scriptAssignment "planner";
+  materializer = scriptAssignment "materializer";
+  materializerSource = builtins.readFile materializer;
+  plannerTransitionCheck = pkgs.runCommand "overlay-transition-test" {
+    inherit plannerOracleBundle planner materializer;
+  } ''
+    export OVERLAY_PLANNER=$planner
+    export OVERLAY_MATERIALIZER=$materializer
+    export OVERLAY_NIX_STORE=${pkgs.nix}/bin/nix-store
+    export OVERLAY_ORACLE_BUNDLE=$plannerOracleBundle
+    ${pkgs.python3}/bin/python3 ${./overlay-nix-transition-test.py}
+    touch "$out"
+  '';
+  scenarioTransitionOperations = {
+    name = "source-to-target transitions preserve eligible branches and classify topology operations";
+    checks = {
+      addition = addedChild.operations.c == "add";
+      firstChildPromotion = addedChild.operations.b == "promote";
+      continuationStartsEmpty = addedChild.dispositions."b-runtime" == "empty-continuation";
+      unrelatedStateRetained = addedChild.dispositions.e == "clone-and-repair";
+      reparent = movedBranch.operations.e == "reparent";
+      movedStateRetained = movedBranch.dispositions.e == "clone-and-repair";
+      removal = removedBranch.operations.e == "remove";
+      storageReset = changedStorage.operations.b == "storage-reset";
+      workRewire = changedStorage.operations.e == "rewire";
+      storageResetStartsEmpty = changedStorage.dispositions.b == "empty";
+      wipeStartsEmpty = wipedStorage.dispositions.b == "empty" && wipedStorage.dispositions.e == "empty";
+      wipeKeepsGraph = wipedStorage.generationFingerprint == changedStorage.generationFingerprint;
+      wipeOperationKeepsGraph = wipedChild.generationFingerprint == addedChild.generationFingerprint;
+      runtimePlannerMatchesAndExecutes = lib.isDerivation plannerTransitionCheck;
+      selectionUsesPublishedPhysical = lib.hasInfix ''consumer_generation="$generation/nodes/$physical_id"'' siblingSelection;
+      descriptorReadinessAllowsRetainedSplits = (posOf ''if [ -n "$metadata_descriptor" ]; then'' siblingSelection)
+        < (posOf ''elif [ -z "$metadata_graph" ]'' siblingSelection);
     };
   };
 
@@ -353,6 +551,7 @@ let
     scenarioDefault
     scenarioReconcile
     scenarioWipe
+    scenarioDescriptorValidation
     scenarioPublicLayersRejected
     scenarioSiblings
     scenarioNested
@@ -362,6 +561,7 @@ let
     scenarioGenerationRebase
     scenarioRemovalWithoutCollapse
     scenarioReparentLineage
+    scenarioTransitionOperations
     scenarioDuplicateRejected
     scenarioMissingParentRejected
     scenarioCycleRejected
@@ -387,6 +587,7 @@ in
 pkgs.runCommand "overlay-nix-module-test"
   {
     inherit report failMsg;
+    deps = [ descriptorValidationCheck plannerTransitionCheck ];
     passAsFile = [ "report" "failMsg" ];
   }
   ''

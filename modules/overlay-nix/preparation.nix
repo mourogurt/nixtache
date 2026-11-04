@@ -16,96 +16,49 @@ with lib;
 
 let
   topology = cfg._topology;
-  physicalTopology = topology;
-  topologyFingerprint = topology.fingerprint;
-  topologyName = concatStringsSep "," topology.order;
-  nodesById = topology.byId;
-  sortedTopology = map (id: nodesById.${id}) topology.order;
   runnerLayers = filter (node: node ? containerName) topology.nodes;
   runnerContainerUnits = map (node: "container@${node.containerName}.service") runnerLayers;
   runnerContainer = concatStringsSep " " runnerContainerUnits;
 
-  nodeStage = node: if node.id == "host" then "$stage/host" else "$stage/layers/${node.id}";
-  parentId = node: if node.parent == null then "host" else node.parent;
-  nodeRoot = node: if node.id == "host" then "$host_root" else "$scratch/layers/${node.id}";
-  nodeMountLower = node: if parentId node == "host"
-    then "${nodeStage nodesById.host}/upper:$lower_store"
-    else "$scratch/layers/${parentId node}/nix/store";
-  unmountAllSnippet = concatMapStrings (node: ''
-    if mountpoint -q ${nodeRoot node}/nix/store; then umount ${nodeRoot node}/nix/store; fi
-  '') (reverseList sortedTopology);
-  urlExpression = ownId: node: root:
-    let
-      state = if node.id == ownId then "${nodeStage node}/state" else "$scratch/lower-states/${node.id}";
-      lower = if node.id == "host" then "$lower_url" else "$(uri_encode \"${urlExpression ownId (nodesById.${parentId node}) (nodeRoot (nodesById.${parentId node}))}\")";
-    in
-    "local-overlay://?root=${root}&state=${state}&lower-store=${lower}&upper-layer=${nodeStage node}/upper&ignore-gc-delete-failure=true&check-mount=false";
-
-  encodeStoreUri = ''
-    uri_encode() {
-      local value=$1
-      value=''${value//%/%25}
-      value=''${value//\?/%3F}
-      value=''${value//&/%26}
-      value=''${value//=/%3D}
-      printf '%s' "$value"
-    }
+  plannerSource = pkgs.writeText "nixtache-overlay-planner.py" (builtins.readFile ./planner.py);
+  planner = pkgs.writeShellScript "nixtache-overlay-planner" ''
+    exec ${pkgs.python3}/bin/python3 ${plannerSource} "$@"
+  '';
+  descriptorValidator = pkgs.writeShellScript "nixtache-overlay-validate-descriptor" ''
+    exec ${planner} validate --image-id ${escapeShellArg imageId} "$@"
   '';
 
-  stageLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
-    mkdir -p "${nodeStage node}/upper" "${nodeStage node}/work" "${nodeStage node}/state"
-  '') sortedTopology;
-
-  cloneLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
-    source_path=${"$source_dir"}/layers/${node.id}
-    ${optionalString (node.isSingleton or false) ''
-      if [ ! -d "$source_path" ]; then source_path=${"$source_dir"}/runner; fi
-    ''}
-    copy_layer "$source_path" "${nodeStage node}"
-    copy_state "$source_path/state" "${nodeStage node}/state"
-  '') sortedTopology;
-
-  initialLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
-    copy_layer ${node.upperDir} "${nodeStage node}"
-    copy_state ${node.stateDir} "${nodeStage node}/state"
-  '') sortedTopology;
-
-  namespaceLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
-    node_root="$scratch/layers/${node.id}"
-    node_stage="${nodeStage node}"
-    mkdir -p "$node_root/nix/store"
-    ${optionalString (parentId node == "host") "unmount_all"}
-    mount -t overlay overlay -o lowerdir="${nodeMountLower node}",upperdir="$node_stage/upper",workdir="$node_stage/work" "$node_root/nix/store"
-    node_url="${urlExpression node.id node "$node_root"}"
-    echo "nixtache-overlay: repairing ${node.id}"
-    repair_store "$node_url" "$node_stage/state" "$node_root"
-    mkdir -p "$scratch/lower-states/${node.id}"
-    cp -a "$node_stage/state/." "$scratch/lower-states/${node.id}/"
-    echo "nixtache-overlay: prepared ${node.id}"
-  '') sortedTopology;
-
-  checkLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
-    node_root="$scratch/layers/${node.id}"
-    node_stage="${nodeStage node}"
-    ${optionalString (parentId node == "host") "unmount_all"}
-    mount -t overlay overlay -o lowerdir="${nodeMountLower node}",upperdir="$node_stage/upper",workdir="$node_stage/work" "$node_root/nix/store"
-    node_url="${urlExpression node.id node "$node_root"}"
-    echo "nixtache-overlay: checking ${node.id}"
-    check_store "$node_url" "$node_root"
-  '') sortedTopology;
-
-  prepareScript = pkgs.writeShellScript "nixtache-overlay-prepare" ''
+  materializeScript = pkgs.writeShellScript "nixtache-overlay-materialize" ''
     set -euo pipefail
-    export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix sqlite systemd ])}
-
-    mode=''${1:---installed}
-    mkdir -p ${runtimeState} ${slotsDir}
-
-    ${discoverySnippet}
-
-    ${metadataValueSnippet}
-
-    ${readyGenerationSnippet}
+    export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils nix util-linux ])}
+    if [ "$#" -ne 5 ]; then
+      echo "usage: nixtache-overlay-materialize <rows> <source> <stage> <policy> <initial>" >&2
+      exit 2
+    fi
+    rows=$1
+    source_dir=$2
+    stage=$3
+    policy=$4
+    initial=$5
+    merge_scratch=$(mktemp -d "''${TMPDIR:-/tmp}/nixtache-overlay-materialize.XXXXXX")
+    trap 'rm -rf "$merge_scratch"' EXIT
+    mkdir -p "$stage/nodes" "$stage/layers" "$stage/host/lower-state" "$merge_scratch/root/nix/store"
+    declare -A ephemeral
+    : > "$stage/persistent-plan.rows"
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton <<< "$row"
+      if [ "$parent" != - ] && [ "''${ephemeral[$parent]:-0}" = 1 ]; then
+        ephemeral[$physical_id]=1
+      elif [ "$role" = runtime ] && [ "$(findmnt -T "$upper_dir" -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
+        ephemeral[$physical_id]=1
+      else
+        ephemeral[$physical_id]=0
+      fi
+      if [ "''${ephemeral[$physical_id]}" = 0 ]; then
+        printf '%s\n' "$row" >> "$stage/persistent-plan.rows"
+      fi
+    done < "$rows"
 
     copy_state() {
       local source=$1 destination=$2 name
@@ -126,8 +79,140 @@ let
         cp -a --reflink=auto "$source/upper/." "$destination/upper/"
       elif [ -d "$source" ]; then
         cp -a --reflink=auto "$source/." "$destination/upper/"
+      else
+        echo "nixtache-overlay: source upper is missing: $source" >&2
+        return 1
       fi
     }
+
+    merge_state() {
+      local source=$1 destination=$2 name
+      mkdir -p "$destination"
+      if [ -f "$source/db/db.sqlite" ]; then
+        mkdir -p "$destination/db"
+        nix-store --option experimental-features "read-only-local-store" \
+          --store "local?root=$merge_scratch/root&state=$source&read-only=true" --dump-db |
+          nix-store --option experimental-features "ca-derivations" \
+            --store "local?root=$merge_scratch/root&state=$destination" --load-db
+      fi
+      for name in gcroots profiles temproots; do
+        mkdir -p "$destination/$name"
+        if [ -d "$source/$name" ]; then
+          cp -a --reflink=auto "$source/$name/." "$destination/$name/"
+        fi
+      done
+    }
+
+    copy_whole() {
+      local source=$1 destination=$2
+      copy_layer "$source" "$destination"
+      copy_state "$source/state" "$destination/state"
+    }
+
+    merge_whole() {
+      local source=$1 destination=$2
+      copy_layer "$source" "$destination"
+      merge_state "$source/state" "$destination/state"
+    }
+
+    find_source() {
+      local physical_id=$1 logical_id=$2 singleton=$3 candidate
+      for candidate in "$source_dir/nodes/$physical_id" "$source_dir/layers/$logical_id"; do
+        if [ -d "$candidate" ]; then
+          printf '%s\n' "$candidate"
+          return 0
+        fi
+      done
+      if [ "$logical_id" = host ] && [ -d "$source_dir/host" ]; then
+        printf '%s\n' "$source_dir/host"
+        return 0
+      fi
+      if [ "$singleton" = 1 ] && [ -d "$source_dir/runner" ]; then
+        printf '%s\n' "$source_dir/runner"
+        return 0
+      fi
+      echo "nixtache-overlay: source physical node $physical_id for $logical_id is missing" >&2
+      return 1
+    }
+
+    copy_legacy() {
+      local upper=$1 state=$2 destination=$3
+      copy_layer "$upper" "$destination"
+      copy_state "$state" "$destination/state"
+    }
+
+    while IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton; do
+      [ -n "$physical_id" ] || continue
+      if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
+        destination="$stage/host"
+      else
+        destination="$stage/nodes/$physical_id"
+      fi
+      mkdir -p "$destination/upper" "$destination/work" "$destination/state"
+      if [ "$initial" = 1 ]; then
+        if [ "$role" = frozen-lower ]; then
+          copy_legacy "$upper_dir" "$state_dir" "$destination"
+        elif [ "$disposition" != empty-continuation ]; then
+          copy_legacy "$upper_dir" "$state_dir" "$destination"
+        fi
+      elif [ "$policy" = reconcile ] && [ "$operation" != add ] && [ "$operation" != storage-reset ]; then
+        if [ "$role" = frozen-lower ]; then
+          if [ "$source_frozen" != - ]; then
+            source_path=$(find_source "$source_frozen" "$logical_id" 0)
+            copy_whole "$source_path" "$destination"
+            source_path=$(find_source "$source_consumer" "$logical_id" "$singleton")
+            merge_whole "$source_path" "$destination"
+          else
+            source_path=$(find_source "$source_consumer" "$logical_id" "$singleton")
+            copy_whole "$source_path" "$destination"
+          fi
+        elif [ "$disposition" = clone-and-repair ]; then
+          source_path=$(find_source "$source_consumer" "$logical_id" "$singleton")
+          copy_whole "$source_path" "$destination"
+        fi
+      fi
+    done < "$stage/persistent-plan.rows"
+
+    while IFS='|' read -r physical_id logical_id role rest; do
+      [ -n "$physical_id" ] || continue
+      [ "$role" = runtime ] || continue
+      if [ "$logical_id" = host ]; then
+        ln -s ../host "$stage/nodes/$physical_id"
+      else
+        ln -s "../nodes/$physical_id" "$stage/layers/$logical_id"
+      fi
+    done < "$stage/persistent-plan.rows"
+  '';
+
+  encodeStoreUri = ''
+    uri_encode() {
+      local value=$1
+      value=''${value//%/%25}
+      value=''${value//\?/%3F}
+      value=''${value//&/%26}
+      value=''${value//\=/%3D}
+      printf '%s' "$value"
+    }
+  '';
+
+  prepareScript = pkgs.writeShellScript "nixtache-overlay-prepare" ''
+    set -euo pipefail
+    export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix sqlite systemd ])}
+
+    mode=''${1:---installed}
+    descriptor_validator=${descriptorValidator}
+    planner=${planner}
+    materializer=${materializeScript}
+    mkdir -p ${runtimeState}
+    if [ "$(findmnt -T ${cfg.upperDir} -n -o FSTYPE 2>/dev/null || echo unknown)" != tmpfs ]; then
+      mkdir -p ${slotsDir}
+    fi
+
+    ${discoverySnippet}
+
+    ${metadataValueSnippet}
+
+    ${readyGenerationSnippet}
 
     quiesced=0
     stopped_units=""
@@ -157,45 +242,57 @@ let
 
     prepare_chain() {
       local target_slot=$1 target_version=$2 target_device=$3 source_slot=$4 source_generation=$5 initial=$6
-      local target_dump scratch lower_root lower_store host_root runner_root host_url runner_url lower_url
+      local target_dump target_descriptor lower_sha descriptor_sha scratch lower_root lower_store source_dir current_before
       slot_dir="${slotsDir}/$target_slot"
       generation="$(date +%Y%m%d%H%M%S)-$$"
       stage="$slot_dir/.staging-$generation"
       target_dump="/boot/EFI/nixtache/${imageId}_$target_version.lower-db"
       [ -f "$target_dump" ] || { echo "nixtache-overlay: target lower dump is missing: $target_dump" >&2; return 1; }
       [ "$target_slot" != "$source_slot" ] || [ "$initial" = 1 ] || { echo "nixtache-overlay: active and target slots must differ" >&2; return 1; }
+      lower_sha=$(sha256sum "$target_dump" | awk '{print $1}')
+      target_descriptor="/boot/EFI/nixtache/${imageId}_$target_version.overlay-topology.json"
+      "$descriptor_validator" "$target_descriptor" "$target_version" "$lower_sha"
+      descriptor_sha=$(sha256sum "$target_descriptor" | awk '{print $1}')
+      if [ "$(findmnt -T ${cfg.upperDir} -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
+        printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
+        printf 'ephemeral\n' > "${runtimeState}/prepared-generation"
+        printf '%s\n' "$source_slot:ephemeral" > "${runtimeState}/prepared-source"
+        trap - EXIT
+        return 0
+      fi
+      mkdir -p "$slot_dir"
+      exec {prepare_lock_fd}> "$slot_dir/.prepare.lock"
+      flock -x "$prepare_lock_fd"
+      current_before=$(readlink -f "$slot_dir/current" 2>/dev/null || true)
+      if [ -n "$current_before" ] && [ -f "$current_before/plan.json" ] \
+        && [ "$(metadata_value "$current_before/metadata" state)" = ready ] \
+        && [ "$(metadata_value "$current_before/metadata" lower_sha256)" = "$lower_sha" ] \
+        && [ "$(metadata_value "$current_before/metadata" descriptor_sha256)" = "$descriptor_sha" ] \
+        && { [ ! -f "${runtimeState}/prepared-generation" ] \
+          || [ "$(cat "${runtimeState}/prepared-generation")" != "$(basename "$current_before")" ]; }; then
+        printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
+        printf '%s\n' "$(basename "$current_before")" > "${runtimeState}/prepared-generation"
+        printf '%s\n' "$source_slot:$source_generation" > "${runtimeState}/prepared-source"
+        trap - EXIT
+        return 0
+      fi
       mkdir -p "$slot_dir/generations"
       rm -rf "$slot_dir"/.staging-*
       while read -r old; do
         [ -n "$old" ] || continue
-        if [ "$(metadata_value "$old/metadata" state)" != "ready" ]; then rm -rf "$old"; fi
+        if [ "$old" = "$current_before" ]; then continue; fi
+        rm -rf "$old"
       done < <(find "$slot_dir/generations" -mindepth 1 -maxdepth 1 -type d)
-      mkdir -p "$slot_dir/generations/$generation"
-      cat > "$slot_dir/generations/$generation/metadata" <<EOF
-    slot=$target_slot
-    image_id=${imageId}
-    image_version=$target_version
-    lower_sha256=$(sha256sum "$target_dump" | awk '{print $1}')
-    policy=${cfg.upperOnUpdate}
-    topology=${topologyName}
-    topology_sha256=${topologyFingerprint}
-    graph_sha256=${physicalTopology.generationFingerprint}
-    source_slot=$source_slot
-    source_generation=$source_generation
-    generation=$generation
-    state=unready
-    EOF
-      mkdir -p "$stage/host/upper" "$stage/host/work" "$stage/host/state" "$stage/host/lower-state"
-      ${stageLayerSnippets}
-      cp "$slot_dir/generations/$generation/metadata" "$stage/metadata"
-
-      if [ "$initial" = 1 ]; then
-        copy_layer ${cfg.upperDir} "$stage/host"
-        copy_state /nix/var/nix "$stage/host/state"
-        ${initialLayerSnippets}
-      elif [ "${cfg.upperOnUpdate}" = "reconcile" ]; then
+      mkdir -p "$slot_dir/generations/$generation" "$stage"
+      cp "$target_descriptor" "$stage/overlay-topology.json"
+      source_dir=""
+      if [ "$initial" != 1 ] && [ -n "$source_slot" ]; then
         source_dir=$(readlink -f "${slotsDir}/$source_slot/generations/$source_generation")
-        [ "$(metadata_value "$source_dir/metadata" state)" = "ready" ] || { echo "nixtache-overlay: reconcile source is not ready" >&2; return 1; }
+        [ "$(metadata_value "$source_dir/metadata" state)" = "ready" ] || { echo "nixtache-overlay: transition source is not ready" >&2; return 1; }
+        [ -d "$source_dir/host" ] || { echo "nixtache-overlay: transition source has no host consumer" >&2; return 1; }
+      fi
+      if [ "${cfg.upperOnUpdate}" = reconcile ] && [ "$initial" != 1 ]; then
+        [ -n "$source_dir" ] || { echo "nixtache-overlay: reconcile source is unavailable" >&2; return 1; }
         if [ "$mode" = "--installed" ]; then
           for unit in ${runnerContainer} nix-daemon.service nix-daemon.socket; do
             if systemctl is-active --quiet "$unit"; then
@@ -205,23 +302,47 @@ let
           done
           quiesced=1
         fi
-        copy_layer "$source_dir/host" "$stage/host"
-        copy_state "$source_dir/host/state" "$stage/host/state"
-        ${cloneLayerSnippets}
-        resume_writers
       fi
+      plan_args=(
+        --target-descriptor "$target_descriptor"
+        --image-id ${imageId}
+        --image-version "$target_version"
+        --lower-sha256 "$lower_sha"
+        --policy ${cfg.upperOnUpdate}
+        --output-json "$stage/plan.json"
+        --output-rows "$stage/plan.rows"
+        --output-metadata "$stage/plan.metadata"
+      )
+      if [ -n "$source_dir" ]; then
+        plan_args+=(--source-root "$source_dir" --allow-legacy-source)
+      else
+        plan_args+=(--initial)
+      fi
+      "$planner" plan "''${plan_args[@]}"
+      {
+        printf 'slot=%s\n' "$target_slot"
+        cat "$stage/plan.metadata"
+        printf 'descriptor_sha256=%s\n' "$descriptor_sha"
+        printf 'generation=%s\nstate=unready\n' "$generation"
+      } > "$slot_dir/generations/$generation/metadata"
+      cat >> "$slot_dir/generations/$generation/metadata" <<EOF
+    source_slot=$source_slot
+    source_generation=$source_generation
+    EOF
+      cp "$slot_dir/generations/$generation/metadata" "$stage/metadata"
+      "$materializer" "$stage/plan.rows" "$source_dir" "$stage" ${cfg.upperOnUpdate} "$initial"
+      resume_writers
 
       scratch=$(mktemp -d /run/nixtache-overlay/prepare.XXXXXX)
       lower_root="$scratch/lower"
       lower_store="$lower_root/nix/store"
-      host_root="$scratch/host"
-      mkdir -p "$lower_store" "$host_root/nix/store"
-      export target_device scratch lower_root lower_store host_root stage target_dump
-      # The target lower and both writable layers are private to this namespace.
+      mkdir -p "$lower_store"
+      export target_device scratch lower_root lower_store stage target_dump
       unshare -m --propagation private ${pkgs.writeShellScript "nixtache-overlay-verify-namespace" ''
         set -euo pipefail
         export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix ])}
-            ${encodeStoreUri}
+        ${encodeStoreUri}
+        rows="$stage/persistent-plan.rows"
         if [ "$target_device" = "BOOTED" ]; then
           mount --bind /nix/store "$lower_store"
           mount -o remount,ro,bind "$lower_store"
@@ -233,25 +354,131 @@ let
         mount -t overlay overlay -o lowerdir="$lower_store",upperdir="$seed/upper",workdir="$seed/work" "$lower_store"
         nix-store --option experimental-features "ca-derivations" --store "local?root=$lower_root&state=$stage/host/lower-state" --load-db < "$target_dump"
         umount "$lower_store"
-        mount -t overlay overlay -o lowerdir="$lower_store",upperdir="$stage/host/upper",workdir="$stage/host/work" "$host_root/nix/store"
         lower_url=$(uri_encode "local?root=$lower_root&state=$stage/host/lower-state&read-only=true")
-        host_url="${urlExpression "host" nodesById.host "$host_root"}"
+
+        physical_stage() {
+          local physical_id=$1 logical_id=$2 role=$3
+          if [ "$role" = runtime ]; then
+            if [ "$logical_id" = host ]; then
+              printf '%s\n' "$stage/host"
+            else
+              printf '%s\n' "$stage/layers/$logical_id"
+            fi
+          else
+            printf '%s\n' "$stage/nodes/$physical_id"
+          fi
+        }
+        physical_root() {
+          printf '%s\n' "$scratch/nodes/$1"
+        }
+        physical_parent() {
+          local wanted=$1 physical_id logical_id role parent rest
+          while IFS='|' read -r physical_id logical_id role parent rest; do
+            if [ "$physical_id" = "$wanted" ]; then
+              printf '%s\n' "$parent"
+              return 0
+            fi
+          done < "$rows"
+          return 1
+        }
+        physical_role() {
+          local wanted=$1 physical_id logical_id role rest
+          while IFS='|' read -r physical_id logical_id role rest; do
+            if [ "$physical_id" = "$wanted" ]; then
+              printf '%s\n' "$role"
+              return 0
+            fi
+          done < "$rows"
+          return 1
+        }
+        physical_logical() {
+          local wanted=$1 physical_id logical_id rest
+          while IFS='|' read -r physical_id logical_id rest; do
+            if [ "$physical_id" = "$wanted" ]; then
+              printf '%s\n' "$logical_id"
+              return 0
+            fi
+          done < "$rows"
+          return 1
+        }
+        store_url() {
+          local own=$1 current=$2 parent logical role current_stage current_root state lower
+          parent=$(physical_parent "$current")
+          logical=$(physical_logical "$current")
+          role=$(physical_role "$current")
+          current_stage=$(physical_stage "$current" "$logical" "$role")
+          current_root=$(physical_root "$current")
+          if [ "$own" = "$current" ]; then
+            state="$current_stage/state"
+          else
+            state="$scratch/lower-states/$current"
+          fi
+          if [ "$parent" = - ]; then
+            lower="$lower_url"
+          else
+            lower=$(uri_encode "$(store_url "$own" "$parent")")
+          fi
+          printf '%s\n' "local-overlay://?root=$current_root&state=$state&lower-store=$lower&upper-layer=$current_stage/upper&ignore-gc-delete-failure=true&check-mount=false"
+        }
+        mount_physical() {
+          local physical_id=$1 logical_id=$2 role=$3 parent=$4 node_stage node_root parent_root
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          node_root=$(physical_root "$physical_id")
+          mkdir -p "$node_root/nix/store"
+          if [ "$parent" = - ]; then
+            parent_root="$lower_store"
+          else
+            parent_root="$(physical_root "$parent")/nix/store"
+          fi
+          mount -t overlay overlay -o lowerdir="$parent_root",upperdir="$node_stage/upper",workdir="$node_stage/work" "$node_root/nix/store"
+        }
+        unmount_all() {
+          local physical_id rest node_root
+          while IFS='|' read -r physical_id rest; do
+            [ -n "$physical_id" ] || continue
+            node_root=$(physical_root "$physical_id")
+            if mountpoint -q "$node_root/nix/store"; then umount "$node_root/nix/store"; fi
+          done < <(tac "$rows")
+        }
+
         ${repairStoreSnippet}
         ${checkStoreSnippet}
-        unmount_all() {
-          ${unmountAllSnippet}
-        }
-        echo "nixtache-overlay: repairing host"
-        repair_store "$host_url" "$stage/host/state" "$host_root"
-        mkdir -p "$scratch/lower-states/host"
-        cp -a "$stage/host/state/." "$scratch/lower-states/host/"
-        echo "nixtache-overlay: prepared host"
-        ${namespaceLayerSnippets}
+
+        while IFS='|' read -r physical_id logical_id role parent rest; do
+          [ -n "$physical_id" ] || continue
+          mount_physical "$physical_id" "$logical_id" "$role" "$parent"
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          node_root=$(physical_root "$physical_id")
+          node_url=$(store_url "$physical_id" "$physical_id")
+          echo "nixtache-overlay: repairing $physical_id"
+          if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
+            host_url=$node_url
+            host_root=$node_root
+            repair_store "$host_url" "$stage/host/state" "$host_root"
+          else
+            repair_store "$node_url" "$node_stage/state" "$node_root"
+          fi
+          mkdir -p "$scratch/lower-states/$physical_id"
+          cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"
+          echo "nixtache-overlay: prepared $physical_id"
+        done < "$rows"
         unmount_all
-        mount -t overlay overlay -o lowerdir="$lower_store",upperdir="$stage/host/upper",workdir="$stage/host/work" "$host_root/nix/store"
-        echo "nixtache-overlay: checking host"
-        check_store "$host_url" "$host_root"
-        ${checkLayerSnippets}
+        while IFS='|' read -r physical_id logical_id role parent rest; do
+          [ -n "$physical_id" ] || continue
+          mount_physical "$physical_id" "$logical_id" "$role" "$parent"
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          node_root=$(physical_root "$physical_id")
+          node_url=$(store_url "$physical_id" "$physical_id")
+          echo "nixtache-overlay: checking $physical_id"
+          if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
+            host_url=$node_url
+            host_root=$node_root
+            check_store "$host_url" "$host_root"
+          else
+            check_store "$node_url" "$node_root"
+          fi
+        done < "$rows"
+        unmount_all
       ''}
 
       rm -rf "$slot_dir/generations/$generation"
@@ -269,8 +496,12 @@ let
 
     if [ "$mode" = "--installed" ]; then
       active_slot=$(discover_booted)
-      active_generation=$(ready_generation "$active_slot") || { echo "nixtache-overlay: active upper chain is not ready" >&2; exit 1; }
-      source_generation=$(basename "$active_generation")
+      if [ "$(findmnt -T ${cfg.upperDir} -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
+        source_generation="ephemeral"
+      else
+        active_generation=$(ready_generation "$active_slot") || { echo "nixtache-overlay: active upper chain is not ready" >&2; exit 1; }
+        source_generation=$(basename "$active_generation")
+      fi
       mapfile -t candidates < <(lsblk -nrpo NAME,PARTUUID,PARTLABEL | awk -v active="$active_slot" 'BEGIN{IGNORECASE=1} $3 ~ /^nix-store_/ {uuid=tolower($2); if (uuid != active && uuid != "") print $1,uuid,$3}')
       [ "''${#candidates[@]}" = 1 ] || { echo "nixtache-overlay: expected exactly one inactive installed lower, found ''${#candidates[@]}" >&2; exit 1; }
       read -r target_device target_slot target_label <<< "''${candidates[0]}"
