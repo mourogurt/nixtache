@@ -16,6 +16,11 @@ When a target upper chain is cloned for a new lower, its database and files MUST
 - **WHEN** store verification runs against such a cloned target store
 - **THEN** paths registered as valid whose files are absent from the target merged view are reported, and the active upper database is not invalidated
 
+#### Scenario: Verification checks reference closure metadata
+
+- **WHEN** a target database retains valid-path records and upper files but its reference records no longer describe the complete closure
+- **THEN** preparation repairs the reference metadata or rejects the target, and never marks a file-only or validity-only check as coherent
+
 #### Scenario: An unready target is not treated as coherent
 
 - **WHEN** target verification or repair leaves validity records whose files are absent from the target merged view
@@ -118,7 +123,7 @@ time.
 
 ### Requirement: Slot-scoped upper lifecycle across OTA updates is configurable
 
-The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`. Each physical A/B slot MUST have independent persistent upper and Nix state. Policies MUST prepare only the inactive target: wipe resets it; reconcile clones the active upper and repairs that copy. Other values MUST fail evaluation.
+The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`; other values MUST fail evaluation. Each physical slot MUST have independent persistent upper/state. Installation prepares only the inactive target. Boot recovery MAY prepare a bootloader-selected target under the same target-only rules; neither path MAY repair the preserved source in place.
 
 #### Scenario: Default policy prepares an empty target upper
 
@@ -147,7 +152,7 @@ The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`. Each
 
 #### Scenario: A rejected or absent update does not prepare an upper
 
-- **WHEN** an update installs nothing because it is rejected, tampered, interrupted before installation completes, or has no newer version
+- **WHEN** an update installs nothing because it is rejected, tampered, interrupted before installation completes, or completes a no-op without installing a lower
 - **THEN** neither slot's upper lifecycle action runs and the active upper remains exactly as it was
 
 #### Scenario: A plain reboot keeps the selected persistent upper
@@ -170,24 +175,29 @@ The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`. Each
 - **WHEN** an upper resides on tmpfs and the machine reboots
 - **THEN** that ephemeral layer and every dependent upper layer are reset before the current lower records load, and no persistent upper metaslot is cloned or retained for the ephemeral chain
 
+#### Scenario: Ephemeral preparation creates no persistent upper copy
+
+- **WHEN** an installed update is prepared while any node in a chain has a tmpfs upper
+- **THEN** preparation succeeds without creating persistent upper or upper-state copies for that ephemeral chain, while persistent sibling branches retain their independent prepared state
+
 ### Requirement: Upper-tree preparation is parent-first and atomic
 
-A target metaslot MAY contain sibling or nested `local-overlay` uppers. Preparation MUST validate the graph and verify every node parent-before-child in a private target view. Each child MUST consume its prepared parent's merged store and metadata. Every node's roots, profiles and cross-layer closure metadata MUST validate before the complete tree becomes ready.
+A target metaslot MAY contain sibling or nested `local-overlay` uppers. Preparation MUST validate the graph and verify every node parent-before-child in a private target view. Each child MUST consume its prepared parent's frozen lower files and metadata, never its mutable runtime continuation. Every node's roots, profiles and cross-layer closure metadata MUST validate before the complete tree becomes ready.
 
 #### Scenario: Sibling uppers reconcile independently over one parent
 
 - **WHEN** two sibling target uppers have separate roots over the same target parent
-- **THEN** the parent is repaired before either child, each sibling is verified against that stable parent view, and subsequent repair writes in one sibling are absent from the other sibling, the parent and the active tree
+- **THEN** the parent's frozen lower is repaired before either child, each sibling is verified against that stable frozen view, and subsequent repair writes in one sibling are absent from the other sibling, the parent's runtime continuation and the active tree
 
 #### Scenario: An intermediate upper reconciles before its child
 
 - **WHEN** an intermediate target node and its leaf both have roots, and the intermediate closure requires an object absent from the new lower
-- **THEN** the missing object is repaired into the target intermediate upper before the leaf is mounted or verified, and the active intermediate upper remains unchanged
+- **THEN** the missing object is repaired into the intermediate's target frozen-lower representation before the leaf is mounted or verified, and the active intermediate upper remains unchanged
 
 #### Scenario: A middle-and-leaf shared dependency is repaired at the middle
 
-- **WHEN** roots at both an intermediate node and its descendant require the same missing object and that object is repaired as part of the intermediate root closure
-- **THEN** the descendant resolves it through the prepared intermediate merged view without fetching a second copy into the descendant upper
+- **WHEN** roots at both an intermediate node and its descendant require the same missing object and that object is repaired into the intermediate's target frozen lower
+- **THEN** the descendant resolves it through that frozen lower without fetching a second copy into the descendant upper
 
 #### Scenario: A leaf-only dependency stays in the leaf
 
@@ -202,7 +212,12 @@ A target metaslot MAY contain sibling or nested `local-overlay` uppers. Preparat
 #### Scenario: Child closure metadata is validated after parent repair
 
 - **WHEN** a cloned child upper database contains duplicated ancestor metadata from the source tree and its target parent has since been repaired
-- **THEN** the child's files and duplicated closure records are refreshed or validated against the prepared parent before readiness, rather than accepting a file-only check
+- **THEN** the child's files and duplicated closure records are refreshed or validated against the prepared parent's frozen lower before readiness, rather than accepting a file-only check
+
+#### Scenario: Child upper cannot impersonate parent-provided state
+
+- **WHEN** a path expected from a prepared parent is removed from that parent and copied into the child's own upper after an earlier local check
+- **THEN** final whole-tree validation rejects the target because the child must resolve parent-provided paths through the prepared parent root, not through its own upper
 
 #### Scenario: Any node failure blocks the complete target tree
 
@@ -236,3 +251,85 @@ Upgrading a system with a shared persistent upper MUST preserve that upper as th
 
 - **WHEN** the inactive slot has no migrated metaslot
 - **THEN** it is marked unready until a subsequent update prepares it from the active chain under the configured policy
+
+#### Scenario: Failed migration preserves every legacy source
+
+- **WHEN** moving or activating any legacy upper, database, root, profile or temporary-root component fails or is interrupted
+- **THEN** the legacy files and metadata remain usable, prior selection mounts and links are restored, readiness is not exposed, and a later retry can complete without discarding the source
+
+#### Scenario: Cross-filesystem migration remains lossless
+
+- **WHEN** legacy upper-owned state and its recovery backup reside on different filesystems
+- **THEN** migration uses a lossless same-filesystem backup or copy fallback, validates the migrated chain and selects it without deleting the only usable legacy state
+
+### Requirement: Children consume immutable parent lowers
+
+A logical node with children MUST expose immutable parent files and metadata as their lower. Its own runtime writes MUST use a separate writable continuation over that lower; the continuation and children MUST be siblings.
+
+#### Scenario: Adding the first child splits the logical parent
+
+- **WHEN** logical topology `a → b` gains child `c`
+- **THEN** the target physical topology becomes `a → b(lower) → {b-runtime, c}`, with `b-runtime` continuing the parent's own writable view and `c` consuming only the frozen `b` lower
+
+#### Scenario: Runtime continuation writes do not mutate a child lower
+
+- **WHEN** the consumer associated with `b` writes new paths or metadata after `b-runtime` and `c` have started
+- **THEN** those writes land only in `b-runtime`, while the lower files and database consumed by `c` remain unchanged and read-only
+
+#### Scenario: Parent runtime changes cross into a child only at rebase
+
+- **WHEN** new target preparation incorporates a parent's runtime continuation into a new frozen lower and the child is restarted into that generation
+- **THEN** the child resolves the newly frozen parent paths and metadata coherently, without requiring or observing live lower mutation in its previous generation
+
+### Requirement: Topology operations preserve state across generation transitions
+
+Adding, reparenting or removing declared nodes MUST prepare a coherent target graph without mutating the active tree. Under `reconcile`, unchanged branches MUST retain their state; under `wipe`, the same final graph MUST have clean writable upper/state. New and reparented subtrees MUST validate against their selected parents.
+
+#### Scenario: Adding a sibling preserves the existing branch
+
+- **WHEN** a new sibling is added below a parent that already has a runtime continuation and child under `reconcile`
+- **THEN** the new branch is initialized without another parent split, existing sibling and continuation state is retained, and writes remain isolated between all siblings
+
+#### Scenario: Adding a deeper descendant preserves its parent's logical view
+
+- **WHEN** a descendant is added below an existing leaf at any depth under `reconcile`
+- **THEN** only the required frozen-lower/runtime-continuation transformation and new branch are introduced, and the parent's own consumer retains its pre-transition store contents
+
+#### Scenario: Reparenting revalidates the moved subtree
+
+- **WHEN** a node and its descendants are moved to another parent in one target configuration under `reconcile`
+- **THEN** the moved subtree retains its own upper state, duplicated lower metadata is refreshed against the new parent, and no generation prepared for the old parent is selected for the new graph
+
+#### Scenario: Wipe applies clean state to the same operation
+
+- **WHEN** any topology operation is prepared under `wipe`
+- **THEN** the target derives the same final graph with clean writable upper/state while the active graph and its contents remain unchanged until cutover
+
+#### Scenario: Removal never orphans descendants
+
+- **WHEN** a declared node is removed while descendants remain
+- **THEN** those descendants MUST be removed or explicitly reparented in the same operation; otherwise evaluation rejects the transition without changing the active graph
+
+#### Scenario: Failed topology migration converges on retry
+
+- **WHEN** preparation is interrupted while an intermediate frozen lower, runtime continuation or descendant is incomplete
+- **THEN** the target remains unready, the active graph stays usable, and a retry completes or discards the incomplete target before validating the complete final graph
+
+### Requirement: Runtime overlay paths are disjoint and stable
+
+Module-managed upper, work and state paths MUST be component-wise disjoint within and across nodes. Node identities MUST be stable, unique path components; `.` and `..` MUST be rejected.
+
+#### Scenario: Equal or nested managed paths are rejected
+
+- **WHEN** upper, work or state paths within one node or across different nodes are equal or nested inside one another
+- **THEN** evaluation rejects the topology before any selection or preparation action runs
+
+#### Scenario: String-prefix paths remain valid
+
+- **WHEN** managed paths share only a string prefix but none is a descendant path of another
+- **THEN** evaluation accepts them as disjoint paths
+
+#### Scenario: Path traversal identities are rejected
+
+- **WHEN** a node identity is `.` or `..`
+- **THEN** evaluation rejects the topology rather than deriving an on-disk layer path from that identity
