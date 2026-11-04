@@ -3,7 +3,9 @@
 , pkgs
 , cfg
 , abEnabled
+, runtimeState
 , lowerStateLink
+, slotsDir
 , prepareScript
 , selectionScript
 , ...
@@ -14,9 +16,25 @@ with lib;
 let
   topology = cfg._topology;
   runnerLayers = filter (node: node ? containerName) topology.nodes;
+  frozenMounts = optionals abEnabled topology.frozenMounts;
+  frozenMountByPhysical = topology.frozenMountByPhysical;
+  frozenMountName = id: "nixtache-overlay-frozen-${id}";
+  frozenMountUnit = id: "${frozenMountName id}.service";
+  frozenMountUnits = map (mount: frozenMountUnit mount.id) frozenMounts;
+  hostFrozenMount = if abEnabled && builtins.hasAttr "host" topology.frozenLowerByLogical
+    then topology.frozenMountByPhysical.${topology.frozenLowerByLogical.host}
+    else null;
+  hostFrozenUnit = optional (hostFrozenMount != null) (frozenMountUnit hostFrozenMount.id);
+  hostRuntimeLower = if hostFrozenMount == null then "/nix/store" else hostFrozenMount.storeDir;
+  encodeStoreUri = value: replaceStrings [ "%" "?" "&" "=" ] [ "%25" "%3F" "%26" "%3D" ] value;
+  hostLowerStore = if hostFrozenMount != null
+    then "local?root=${hostFrozenMount.root}&state=${hostFrozenMount.stateDir}&read-only=true"
+    else if abEnabled
+    then "local?state=${lowerStateLink}&read-only=true"
+    else "local";
 
   overlayStoreUrl = "local-overlay://"
-    + "?lower-store=${if abEnabled then "local%3Fstate%3D${lowerStateLink}%26read-only%3Dtrue" else "local"}"
+    + "?lower-store=${encodeStoreUri hostLowerStore}"
     + "&upper-layer=${cfg.upperDir}"
     + "&ignore-gc-delete-failure=true"
     + "&remount-hook=${remountHook}"
@@ -34,7 +52,7 @@ let
       fi
       sleep 1
     done
-    mount -t overlay overlay -o lowerdir="$mountpoint" -o upperdir=${cfg.upperDir} -o workdir=${cfg.workDir} "$mountpoint"
+    mount -t overlay overlay -o lowerdir=${hostRuntimeLower} -o upperdir=${cfg.upperDir} -o workdir=${cfg.workDir} "$mountpoint"
   '';
 in
 {
@@ -49,7 +67,8 @@ in
         description = "Select and recover the physical slot's Nix upper metaslot";
         wantedBy = [ "multi-user.target" ];
         after = [ "local-fs.target" "zfs-mount.service" ];
-        before = [ "nixtache-lower-store-db-load.service" "nix-daemon-overlay-mount.service" "nix-daemon.service" ];
+        before = [ "nixtache-lower-store-db-load.service" "nix-daemon-overlay-mount.service" "nix-daemon.service" ]
+          ++ frozenMountUnits;
         path = with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux systemd nix sqlite ];
         serviceConfig = {
           Type = "oneshot";
@@ -72,9 +91,11 @@ in
         description = "Mount the selected upper over the physical lower Nix store";
         wantedBy = [ "multi-user.target" ];
         after = [ "local-fs.target" "nixtache-overlay-select.service" ]
-          ++ optional abEnabled "nixtache-lower-store-db-load.service";
+          ++ optional abEnabled "nixtache-lower-store-db-load.service"
+          ++ hostFrozenUnit;
         requires = [ "nixtache-overlay-select.service" ]
-          ++ optional abEnabled "nixtache-lower-store-db-load.service";
+          ++ optional abEnabled "nixtache-lower-store-db-load.service"
+          ++ hostFrozenUnit;
         before = [ "nix-daemon.service" ];
         path = with pkgs; [ util-linux coreutils gnugrep ];
         serviceConfig = {
@@ -82,10 +103,10 @@ in
           RemainAfterExit = true;
         };
         script = ''
-          if mount | grep 'overlay on /nix/store ' | grep -q 'upperdir=${cfg.upperDir}'; then
+          if mount | grep 'overlay on /nix/store ' | grep 'lowerdir=${hostRuntimeLower}' | grep -q 'upperdir=${cfg.upperDir}'; then
             exit 0
           fi
-          mount -t overlay overlay -o lowerdir=/nix/store -o upperdir=${cfg.upperDir} -o workdir=${cfg.workDir} /nix/store
+          mount -t overlay overlay -o lowerdir=${hostRuntimeLower} -o upperdir=${cfg.upperDir} -o workdir=${cfg.workDir} /nix/store
         '';
       };
 
@@ -98,9 +119,11 @@ in
         description = "Selected lower, upper files and Nix metadata are coherent";
         wantedBy = [ "multi-user.target" ];
         after = [ "nixtache-overlay-select.service" "nix-daemon-overlay-mount.service" ]
-          ++ optional abEnabled "nixtache-lower-store-db-load.service";
+          ++ optional abEnabled "nixtache-lower-store-db-load.service"
+          ++ frozenMountUnits;
         requires = [ "nixtache-overlay-select.service" "nix-daemon-overlay-mount.service" ]
-          ++ optional abEnabled "nixtache-lower-store-db-load.service";
+          ++ optional abEnabled "nixtache-lower-store-db-load.service"
+          ++ frozenMountUnits;
       };
 
       systemd.targets.boot-complete = mkIf abEnabled {
@@ -122,11 +145,68 @@ in
       };
     })
 
+    (mkIf (frozenMounts != [ ]) {
+      systemd.services = listToAttrs (map (mount:
+        let
+          parentUnit = optional (mount.parent != null) (frozenMountUnit mount.parent);
+          legacyUpper = if mount.logicalId == "host"
+            then "$generation/host/upper"
+            else "$generation/layers/${mount.logicalId}/upper";
+        in
+        nameValuePair (frozenMountName mount.id) {
+          description = "Mount the selected frozen ${mount.id} Nix store read-only";
+          wantedBy = [ "nixtache-overlay-ready.target" ];
+          before = [ "nixtache-overlay-ready.target" ];
+          after = [ "nixtache-overlay-select.service" ] ++ parentUnit;
+          requires = [ "nixtache-overlay-select.service" ] ++ parentUnit;
+          path = with pkgs; [ coreutils util-linux ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
+          script = ''
+            mkdir -p ${mount.storeDir}
+            slot=$(cat ${runtimeState}/selected-slot 2>/dev/null || true)
+            generation=$(cat ${runtimeState}/selected-generation 2>/dev/null || true)
+            if [ -n "$slot" ] || [ -n "$generation" ]; then
+              [ -n "$slot" ] && [ -n "$generation" ]
+              [ "$(readlink -f "${slotsDir}/$slot/current")" = "$generation" ]
+            fi
+            upper=""
+            if [ -n "$generation" ]; then
+              upper="$generation/nodes/${mount.id}/upper"
+              if [ ! -d "$upper" ]; then upper=${legacyUpper}; fi
+              if [ ! -d "$upper" ]; then upper=""; fi
+            fi
+            if mountpoint -q ${mount.storeDir}; then
+              if [ -n "$upper" ] && [ "$(readlink -f ${mount.upperDir})" = "$upper" ]; then exit 0; fi
+              if [ -z "$upper" ] && [ ! -L ${mount.upperDir} ]; then exit 0; fi
+              echo "nixtache-overlay: cannot replace a mounted frozen lower from another generation" >&2
+              exit 1
+            fi
+            rm -rf ${mount.upperDir} ${mount.privateUpperDir} ${mount.workDir}
+            if [ -n "$upper" ]; then
+              ln -s "$upper" ${mount.upperDir}
+            else
+              mkdir -p ${mount.upperDir}
+            fi
+            mkdir -p ${mount.privateUpperDir} ${mount.workDir}
+            lower_root=${if mount.parent == null then "/nix/store" else frozenMountByPhysical.${mount.parent}.storeDir}
+            mount -t overlay overlay -o lowerdir=${mount.upperDir}:"$lower_root",upperdir=${mount.privateUpperDir},workdir=${mount.workDir} ${mount.storeDir}
+            mount --bind ${mount.storeDir} ${mount.storeDir}
+            mount -o remount,ro,bind ${mount.storeDir}
+          '';
+        }
+      ) frozenMounts);
+    })
+
     (mkIf (runnerLayers != [ ]) {
       systemd.services = listToAttrs (map (node:
+        let parentUnit = optional abEnabled
+          (frozenMountUnit topology.frozenParentByLogical.${node.id}); in
         nameValuePair "container@${node.containerName}" {
-          after = [ "nixtache-overlay-ready.target" ];
-          requires = [ "nixtache-overlay-ready.target" ];
+          after = [ "nixtache-overlay-ready.target" ] ++ parentUnit;
+          requires = [ "nixtache-overlay-ready.target" ] ++ parentUnit;
         }
       ) runnerLayers);
     })
