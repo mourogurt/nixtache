@@ -110,7 +110,7 @@ let
   v2 = mkRunnerAppliance {
     version = "2";
     extraPackages = [ pkgs.hello ];
-    brokenBoot = cascade && !ephemeral;
+    brokenBoot = cascade && !ephemeral && scenario == "swap";
   };
   v2Pkg = v2.config.system.build.sysupdate-package;
 in
@@ -126,7 +126,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.deployer = otaLib.deployerNode {
     extraDependencies = lib.optional (!ephemeral && scenario == "swap") v2Pkg
-      ++ lib.optional (scenario == "parent-metadata-freshness") parentFresh;
+      ++ lib.optionals (scenario == "parent-metadata-freshness") [ parentFresh v2Pkg ];
   };
 
   testScript = if scenario == "parent-metadata-freshness" then ''
@@ -171,20 +171,55 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("test -f /var/lib/nix-overlay/upper/${parentFreshBasename}")
     appliance.succeed("test -f /nix/store/${parentFreshBasename}")
     assert appliance.succeed("readlink /nix/var/nix/gcroots/runner-parent-freshness").strip() == "${parentFresh}"
+    crun("test ! -e /run/nixtache-runner-lower/nix/store/${parentFreshBasename}")
+    crun("test ! -e /srv/nix/store/${parentFreshBasename}")
+    appliance.fail(
+      "nixos-container run runner -- /bin/sh -c " + shlex.quote(
+        "nix --extra-experimental-features nix-command path-info "
+        "--store unix:///srv/nix/var/nix/daemon-socket/socket ${parentFresh}"
+      )
+    )
+    assert appliance.succeed(
+      "systemctl show -p ActiveEnterTimestamp --value container@runner.service"
+    ).strip() == container_started, "runner container restarted during the isolation check"
+    assert crun("systemctl show -p ActiveEnterTimestamp --value nix-daemon-custom.service").strip() == daemon_started, "custom daemon restarted during the isolation check"
+    print("OK: parent runtime files and validity records remain isolated from the running child")
+
+    deployer.succeed(
+      "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+      "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/"
+    )
+    appliance.succeed("systemctl start --wait systemd-sysupdate-update.service", timeout=900)
+    appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
+    prepared_slot = appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip()
+    prepared_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+    frozen = f"/var/lib/nix-overlay/upper-slots/{prepared_slot}/generations/{prepared_generation}/nodes/host-lower"
+    appliance.succeed("test -f " + shlex.quote(frozen + "/upper/${parentFreshBasename}"))
+    assert appliance.succeed(
+      "sqlite3 " + shlex.quote(frozen + "/state/db/db.sqlite") +
+      " \"SELECT COUNT(*) FROM ValidPaths WHERE path = '${parentFresh}';\""
+    ).strip() == "1"
+    print("OK: prepared generation freezes the parent runtime path and its validity record")
+
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
+    assert appliance.succeed("cat /etc/image-version").strip() == "2"
+    appliance.wait_until_succeeds("systemctl is-active --quiet container@runner.service", timeout=600)
+    appliance.wait_until_succeeds(
+      "nixos-container run runner -- systemctl is-active --quiet nix-daemon-custom.service", timeout=600
+    )
     crun("test -f /run/nixtache-runner-lower/nix/store/${parentFreshBasename}")
     crun("test -f /srv/nix/store/${parentFreshBasename}")
-    print("OK: new host-only path and root are visible in the selected parent store after runner startup")
-
     resolved = crun(
       "nix --extra-experimental-features nix-command path-info "
       "--store unix:///srv/nix/var/nix/daemon-socket/socket ${parentFresh}"
     ).strip()
-    assert resolved == "${parentFresh}", f"custom daemon resolved an unexpected path: {resolved!r}"
+    assert resolved == "${parentFresh}", f"custom daemon resolved an unexpected path after rebase: {resolved!r}"
     assert appliance.succeed(
       "systemctl show -p ActiveEnterTimestamp --value container@runner.service"
-    ).strip() == container_started, "runner container restarted during the freshness check"
-    assert crun("systemctl show -p ActiveEnterTimestamp --value nix-daemon-custom.service").strip() == daemon_started, "custom daemon restarted during the freshness check"
-    print("PASS: custom runner daemon resolves newly rooted host-only paths through fresh selected parent metadata")
+    ).strip() != container_started, "runner container did not restart into the rebased generation"
+    assert crun("systemctl show -p ActiveEnterTimestamp --value nix-daemon-custom.service").strip() != daemon_started, "custom daemon did not restart into the rebased generation"
+    print("PASS: child restart after frozen rebase exposes parent files and current validity records")
   '' else ''
     import shlex
 

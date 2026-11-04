@@ -23,6 +23,46 @@ let
   parentId = node: if node.parent == null then "host" else node.parent;
   consumerNode = node: topology.consumerNodeByLogical.${node.id} or node.id;
   graphFingerprint = topology.generationFingerprint;
+  runnerLayers = optionals abEnabled (filter (node: node ? containerName) sortedTopology);
+  frozenMounts = optionals abEnabled topology.frozenMounts;
+  frozenMountByPhysical = topology.frozenMountByPhysical;
+  frozenParentMount = node: frozenMountByPhysical.${topology.frozenParentByLogical.${node.id}};
+  runtimeBackup = "${runtimeState}/activation-backup";
+
+  activateFrozenGenerationSnippets = concatMapStrings (mount: ''
+    if [ "''${ephemeral_layers[${mount.logicalId}]}" = 1 ]; then
+      activate_frozen_state ${if mount.parent == null then lowerStateLink else frozenMountByPhysical.${mount.parent}.stateDir} ${mount.stateDir} ${runtimeBackup}/frozen/${mount.id}
+    else
+      selected_frozen=$(select_frozen_generation "${mount.id}" "${mount.logicalId}")
+      activate_frozen_state "$selected_frozen/state" ${mount.stateDir} ${runtimeBackup}/frozen/${mount.id}
+    fi
+  '') frozenMounts;
+
+  activateRunnerLowerSnippets = concatMapStrings (node:
+    let mount = frozenParentMount node; in ''
+      if [ "''${ephemeral_layers[${mount.logicalId}]}" = 1 ]; then
+        activate_frozen_state ${mount.stateDir} ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
+      else
+        selected_frozen=$(select_frozen_generation "${mount.id}" "${mount.logicalId}")
+        activate_frozen_state "$selected_frozen/state" ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
+      fi
+    ''
+  ) runnerLayers;
+
+  resetFrozenSnippets = concatMapStrings (mount: ''
+    reset_dir ${mount.upperDir}
+    for name in ${concatStringsSep " " stateNames}; do reset_frozen_path "${mount.stateDir}/$name"; done
+  '') frozenMounts + concatMapStrings (node: ''
+    for name in ${concatStringsSep " " stateNames}; do reset_frozen_path "${node.lowerRoot}/nix/var/nix/$name"; done
+  '') runnerLayers;
+
+  activateEphemeralFrozenSnippets = concatMapStrings (mount: ''
+    bind_frozen_state ${if mount.parent == null then lowerStateLink else frozenMountByPhysical.${mount.parent}.stateDir} ${mount.stateDir}
+  '') frozenMounts + concatMapStrings (node:
+    let mount = frozenParentMount node; in ''
+      bind_frozen_state ${mount.stateDir} ${node.lowerRoot}/nix/var/nix
+    ''
+  ) runnerLayers;
 
   activationLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
     consumer_generation=""
@@ -97,6 +137,37 @@ let
 
     ${migration.activateStateDirSnippet}
 
+    reset_frozen_path() {
+      local path=$1
+      if mountpoint -q "$path"; then umount "$path"; fi
+      reset_dir "$path"
+    }
+
+    bind_frozen_state() {
+      local source=$1 target=$2 name
+      for name in ${concatStringsSep " " stateNames}; do
+        mkdir -p "$source/$name" "$target/$name"
+        mount --bind "$source/$name" "$target/$name"
+        mount -o remount,ro,bind "$target/$name"
+      done
+    }
+
+    activate_frozen_state() {
+      local source=$1 target=$2 backup=$3 name
+      for name in ${concatStringsSep " " stateNames}; do
+        activate_state_dir "$source/$name" "$target/$name" "$backup/$name"
+        mount -o remount,ro,bind "$target/$name"
+      done
+    }
+
+    select_frozen_generation() {
+      local physical_id=$1 logical_id=$2 candidate
+      candidate="$generation/nodes/$physical_id"
+      if [ ! -d "$candidate" ] && [ "$logical_id" = host ]; then candidate="$generation/host"; fi
+      if [ ! -d "$candidate" ]; then candidate="$generation/layers/$logical_id"; fi
+      printf '%s\n' "$candidate"
+    }
+
     activate_generation() {
       local generation=$1 name
       activation_started=1
@@ -108,6 +179,8 @@ let
         activate_state_dir "$generation/host/state/$name" "/nix/var/nix/$name" "${legacyBackup}/host/state/$name"
       done
       ${activationLayerSnippets}
+      ${activateFrozenGenerationSnippets}
+      ${activateRunnerLowerSnippets}
       printf '%s\n' "$1" > ${runtimeState}/selected-generation
       touch ${runtimeState}/selected-chain-ready
       activation_complete=1
@@ -126,6 +199,8 @@ let
         ${mkdirLayerSnippets}
         ${resetLayerSnippets}
       fi
+      ${resetFrozenSnippets}
+      ${activateEphemeralFrozenSnippets}
       touch ${runtimeState}/selected-chain-ready
       exit 0
     fi
@@ -137,6 +212,8 @@ let
       reset_dir ${lowerStateLink}
       for name in ${concatStringsSep " " stateNames}; do reset_dir "/nix/var/nix/$name"; done
       ${resetAllLayerSnippets}
+      ${resetFrozenSnippets}
+      ${activateEphemeralFrozenSnippets}
       touch ${runtimeState}/selected-chain-ready
       exit 0
     fi

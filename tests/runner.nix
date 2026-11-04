@@ -927,38 +927,30 @@ self.nixosModules.runner
     services.nixtache.ab-image.enable = true;
     nix.enable = false;
   };
+  cascadeBinds = bindMountsOf hostCascadeOverlay;
+  cascadeLowerStateBinds = lib.all (name:
+    let bind = cascadeBinds."host-nix-lower-${name}"; in
+    bind.hostPath == "/run/nixtache-runner-lower/nix/var/nix/${name}"
+    && bind.mountPoint == "/run/nixtache-runner-lower/nix/var/nix/${name}"
+    && bind.isReadOnly
+  ) [ "db" "gcroots" "profiles" "temproots" ];
   scenarioCascadeLower = {
-    name = "host overlay cascade: runner consumes the complete parent local-overlay outside its relocated /nix";
+    name = "host overlay cascade: runner consumes frozen parent files and full state through a plain local lower";
     checks = {
-      lowerIsComposite = lib.hasInfix
-        "lower-store=local-overlay://%%3Froot%%3D/run/nixtache-runner-lower"
+      lowerIsFrozenLocal = lib.hasInfix
+        "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower%%26read-only%%3Dtrue"
         (execOverlayOf hostCascadeOverlay);
-      lowerStateIncluded = lib.hasInfix
-        "lower-state%%2526read-only%%253Dtrue"
-        (execOverlayOf hostCascadeOverlay);
-      lowerStateScratch = lib.hasInfix
-        "state%%3D/run/nixtache-runner-parent-state"
-        (execOverlayOf hostCascadeOverlay);
-      lowerRootsBind =
-        (bindMountsOf hostCascadeOverlay)."host-nix-lower-gcroots".isReadOnly
-        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-gcroots".mountPoint
-          == "/run/nixtache-runner-lower/nix/var/nix/gcroots";
-      lowerProfilesBind =
-        (bindMountsOf hostCascadeOverlay)."host-nix-lower-profiles".isReadOnly
-        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-profiles".mountPoint
-          == "/run/nixtache-runner-lower/nix/var/nix/profiles";
-      lowerTemprootsBind =
-        (bindMountsOf hostCascadeOverlay)."host-nix-lower-temproots".isReadOnly
-        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-temproots".mountPoint
-          == "/run/nixtache-runner-lower/nix/var/nix/temproots";
-      lowerStateBind =
-        (bindMountsOf hostCascadeOverlay)."host-nix-lower-state".isReadOnly
-        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-state".mountPoint
-          == "/run/nixtache-runner-lower/nix/var/nix/lower-state";
-      lowerUpperBind =
-        (bindMountsOf hostCascadeOverlay)."host-nix-lower-upper".isReadOnly
-        && (bindMountsOf hostCascadeOverlay)."host-nix-lower-upper".mountPoint
-          == "/var/lib/nix-overlay/upper";
+      lowerNotComposite = !(lib.hasInfix "lower-store=local-overlay" (execOverlayOf hostCascadeOverlay));
+      noParentStateScratch = !(lib.hasInfix "nixtache-runner-parent-state" (execOverlayOf hostCascadeOverlay));
+      lowerStoreBind = cascadeBinds."host-nix-lower-store".hostPath
+          == "/run/nixtache-overlay/frozen/host-lower/nix/store"
+        && cascadeBinds."host-nix-lower-store".mountPoint
+          == "/run/nixtache-runner-lower/nix/store"
+        && cascadeBinds."host-nix-lower-store".isReadOnly;
+      lowerStateBinds = cascadeLowerStateBinds;
+      noLiveLowerState = !(cascadeBinds ? "host-nix-lower-state");
+      noMutableContinuation = !(cascadeBinds ? "host-nix-lower-upper")
+        && !(lib.hasInfix "host-runtime" (execOverlayOf hostCascadeOverlay));
       containerRequiresReadiness = lib.elem "nixtache-overlay-ready.target"
         hostCascadeOverlay.config.systemd.services."container@runner".requires;
     };
@@ -993,8 +985,7 @@ self.nixosModules.runner
     services.nixtache.overlay-nix.enable = true;
   }).config.system.build.toplevel.outPath;
 
-  hostNamed = mkHost "/" {
-    imports = [ namedBoot ];
+  hostNamed = mkApplianceHost "/" {
     services.nixtache.runner = {
       cache.enable = lib.mkForce false;
       containers = {
@@ -1006,6 +997,8 @@ self.nixosModules.runner
       };
     };
     services.nixtache.overlay-nix.enable = true;
+    services.nixtache.ab-image.enable = true;
+    nix.enable = false;
   };
   namedTopology = hostNamed.config.services.nixtache.overlay-nix._topology;
   namedNodeIds = lib.sort (a: b: a < b) (map (node: node.id) namedTopology.nodes);
@@ -1026,6 +1019,52 @@ self.nixosModules.runner
       siblingCompatibility = (hostCascadeOverlay.config.services.nixtache.overlay-nix._topology.byId.runner).parent == null;
       cloneOutsideReadiness = !(lib.elem "nixtache-overlay-ready.target"
         (hostNamed.config.systemd.services."container@additive".requires or [ ]));
+    };
+  };
+
+  namedExecOf = name: hostNamed.config.containers.${name}.config.systemd.services
+    ."nix-daemon-custom".serviceConfig.ExecStart or "";
+  namedFrozenLowerBinds = containerName: lowerRoot: parentFrozenId:
+    let
+      binds = hostNamed.config.containers.${containerName}.bindMounts;
+      stateBinds = lib.all (name:
+        let bind = binds."host-nix-lower-${name}"; in
+        bind.hostPath == "${lowerRoot}/nix/var/nix/${name}"
+        && bind.mountPoint == "${lowerRoot}/nix/var/nix/${name}"
+        && bind.isReadOnly
+      ) [ "db" "gcroots" "profiles" "temproots" ];
+    in
+    binds."host-nix-lower-store".hostPath
+      == "/run/nixtache-overlay/frozen/${parentFrozenId}/nix/store"
+    && binds."host-nix-lower-store".mountPoint == "${lowerRoot}/nix/store"
+    && binds."host-nix-lower-store".isReadOnly
+    && stateBinds
+    && !(binds ? "host-nix-lower-state")
+    && !(binds ? "host-nix-lower-upper");
+  scenarioNamedFrozenLowers = {
+    name = "nested appliance runners consume their selected parent's frozen lower, never its runtime continuation";
+    checks = {
+      alphaLowerUrl = lib.hasInfix
+        "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower/alpha%%26read-only%%3Dtrue"
+        (namedExecOf "alpha");
+      betaLowerUrl = lib.hasInfix
+        "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower/beta%%26read-only%%3Dtrue"
+        (namedExecOf "beta");
+      alphaFrozenBinds = namedFrozenLowerBinds
+        "alpha" "/run/nixtache-runner-lower/alpha" "host-lower";
+      betaFrozenBinds = namedFrozenLowerBinds
+        "beta" "/run/nixtache-runner-lower/beta" "alpha-lower";
+      ownConsumerUppers = lib.hasInfix "upper-layer=/srv/alpha/overlay/upper" (namedExecOf "alpha")
+        && lib.hasInfix "upper-layer=/srv/beta/overlay/upper" (namedExecOf "beta");
+      noSnapshotOrContinuation = lib.all (exec:
+        !(lib.hasInfix "lower-store=local-overlay" exec)
+        && !(lib.hasInfix "nixtache-runner-parent-state" exec)
+        && !(lib.hasInfix "-runtime" exec)
+      ) [ (namedExecOf "alpha") (namedExecOf "beta") ];
+      containerOrdering = lib.all (name:
+        lib.elem "nixtache-overlay-ready.target"
+          hostNamed.config.systemd.services."container@${name}".requires
+      ) [ "alpha" "beta" ];
     };
   };
 
@@ -1217,6 +1256,7 @@ self.nixosModules.runner
     scenarioOverlayLower
     scenarioCascadeLower
     scenarioNamedContainers
+    scenarioNamedFrozenLowers
     scenarioNamedContainerValidation
     scenarioGitSshHost
     scenarioResources
@@ -1252,6 +1292,11 @@ self.nixosModules.runner
   # (writeShellScript), so its content is verified at build time below.
   storageExecSrv = svcSrv."nix-daemon-storage".serviceConfig.ExecStart;
   overlayMountExecAppliance = (servicesOf hostApplianceOverlay)."nix-daemon-overlay-mount".serviceConfig.ExecStart;
+  overlayMountExecCascade = (servicesOf hostCascadeOverlay)."nix-daemon-overlay-mount".serviceConfig.ExecStart;
+  overlayMountExecNamedAlpha = hostNamed.config.containers.alpha.config.systemd.services
+    ."nix-daemon-overlay-mount".serviceConfig.ExecStart;
+  overlayMountExecNamedBeta = hostNamed.config.containers.beta.config.systemd.services
+    ."nix-daemon-overlay-mount".serviceConfig.ExecStart;
   overlaySandboxScriptAppliance = lib.elemAt
     (lib.splitString " " (execOverlayOf hostApplianceOverlaySandbox)) 2;
 
@@ -1273,7 +1318,14 @@ pkgs.runCommand "runner-module-test"
     actionYmlFileSrc = actionYmlFile;
     passAsFile = [ "report" "failMsg" "deployMap" ];
     # Force the scripts into the store so the builder can inspect their text.
-    deps = [ storageExecSrv overlayMountExecAppliance overlaySandboxScriptAppliance ];
+    deps = [
+      storageExecSrv
+      overlayMountExecAppliance
+      overlayMountExecCascade
+      overlayMountExecNamedAlpha
+      overlayMountExecNamedBeta
+      overlaySandboxScriptAppliance
+    ];
   }
   ''
     # Report to stdout (visible in build logs) and into $out (CI prints $out,
@@ -1297,6 +1349,28 @@ pkgs.runCommand "runner-module-test"
       echo "FAIL: appliance overlay does not mount the dedicated host lower store" >> "$out"
       exit 1
     fi
+    if ! grep -q -- 'lowerdir=/run/nixtache-runner-lower/nix/store' "${overlayMountExecCascade}"; then
+      echo "FAIL: cascade overlay does not mount the singleton frozen lower root"
+      echo "FAIL: cascade overlay does not mount the singleton frozen lower root" >> "$out"
+      exit 1
+    fi
+    if ! grep -q -- 'lowerdir=/run/nixtache-runner-lower/alpha/nix/store' "${overlayMountExecNamedAlpha}"; then
+      echo "FAIL: alpha overlay does not mount its named frozen lower root"
+      echo "FAIL: alpha overlay does not mount its named frozen lower root" >> "$out"
+      exit 1
+    fi
+    if ! grep -q -- 'lowerdir=/run/nixtache-runner-lower/beta/nix/store' "${overlayMountExecNamedBeta}"; then
+      echo "FAIL: beta overlay does not mount its nested frozen lower root"
+      echo "FAIL: beta overlay does not mount its nested frozen lower root" >> "$out"
+      exit 1
+    fi
+    for overlay_script in "${overlayMountExecCascade}" "${overlayMountExecNamedAlpha}" "${overlayMountExecNamedBeta}"; do
+      if grep -q -e 'nixtache-runner-parent-state' -e 'cp -a' "$overlay_script"; then
+        echo "FAIL: overlay mount still copies parent metadata into a snapshot"
+        echo "FAIL: overlay mount still copies parent metadata into a snapshot" >> "$out"
+        exit 1
+      fi
+    done
     if ! grep -q -- 'lower-store=local%3Froot%3D/run/nixtache-runner-lower%26read-only%3Dtrue' "${overlaySandboxScriptAppliance}"; then
       echo "FAIL: sandbox wrapper does not preserve the nested lower-store URL"
       echo "FAIL: sandbox wrapper does not preserve the nested lower-store URL" >> "$out"

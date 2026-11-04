@@ -44,7 +44,6 @@ let
     (declaration: declaration.store.path != "/")
     (attrValues enabledDeclarations);
 
-  encodeStoreUri = value: replaceStrings [ "%" "?" "&" "=" ] [ "%25" "%3F" "%26" "%3D" ] value;
 in
 {
   options.services.nixtache.runner.store = typesT.storeOptions { };
@@ -169,24 +168,24 @@ in
 
           # Nix-enabled containers use their system daemon for lower validity.
           # Appliance containers have no system daemon, so they open a dedicated
-          # read-only bind of the host lower. That bind stays outside /nix: the custom
-          # daemon rebinds /nix to the merged relocated store, so a lower rooted at
-          # /nix would read the upper DB instead of the host DB. With host overlay-nix
-          # the lower is the complete parent local-overlay, including its lower-state
-          # and upper-owned state rather than only the parent's upper DB.
+          # read-only local lower outside /nix: the custom daemon rebinds /nix to
+          # the merged relocated store, so a lower rooted at /nix would read the
+          # child's upper DB instead of its parent's frozen DB. With host
+          # overlay-nix, frozen files come from the parent's physical lower and
+          # the child's lower root carries the selected frozen state.
           applianceLowerRoot = if declaration.isSingleton
             then "/run/nixtache-runner-lower"
             else "/run/nixtache-runner-lower/${logicalId}";
-          parentStateRoot = "/run/nixtache-runner-parent-state";
           hostOverlayEnabled = config.services.nixtache.overlay-nix.enable or false;
-          hostLower = "local?root=${applianceLowerRoot}&state=${applianceLowerRoot}/nix/var/nix/lower-state&read-only=true";
-          parentLower = "local-overlay://?root=${applianceLowerRoot}&state=${parentStateRoot}&lower-store=${encodeStoreUri hostLower}&upper-layer=${config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper"}&check-mount=false";
-          lowerStore = if hostNixDisabled && hostOverlayEnabled
-            then encodeStoreUri parentLower
-            else if hostNixDisabled
+          parentLogicalId = if store.parent == null then "host" else store.parent;
+          parentFrozenId = config.services.nixtache.overlay-nix._topology.frozenLowerByLogical.${parentLogicalId};
+          lowerStore = if hostNixDisabled
             then "local%3Froot%3D${applianceLowerRoot}%26read-only%3Dtrue"
             else "daemon";
           lowerStoreDir = if hostNixDisabled then "${applianceLowerRoot}/nix/store" else "/nix/store";
+          lowerStateSource = name: if hostOverlayEnabled
+            then "${applianceLowerRoot}/nix/var/nix/${name}"
+            else "/nix/var/nix/${name}";
           overlayStoreUrl = "local-overlay://"
             + "?root=${store.path}"
             + "&lower-store=${lowerStore}"
@@ -209,38 +208,30 @@ in
           }) // (optionalAttrs (hostNixDisabled && useOverlay) {
             "host-nix-lower-store" = {
               mountPoint = "${applianceLowerRoot}/nix/store";
-              hostPath = "/nix/store";
+              hostPath = if hostOverlayEnabled
+                then "/run/nixtache-overlay/frozen/${parentFrozenId}/nix/store"
+                else "/nix/store";
               isReadOnly = true;
             };
             "host-nix-lower-db" = {
               mountPoint = "${applianceLowerRoot}/nix/var/nix/db";
-              hostPath = "/nix/var/nix/db";
+              hostPath = lowerStateSource "db";
               isReadOnly = true;
             };
           }) // (optionalAttrs (hostNixDisabled && hostOverlayEnabled && useOverlay) {
             "host-nix-lower-gcroots" = {
               mountPoint = "${applianceLowerRoot}/nix/var/nix/gcroots";
-              hostPath = "/nix/var/nix/gcroots";
+              hostPath = lowerStateSource "gcroots";
               isReadOnly = true;
             };
             "host-nix-lower-profiles" = {
               mountPoint = "${applianceLowerRoot}/nix/var/nix/profiles";
-              hostPath = "/nix/var/nix/profiles";
+              hostPath = lowerStateSource "profiles";
               isReadOnly = true;
             };
             "host-nix-lower-temproots" = {
               mountPoint = "${applianceLowerRoot}/nix/var/nix/temproots";
-              hostPath = "/nix/var/nix/temproots";
-              isReadOnly = true;
-            };
-            "host-nix-lower-state" = {
-              mountPoint = "${applianceLowerRoot}/nix/var/nix/lower-state";
-              hostPath = "${config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper"}/../lower-state";
-              isReadOnly = true;
-            };
-            "host-nix-lower-upper" = {
-              mountPoint = config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper";
-              hostPath = config.services.nixtache.overlay-nix.upperDir or "/var/lib/nix-overlay/upper";
+              hostPath = lowerStateSource "temproots";
               isReadOnly = true;
             };
           });
@@ -467,13 +458,6 @@ in
                   Type = "oneshot";
                   RemainAfterExit = true;
                   ExecStart = pkgs.writeShellScript "mount-nix-overlay" ''
-                    ${optionalString (hostNixDisabled && hostOverlayEnabled) ''
-                      rm -rf ${parentStateRoot}
-                      mkdir -p ${parentStateRoot}
-                      for name in db gcroots profiles temproots; do
-                        cp -a ${applianceLowerRoot}/nix/var/nix/$name ${parentStateRoot}/$name
-                      done
-                    ''}
                     mkdir -p ${store.path}/nix/var/nix/daemon-socket
                     mkdir -p ${store.path}/overlay/upper
                     mkdir -p ${store.path}/overlay/work
