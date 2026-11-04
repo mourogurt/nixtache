@@ -23,10 +23,11 @@
 # LFS-enabled workflows defer checkout transfer to the shared lfs-fetch action;
 # fake endpoints exercise SSH preference, HTTPS fallback, explicit endpoint
 # preservation and redacted total failure. Fast, no KVM.
-{ nixpkgs, system ? "x86_64-linux" }:
+{ nixpkgs, system ? "x86_64-linux", vmSuiteNames ? [ ] }:
 
 let
   pkgs = nixpkgs.legacyPackages.${system};
+  expectedVmSuites = pkgs.writeText "vm-suite-inventory.json" (builtins.toJSON vmSuiteNames);
 
   workflowsSrc = pkgs.runCommand "nixtache-forgejo-workflows" { } ''
     mkdir -p $out
@@ -42,11 +43,11 @@ pkgs.runCommand "ci-workflow-drift-test"
   ''
   set -uo pipefail
   report="$(mktemp)"
-  python3 - "${workflowsSrc}" "$report" <<'PYEOF'
-  import glob, os, re, shutil, subprocess, sys, tempfile, textwrap
+  python3 - "${workflowsSrc}" "$report" "${expectedVmSuites}" <<'PYEOF'
+  import glob, json, os, re, shutil, subprocess, sys, tempfile, textwrap
   import yaml
 
-  src, report_path = sys.argv[1], sys.argv[2]
+  src, report_path, vm_inventory_path = sys.argv[1], sys.argv[2], sys.argv[3]
   action_path = os.path.join(src, "lfs-fetch-action.yml")
 
   # Composite actions that read SANDBOX_OK (exported by sandbox-probe) and
@@ -161,6 +162,22 @@ pkgs.runCommand "ci-workflow-drift-test"
               bad("vmtests.yml step '%s': nix build does not apply $SANDBOX_FLAG" % name)
           else:
               ok("vmtests.yml step '%s' derives and applies SANDBOX_FLAG" % name)
+      with open(vm_inventory_path) as f:
+          expected_suites = set(json.load(f))
+      matrix_suite_list = (
+          ((vm.get("jobs") or {}).get("suites") or {})
+          .get("strategy", {}).get("matrix", {}).get("suite", [])
+      )
+      matrix_suites = set(matrix_suite_list)
+      if len(matrix_suite_list) != len(matrix_suites):
+          bad("vmtests.yml matrix contains duplicate suite entries")
+      if expected_suites != matrix_suites:
+          bad(
+              "vmtests.yml matrix differs from vmTests.x86_64-linux: missing=%s unexpected=%s"
+              % (sorted(expected_suites - matrix_suites), sorted(matrix_suites - expected_suites))
+          )
+      else:
+          ok("vmtests.yml matrix exactly covers vmTests.x86_64-linux")
 
   # docs.yml builds the caller flake, so it wires the same private-input
   # credential path as nix-check.yml: derive the SSH host list from the push

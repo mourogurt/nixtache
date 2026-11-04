@@ -94,7 +94,11 @@ jobs:
           # container in appliance mode. Both modes in the matrix.
           - runner-store-swap-clone-vm
           - runner-store-swap-overlay-vm
+          - runner-store-swap-overlay-ephemeral-vm
+          - runner-store-parent-metadata-freshness-vm
           - auto-update-vm
+          - auto-update-managed-tmpfs-window-vm
+          - auto-update-no-intermediate-reboot-vm
           - overlay-nix-vm
           - overlay-nix-install-vm
           - overlay-nix-ab-swap-vm
@@ -103,6 +107,30 @@ jobs:
           - overlay-nix-ota-invalid-reconcile-vm
           - overlay-nix-ota-invalid-reconcile-degraded-vm
           - overlay-nix-ota-invalid-tmpfs-vm
+          - overlay-nix-fault-migration-mv-vm
+          - overlay-nix-fault-migration-exdev-vm
+          - overlay-nix-fault-activation-state-vm
+          - overlay-nix-fault-publication-stage-mv-vm
+          - overlay-nix-fault-publication-ready-vm
+          - overlay-nix-fault-publication-current-vm
+          - overlay-nix-fault-concurrent-vm
+          - overlay-nix-fault-concurrent-booted-vm
+          - overlay-nix-fault-retention-vm
+          - overlay-tree-sibling-wipe-vm
+          - overlay-tree-sibling-reconcile-vm
+          - overlay-tree-nested-wipe-vm
+          - overlay-tree-nested-reconcile-vm
+          - overlay-tree-composed-wipe-vm
+          - overlay-tree-composed-reconcile-vm
+          - overlay-tree-failure-host-vm
+          - overlay-tree-failure-a-vm
+          - overlay-tree-failure-grand-vm
+          - overlay-tree-failure-b-vm
+          - overlay-tree-parent-root-vm
+          - overlay-tree-refs-vm
+          - overlay-tree-rollback-vm
+          - overlay-tree-ephemeral-host-vm
+          - overlay-tree-ephemeral-a-vm
           - runner-store-mode-vm
           - runner-builder-isolation-vm
     steps:

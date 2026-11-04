@@ -31,7 +31,8 @@ pkgs.testers.runNixOSTest {
   globalTimeout = 5400;
 
   nodes.deployer = otaLib.deployerNode {
-    extraDependencies = cacheDependencies ++ builtins.attrValues markerPackages;
+    extraDependencies = cacheDependencies ++ builtins.attrValues markerPackages
+      ++ lib.optional (ephemeralNode == "a") fixture.v2SysupdatePkg;
   };
 
   testScript = ''
@@ -65,6 +66,12 @@ pkgs.testers.runNixOSTest {
     def fs_path(node, store_path):
         return ROOTS[node].rstrip("/") + store_path
 
+    def node_dir(target, node):
+        return target + ("/host" if node == "host" else "/layers/" + node)
+
+    def upper_path(node, path, target):
+        return node_dir(target, node) + "/upper/" + basename(path)
+
     def nix_store(node, args):
         features = "ca-derivations local-overlay-store read-only-local-store"
         return "nix-store --option experimental-features " + q(features) + " --store " + q(STORES[node]) + " " + args
@@ -86,14 +93,6 @@ pkgs.testers.runNixOSTest {
 
     def state_path(node):
         return STATES[node]
-
-    def db_hashes(nodes):
-        return {
-          node: appliance.succeed(
-            "sha256sum " + q(state_path(node) + "/db/db.sqlite") + " | awk '{print $1}'"
-          ).strip()
-          for node in nodes
-        }
 
     def assert_runtime_consumers(nodes):
         for node, consumer in CONSUMERS.items():
@@ -156,6 +155,66 @@ pkgs.testers.runNixOSTest {
                 else:
                     appliance.succeed("test -e " + q(directory + "/ephemeral-sentinel"))
 
+    def prepare_installed_generation():
+        active_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+        deployer.succeed(
+          "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+          "cp ${fixture.v2SysupdatePkg}/* /var/lib/nixtache/ab-stage/abtest/"
+        )
+        appliance.succeed("systemctl start --wait systemd-sysupdate-update.service", timeout=900)
+        target_slot = appliance.succeed(
+          "lsblk -nrpo PARTUUID,PARTLABEL | "
+          "awk -v active=" + q(active_slot) + " "
+          "'BEGIN{IGNORECASE=1} $2 ~ /^nix-store_/ && tolower($1) != active "
+          "{print tolower($1); exit}'"
+        ).strip()
+        assert target_slot and target_slot != active_slot
+        appliance.succeed("systemctl restart nixtache-overlay-prepare.service", timeout=900)
+        assert appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip() == target_slot
+        target_root = "/var/lib/nix-overlay/upper-slots/" + target_slot
+        generation = appliance.succeed("readlink -f " + q(target_root + "/current")).strip()
+        appliance.succeed("grep -q '^state=ready$' " + q(generation + "/metadata"))
+        return generation
+
+    def assert_no_host_metaslot():
+        for base in ("/tmp/nix-overlay-host/upper-slots", "/tmp/nix-overlay-host/legacy-backup"):
+            appliance.fail("find " + q(base) + " -mindepth 1 -print -quit 2>/dev/null | grep -q .")
+
+    def assert_generation_layout(generation, persistent_nodes):
+        for node in RESET_NODES:
+            base = node_dir(generation, node)
+            directories = [base + "/upper"] + [
+              base + "/state/" + name for name in ("db", "gcroots", "profiles", "temproots")
+            ]
+            for directory in directories:
+                appliance.fail("find " + q(directory) + " -mindepth 1 -print -quit 2>/dev/null | grep -q .")
+        for node in persistent_nodes:
+            path = MARKERS[node]
+            marker = upper_path(node, path, generation)
+            appliance.succeed("grep -Fqx " + q(EPHEMERAL + ":" + node) + " " + q(marker))
+            root = node_dir(generation, node) + "/state/gcroots/ephemeral-marker"
+            assert appliance.succeed("readlink " + q(root)).strip() == path
+            db = node_dir(generation, node) + "/state/db/db.sqlite"
+            sql = "SELECT COUNT(*) FROM ValidPaths WHERE path = '" + path + "';"
+            assert appliance.succeed("sqlite3 " + q(db) + " " + q(sql)).strip() == "1"
+        print("OK: prepared generation contains no persistent ephemeral upper or state copies; persistent siblings retain files, roots and DB records")
+
+    def prepared_db_hashes(generation, nodes):
+        return {
+          node: appliance.succeed(
+            "sha256sum " + q(node_dir(generation, node) + "/state/db/db.sqlite") + " | awk '{print $1}'"
+          ).strip()
+          for node in nodes
+        }
+
+    def active_db_hashes(nodes):
+        return {
+          node: appliance.succeed(
+            "sha256sum " + q(STATES[node] + "/db/db.sqlite") + " | awk '{print $1}'"
+          ).strip()
+          for node in nodes
+        }
+
     def assert_markers_valid(nodes):
         for node in nodes:
             path = MARKERS[node]
@@ -195,26 +254,34 @@ pkgs.testers.runNixOSTest {
     print("OK: composed consumers and unique registered markers work at every node before reboot")
 
     persistent_nodes = [node for node in NODE_IDS if node not in RESET_NODES]
-    persistent_hashes = db_hashes(persistent_nodes)
-    persistent_generation = None
-    if persistent_nodes:
-        persistent_generation = appliance.succeed(
-          "readlink -f /var/lib/nix-overlay/upper-slots/$(cat /run/nixtache-overlay/selected-slot)/current"
-        ).strip()
 
     for unit in MOUNT_UNITS + ["nix-daemon-overlay-mount.service", "nix-daemon.service", "nix-daemon.socket"]:
         appliance.succeed("systemctl stop " + unit + " || true")
     plant_sentinels()
+    if EPHEMERAL == "a":
+        deployer.wait_for_unit("nginx.service")
+        persistent_generation = prepare_installed_generation()
+        assert_generation_layout(persistent_generation, persistent_nodes)
+        prepared_hashes = prepared_db_hashes(persistent_generation, persistent_nodes)
+    else:
+        persistent_generation = None
+        prepared_hashes = None
+        assert_no_host_metaslot()
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=1800)
+    assert appliance.succeed("cat /etc/image-version").strip() == ("2" if EPHEMERAL == "a" else "1")
     wait_ready_tree()
+    if EPHEMERAL == "a":
+        assert_generation_layout(persistent_generation, persistent_nodes)
+    else:
+        assert_no_host_metaslot()
     assert_sentinels()
     assert_markers_invalid(RESET_NODES)
     assert_markers_valid(persistent_nodes)
     assert_runtime_consumers(persistent_nodes)
 
     if persistent_nodes:
-        assert db_hashes(persistent_nodes) == persistent_hashes, "persistent DBs changed during descendant reset"
+        assert active_db_hashes(persistent_nodes) == prepared_hashes, "persistent sibling DBs changed while activating the ephemeral reset"
         assert appliance.succeed(
           "readlink -f /var/lib/nix-overlay/upper-slots/$(cat /run/nixtache-overlay/selected-slot)/current"
         ).strip() == persistent_generation, "persistent generation changed during descendant reset"

@@ -85,7 +85,10 @@
         # workflow YAMLs (every building job probes the sandbox before its
         # first build step; vmtests.yml applies the SANDBOX_OK flag) — fast,
         # no KVM.
-        ci-workflow-drift = import ./tests/ci-workflow-drift.nix { inherit nixpkgs system; };
+        ci-workflow-drift = import ./tests/ci-workflow-drift.nix {
+          inherit nixpkgs system;
+          vmSuiteNames = builtins.attrNames self.vmTests.x86_64-linux;
+        };
       });
 
       # ── KVM-only VM suites (runNixOSTest / QEMU). NOT part of `checks`:
@@ -163,6 +166,17 @@
         overlay-tree-rollback-vm = import ./tests/overlay-tree-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; };
         overlay-tree-ephemeral-host-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; ephemeralNode = "host"; };
         overlay-tree-ephemeral-a-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; ephemeralNode = "a"; };
+        overlay-nix-fault-migration-mv-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "migration-mv"; };
+        overlay-nix-fault-migration-exdev-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "migration-exdev"; };
+        overlay-nix-fault-activation-state-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "activation-state"; };
+        overlay-nix-fault-publication-stage-mv-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "publication-stage-mv"; };
+        overlay-nix-fault-publication-ready-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "publication-ready"; };
+        overlay-nix-fault-publication-current-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "publication-current"; };
+        overlay-nix-fault-concurrent-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "concurrent"; };
+        overlay-nix-fault-concurrent-booted-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "concurrent-booted"; };
+        overlay-nix-fault-retention-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "retention"; };
+        overlay-tree-parent-root-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "grand"; faultScenarios = [ "parent-root" ]; };
+        overlay-tree-refs-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "host"; faultScenarios = [ "refs" ]; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style
@@ -185,6 +199,8 @@
         # auto-update-vm: the auto-update module end-to-end — flake path and
         # ab path.
         auto-update-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; };
+        auto-update-managed-tmpfs-window-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "managed-tmpfs-window"; };
+        auto-update-no-intermediate-reboot-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "no-intermediate-reboot"; };
         # ab-ota-rollback-vm: boot-counting rollback — a broken v2 exhausts
         # its tries, the blessed v1 boots, and a fixed v3 still installs.
         ab-ota-rollback-vm = import ./tests/ab-ota-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; };
@@ -219,6 +235,7 @@
         runner-store-swap-clone-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; storeMode = "clone"; };
         runner-store-swap-overlay-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; storeMode = "overlay"; };
         runner-store-swap-overlay-ephemeral-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; storeMode = "overlay"; ephemeral = true; };
+        runner-store-parent-metadata-freshness-vm = import ./tests/runner-store-swap-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; storeMode = "overlay"; scenario = "parent-metadata-freshness"; };
       };
 
       # --- This flake's own option docs -----------------------------------
