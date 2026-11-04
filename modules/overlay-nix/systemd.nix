@@ -145,7 +145,7 @@ in
         before = [ "nixtache-overlay-ready.target" "nix-daemon-overlay-mount.service" ];
         after = [ "nixtache-overlay-select.service" ];
         requires = [ "nixtache-overlay-select.service" ];
-        path = with pkgs; [ coreutils util-linux ];
+        path = with pkgs; [ coreutils gnugrep util-linux ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
@@ -162,6 +162,10 @@ in
           if [ -n "$generation" ] && [ -f "$generation/plan.rows" ]; then
             rows="$generation/plan.rows"
             published_plan=1
+            [ -f "$generation/persistent-plan.rows" ] || {
+              echo "nixtache-overlay: selected persistent plan is missing" >&2
+              exit 1
+            }
           fi
           mountpoint -q ${physicalHostRoot}/nix/store
           while IFS='|' read -r physical_id logical_id role parent rest; do
@@ -183,7 +187,9 @@ in
                   upper="$generation/layers/$logical_id/upper"
                 fi
               fi
-              if [ "$published_plan" = 1 ] && [ ! -d "$upper" ]; then
+              if [ "$published_plan" = 1 ] && ! grep -q "^$physical_id|" "$generation/persistent-plan.rows"; then
+                upper=""
+              elif [ "$published_plan" = 1 ] && [ ! -d "$upper" ]; then
                 echo "nixtache-overlay: selected frozen upper is missing: $physical_id" >&2
                 exit 1
               fi
