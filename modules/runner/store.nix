@@ -177,13 +177,17 @@ in
             then "/run/nixtache-runner-lower"
             else "/run/nixtache-runner-lower/${logicalId}";
           hostOverlayEnabled = config.services.nixtache.overlay-nix.enable or false;
+          selectionManagedLower = hostOverlayEnabled && (config.services.nixtache.ab-image.enable or false);
+          selectionParentRoot = config.services.nixtache.overlay-nix._topology.parentRoot logicalId;
           parentLogicalId = if store.parent == null then "host" else store.parent;
           parentFrozenId = config.services.nixtache.overlay-nix._topology.frozenLowerByLogical.${parentLogicalId};
           lowerStore = if hostNixDisabled
             then "local%3Froot%3D${applianceLowerRoot}%26read-only%3Dtrue"
             else "daemon";
           lowerStoreDir = if hostNixDisabled then "${applianceLowerRoot}/nix/store" else "/nix/store";
-          lowerStateSource = name: if hostOverlayEnabled
+          lowerStateSource = name: if selectionManagedLower
+            then "${selectionParentRoot}/nix/var/nix/${name}"
+            else if hostOverlayEnabled
             then "${applianceLowerRoot}/nix/var/nix/${name}"
             else "/nix/var/nix/${name}";
           overlayStoreUrl = "local-overlay://"
@@ -208,7 +212,9 @@ in
           }) // (optionalAttrs (hostNixDisabled && useOverlay) {
             "host-nix-lower-store" = {
               mountPoint = "${applianceLowerRoot}/nix/store";
-              hostPath = if hostOverlayEnabled
+              hostPath = if selectionManagedLower
+                then "${selectionParentRoot}/nix/store"
+                else if hostOverlayEnabled
                 then "/run/nixtache-overlay/frozen/${parentFrozenId}/nix/store"
                 else "/nix/store";
               isReadOnly = true;

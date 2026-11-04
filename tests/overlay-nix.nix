@@ -498,18 +498,16 @@ let
   frozenTopology = (cfgOf hostFrozenRunners)._topology;
   frozenServices = servicesOf hostFrozenRunners;
   frozenSelection = frozenServices.nixtache-overlay-select.script;
-  hostFrozenService = frozenServices.nixtache-overlay-frozen-host-lower;
-  alphaFrozenService = frozenServices.nixtache-overlay-frozen-alpha-lower;
+  frozenPlanService = frozenServices.nixtache-overlay-frozen;
   hostMountService = frozenServices.nix-daemon-overlay-mount;
+  frozenPlanUnit = "nixtache-overlay-frozen.service";
   hostFrozenUnit = "nixtache-overlay-frozen-host-lower.service";
   alphaFrozenUnit = "nixtache-overlay-frozen-alpha-lower.service";
-  selectsFrozenState = physicalId: logicalId: nodeId:
-    lib.hasInfix (lib.concatStringsSep "\n  " [
-      ''selected_frozen=$(select_frozen_generation "${physicalId}" "${logicalId}")''
-      ''activate_frozen_state "$selected_frozen/state" /run/nixtache-runner-lower/${nodeId}/nix/var/nix''
-    ]) frozenSelection;
+  selectsPlanParent = nodeId:
+    lib.hasInfix "parent_physical=$(plan_consumer_parent ${nodeId})" frozenSelection
+    && lib.hasInfix "activate_path \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" frozenSelection;
   scenarioRuntimeFrozenLowers = {
-    name = "runtime consumers use selected frozen parents with dedicated state and exact ordering";
+    name = "runtime consumers use selected frozen parents with dedicated state and plan ordering";
     checks = {
       derivedFrozenParents = frozenTopology.frozenParentByLogical.host == "host-lower"
         && frozenTopology.frozenParentByLogical.alpha == "alpha-lower"
@@ -518,51 +516,102 @@ let
       runtimeContinuationsRetained = frozenTopology.consumerNodeByLogical.host == "host-runtime"
         && frozenTopology.consumerNodeByLogical.alpha == "alpha-runtime"
         && frozenTopology.consumerNodeByLogical.beta == "beta";
-      selectedPhysicalUppers = lib.hasInfix ''upper="$generation/nodes/host-lower/upper"'' hostFrozenService.script
-        && lib.hasInfix ''upper="$generation/nodes/alpha-lower/upper"'' alphaFrozenService.script;
-      selectedSlotAndGeneration = lib.hasInfix "slot=$(cat /run/nixtache-overlay/selected-slot" hostFrozenService.script
-        && lib.hasInfix ''"$(readlink -f "/var/lib/nix-overlay/upper-slots/$slot/current")" = "$generation"'' alphaFrozenService.script;
-      privateRunWork = lib.hasInfix ''lowerdir=/run/nixtache-overlay/frozen/host-lower/upper:"$lower_root",upperdir=/run/nixtache-overlay/frozen/host-lower/private-upper,workdir=/run/nixtache-overlay/frozen/host-lower/work'' hostFrozenService.script
-        && lib.hasInfix ''lowerdir=/run/nixtache-overlay/frozen/alpha-lower/upper:"$lower_root",upperdir=/run/nixtache-overlay/frozen/alpha-lower/private-upper,workdir=/run/nixtache-overlay/frozen/alpha-lower/work'' alphaFrozenService.script;
-      frozenStoresReadOnly = lib.hasInfix "mount -o remount,ro,bind /run/nixtache-overlay/frozen/host-lower/nix/store" hostFrozenService.script
-        && lib.hasInfix "mount -o remount,ro,bind /run/nixtache-overlay/frozen/alpha-lower/nix/store" alphaFrozenService.script;
-      frozenParentsFirst = lib.elem hostFrozenUnit alphaFrozenService.after
-        && lib.elem hostFrozenUnit alphaFrozenService.requires
-        && lib.hasInfix "lower_root=/run/nixtache-overlay/frozen/host-lower/nix/store" alphaFrozenService.script;
-      hostRuntimeUsesFrozenLower = lib.elem hostFrozenUnit hostMountService.after
-        && lib.elem hostFrozenUnit hostMountService.requires
-        && lib.hasInfix "lowerdir=/run/nixtache-overlay/frozen/host-lower/nix/store" hostMountService.script
-        && lib.hasInfix "lower-store=local%3Froot%3D/run/nixtache-overlay/frozen/host-lower%26state%3D/run/nixtache-overlay/frozen/host-lower/nix/var/nix%26read-only%3Dtrue" hostFrozenRunners.config.nix.settings.store;
-      readinessRequiresExactFrozenMounts = lib.all (unit:
+      selectedPhysicalUppers = lib.hasInfix ''upper="$generation/nodes/$physical_id/upper"'' frozenPlanService.script
+        && lib.hasInfix ''rows="$generation/plan.rows"'' frozenPlanService.script;
+      selectedSlotAndGeneration = lib.hasInfix "slot=$(cat /run/nixtache-overlay/selected-slot" frozenPlanService.script
+        && lib.hasInfix ''"$(readlink -f "/var/lib/nix-overlay/upper-slots/$slot/current")" = "$generation"'' frozenPlanService.script;
+      privateRunWork = lib.hasInfix ''frozen_root="/run/nixtache-overlay/frozen/$physical_id"'' frozenPlanService.script
+        && lib.hasInfix ''lowerdir="$upper_dir":"$lower_root",upperdir="$private_upper",workdir="$work_dir" "$store_dir"'' frozenPlanService.script;
+      frozenStoresReadOnly = lib.hasInfix ''mount -o remount,ro,bind "$store_dir"'' frozenPlanService.script;
+      frozenParentsFirst = lib.hasInfix ''lower_root="/run/nixtache-overlay/frozen/$parent/nix/store"'' frozenPlanService.script
+        && lib.hasInfix ''mountpoint -q "$lower_root"'' frozenPlanService.script
+        && lib.hasInfix ''done < "$rows"'' frozenPlanService.script
+        && (posOf ''mountpoint -q "$lower_root"'' frozenPlanService.script)
+          < (posOf ''mount -t overlay overlay'' frozenPlanService.script);
+      hostRuntimeUsesFrozenLower = lib.elem frozenPlanUnit hostMountService.after
+        && lib.elem frozenPlanUnit hostMountService.requires
+        && lib.hasInfix "lowerdir=/run/nixtache-overlay/parents/host/nix/store" hostMountService.script
+        && lib.hasInfix "lower-store=local%3Froot%3D/run/nixtache-overlay/parents/host%26state%3D/run/nixtache-overlay/parents/host/nix/var/nix%26read-only%3Dtrue" hostFrozenRunners.config.nix.settings.store;
+      readinessRequiresPlanFrozenMounts = lib.all (unit:
         lib.elem unit hostFrozenRunners.config.systemd.targets.nixtache-overlay-ready.after
         && lib.elem unit hostFrozenRunners.config.systemd.targets.nixtache-overlay-ready.requires
-      ) [ hostFrozenUnit alphaFrozenUnit ];
-      containersRequireExactFrozenParent =
-        lib.elem alphaFrozenUnit frozenServices."container@alpha".requires
-        && lib.elem alphaFrozenUnit frozenServices."container@beta".requires
-        && lib.elem hostFrozenUnit frozenServices."container@gamma".requires
-        && lib.elem alphaFrozenUnit frozenServices."container@alpha".after
-        && lib.elem alphaFrozenUnit frozenServices."container@beta".after;
+      ) [ frozenPlanUnit ]
+        && !(lib.elem hostFrozenUnit hostFrozenRunners.config.systemd.targets.nixtache-overlay-ready.requires)
+        && !(lib.elem alphaFrozenUnit hostFrozenRunners.config.systemd.targets.nixtache-overlay-ready.requires);
+      containersRequireReadinessBoundary = lib.all (name:
+        lib.elem "nixtache-overlay-ready.target" frozenServices."container@${name}".requires
+        && lib.elem "nixtache-overlay-ready.target" frozenServices."container@${name}".after
+        && !(lib.elem hostFrozenUnit frozenServices."container@${name}".requires)
+        && !(lib.elem alphaFrozenUnit frozenServices."container@${name}".requires)
+      ) [ "alpha" "beta" "gamma" ];
       lowerRootsSelectFrozenMetadata =
-        selectsFrozenState "alpha-lower" "alpha" "alpha"
-        && selectsFrozenState "alpha-lower" "alpha" "beta"
-        && selectsFrozenState "host-lower" "host" "gamma"
-        && lib.hasInfix ''candidate="$generation/nodes/$physical_id"'' frozenSelection;
+        selectsPlanParent "host"
+        && selectsPlanParent "alpha"
+        && selectsPlanParent "beta"
+        && selectsPlanParent "gamma"
+        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/alpha/nix/var/nix'' frozenSelection
+        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/beta/nix/var/nix'' frozenSelection;
       frozenMetadataReadOnlyWithoutCopies =
         lib.hasInfix ''mount -o remount,ro,bind "$target/$name"'' frozenSelection
         && !(lib.hasInfix "cp -a" frozenSelection);
       noRuntimeContinuationLower =
         !(lib.hasInfix ''activate_frozen_state "$consumer_generation/state"'' frozenSelection)
-        && !(lib.hasInfix "lower_root=/nix/store" alphaFrozenService.script)
+        && !(lib.hasInfix "lower_root=/nix/store" frozenPlanService.script)
         && !(lib.hasInfix "host-runtime/nix/store" hostMountService.script);
       legacyAndEphemeralFallbacksRetained =
         lib.hasInfix ''candidate="$generation/host"'' frozenSelection
         && lib.hasInfix ''candidate="$generation/layers/$logical_id"'' frozenSelection
+        && lib.hasInfix "nixtache-overlay-legacy-frozen.rows" frozenPlanService.script
+        && lib.hasInfix ''upper="$generation/layers/$logical_id/upper"'' frozenPlanService.script
         && lib.hasInfix "bind_frozen_state" frozenSelection
         && lib.hasInfix "reset_frozen_path" frozenSelection;
+      noEvalOnlyFrozenUnits = !(frozenServices ? nixtache-overlay-frozen-host-lower)
+        && !(frozenServices ? nixtache-overlay-frozen-alpha-lower);
       nonAbLayoutKeepsLegacyMount =
         lib.hasInfix "lowerdir=/nix/store" (hostWithLayers [ (layer "a" null) ]).config.systemd.services.nix-daemon-overlay-mount.script
-        && !((hostWithLayers [ (layer "a" null) ]).config.systemd.services ? nixtache-overlay-frozen-host-lower);
+        && !((hostWithLayers [ (layer "a" null) ]).config.systemd.services ? nixtache-overlay-frozen);
+    };
+  };
+
+  retainedLeafRunners = mkRunnerAppliance {
+    services.nixtache.runner.containers = {
+      alpha = runnerOverlayStore "alpha" null;
+    };
+  };
+  retainedLeafTopology = (cfgOf retainedLeafRunners)._topology;
+  retainedLeafSelection = frozenTopology.transition {
+    targetLogical = retainedLeafTopology.nodes;
+    policy = "reconcile";
+  };
+  retainedHostRunners = mkRunnerAppliance {
+    services.nixtache.runner.enable = lib.mkForce false;
+  };
+  retainedHostTopology = (cfgOf retainedHostRunners)._topology;
+  retainedHostSelection = frozenTopology.transition {
+    targetLogical = retainedHostTopology.nodes;
+    policy = "reconcile";
+  };
+  retainedLeafFrozenService = (servicesOf retainedLeafRunners).nixtache-overlay-frozen or { };
+  retainedHostFrozenService = (servicesOf retainedHostRunners).nixtache-overlay-frozen or { };
+  scenarioRetainedRuntimePlan = {
+    name = "selected plans retain split mounts and stable parent roots after target eval collapses to leaves";
+    checks = {
+      targetEvalCollapses = !(retainedLeafTopology.physical.byId ? "alpha-lower")
+        && !(retainedHostTopology.physical.byId ? "host-lower");
+      selectedPlanRetainsSplit = retainedLeafSelection.physical.byId ? "alpha-lower"
+        && retainedLeafSelection.physical.byId ? "alpha-runtime"
+        && retainedHostSelection.physical.byId ? "host-lower"
+        && retainedHostSelection.physical.byId ? "host-runtime";
+      planMountServiceExistsWithoutEvalRows = retainedLeafFrozenService ? script
+        && retainedHostFrozenService ? script;
+      planRowsDriveParentFirstMounts = lib.hasInfix ''while IFS='|' read -r physical_id logical_id role parent rest; do'' (retainedLeafFrozenService.script or "")
+        && lib.hasInfix ''done < "$rows"'' (retainedLeafFrozenService.script or "")
+        && lib.hasInfix ''lower_root="/run/nixtache-overlay/frozen/$parent/nix/store"'' (retainedLeafFrozenService.script or "");
+      hostLeafUsesStableLower = lib.hasInfix
+        "lower-store=local%3Froot%3D/run/nixtache-overlay/parents/host%26state%3D/run/nixtache-overlay/parents/host/nix/var/nix%26read-only%3Dtrue"
+        retainedHostRunners.config.nix.settings.store;
+      readinessUsesPlanBoundary = lib.elem "nixtache-overlay-frozen.service"
+        retainedHostRunners.config.systemd.targets.nixtache-overlay-ready.requires;
     };
   };
 
@@ -673,6 +722,7 @@ let
     scenarioReparentLineage
     scenarioTransitionOperations
     scenarioRuntimeFrozenLowers
+    scenarioRetainedRuntimePlan
     scenarioDuplicateRejected
     scenarioMissingParentRejected
     scenarioCycleRejected

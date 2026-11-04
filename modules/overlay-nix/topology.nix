@@ -70,11 +70,14 @@ let
     (map (node: { inherit (node) id parent; }) sortedTopology));
   physicalLib = import ./physical.nix { inherit lib; };
   physicalTopology = physicalLib.derive { logicalNodes = sortedTopology; };
+  parentRoot = logicalId: "${runtimeState}/parents/${logicalId}";
+  physicalHostRoot = "${runtimeState}/physical-host";
+  frozenRoot = physicalId: "${runtimeState}/frozen/${physicalId}";
   frozenParentByLogical = mapAttrs
     (_: consumerId: physicalTopology.physical.byId.${consumerId}.parent)
     physicalTopology.consumerNodeByLogical;
   frozenMounts = map (node:
-    let root = "${runtimeState}/frozen/${node.id}"; in {
+    let root = frozenRoot node.id; in {
       inherit (node) id logicalId parent;
       inherit root;
       upperDir = "${root}/upper";
@@ -107,7 +110,7 @@ in
       order = sortedNodeIds;
       fingerprint = topologyFingerprint;
       descriptor = logicalDescriptor;
-      inherit frozenParentByLogical frozenMounts frozenMountByPhysical;
+      inherit frozenParentByLogical frozenMounts frozenMountByPhysical parentRoot physicalHostRoot frozenRoot;
       rebase = args: physicalLib.derive ({
         logicalNodes = sortedTopology;
         previousPhysical = physicalTopology.physical.nodes;

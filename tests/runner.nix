@@ -930,7 +930,7 @@ self.nixosModules.runner
   cascadeBinds = bindMountsOf hostCascadeOverlay;
   cascadeLowerStateBinds = lib.all (name:
     let bind = cascadeBinds."host-nix-lower-${name}"; in
-    bind.hostPath == "/run/nixtache-runner-lower/nix/var/nix/${name}"
+    bind.hostPath == "/run/nixtache-overlay/parents/runner/nix/var/nix/${name}"
     && bind.mountPoint == "/run/nixtache-runner-lower/nix/var/nix/${name}"
     && bind.isReadOnly
   ) [ "db" "gcroots" "profiles" "temproots" ];
@@ -943,7 +943,7 @@ self.nixosModules.runner
       lowerNotComposite = !(lib.hasInfix "lower-store=local-overlay" (execOverlayOf hostCascadeOverlay));
       noParentStateScratch = !(lib.hasInfix "nixtache-runner-parent-state" (execOverlayOf hostCascadeOverlay));
       lowerStoreBind = cascadeBinds."host-nix-lower-store".hostPath
-          == "/run/nixtache-overlay/frozen/host-lower/nix/store"
+          == "/run/nixtache-overlay/parents/runner/nix/store"
         && cascadeBinds."host-nix-lower-store".mountPoint
           == "/run/nixtache-runner-lower/nix/store"
         && cascadeBinds."host-nix-lower-store".isReadOnly;
@@ -1024,18 +1024,18 @@ self.nixosModules.runner
 
   namedExecOf = name: hostNamed.config.containers.${name}.config.systemd.services
     ."nix-daemon-custom".serviceConfig.ExecStart or "";
-  namedFrozenLowerBinds = containerName: lowerRoot: parentFrozenId:
+  namedFrozenLowerBinds = containerName: lowerRoot:
     let
       binds = hostNamed.config.containers.${containerName}.bindMounts;
+      parentRoot = "/run/nixtache-overlay/parents/${containerName}";
       stateBinds = lib.all (name:
         let bind = binds."host-nix-lower-${name}"; in
-        bind.hostPath == "${lowerRoot}/nix/var/nix/${name}"
+        bind.hostPath == "${parentRoot}/nix/var/nix/${name}"
         && bind.mountPoint == "${lowerRoot}/nix/var/nix/${name}"
         && bind.isReadOnly
       ) [ "db" "gcroots" "profiles" "temproots" ];
     in
-    binds."host-nix-lower-store".hostPath
-      == "/run/nixtache-overlay/frozen/${parentFrozenId}/nix/store"
+    binds."host-nix-lower-store".hostPath == "${parentRoot}/nix/store"
     && binds."host-nix-lower-store".mountPoint == "${lowerRoot}/nix/store"
     && binds."host-nix-lower-store".isReadOnly
     && stateBinds
@@ -1051,9 +1051,9 @@ self.nixosModules.runner
         "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower/beta%%26read-only%%3Dtrue"
         (namedExecOf "beta");
       alphaFrozenBinds = namedFrozenLowerBinds
-        "alpha" "/run/nixtache-runner-lower/alpha" "host-lower";
+        "alpha" "/run/nixtache-runner-lower/alpha";
       betaFrozenBinds = namedFrozenLowerBinds
-        "beta" "/run/nixtache-runner-lower/beta" "alpha-lower";
+        "beta" "/run/nixtache-runner-lower/beta";
       ownConsumerUppers = lib.hasInfix "upper-layer=/srv/alpha/overlay/upper" (namedExecOf "alpha")
         && lib.hasInfix "upper-layer=/srv/beta/overlay/upper" (namedExecOf "beta");
       noSnapshotOrContinuation = lib.all (exec:
