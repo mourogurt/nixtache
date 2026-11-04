@@ -138,6 +138,11 @@ jobs:
           - overlay-topology-operations-descriptor-mismatch-vm
           - runner-store-mode-vm
           - runner-builder-isolation-vm
+          - runner-topology-sibling-vm
+          - runner-topology-nested-vm
+          - runner-topology-composed-vm
+          - runner-topology-operations-reconcile-vm
+          - runner-topology-operations-wipe-vm
     steps:
       - name: Checkout nixtache
         uses: actions/checkout@v4

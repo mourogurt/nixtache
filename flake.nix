@@ -77,6 +77,7 @@
       # See doc/technical_details/testing.md for the strategy + the docStrictMode matrix.
       checks = forAllSystems (system: {
         runner = import ./tests/runner.nix { inherit nixpkgs self system; };
+        runner-topology-operations = import ./tests/runner-topology-operations.nix { inherit nixpkgs self system; };
         deploy-target = import ./tests/deploy-target.nix { inherit nixpkgs self system; };
         # ab-image module pure-eval: fixed vs max-disk sizing + Verify (fast, no KVM).
         ab-image = import ./tests/ab-image.nix { inherit nixpkgs self system; appliancePkgs = caPkgsFor system; };
@@ -201,6 +202,11 @@
         overlay-topology-operations-descriptor-mismatch-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; scenario = "descriptor-mismatch"; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
+        runner-topology-sibling-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "sibling"; };
+        runner-topology-nested-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "nested"; };
+        runner-topology-composed-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "composed"; };
+        runner-topology-operations-reconcile-vm = import ./tests/runner-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; policy = "reconcile"; };
+        runner-topology-operations-wipe-vm = import ./tests/runner-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; policy = "wipe"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style
         # container (no system nix-daemon) + the non-appliance mode.
         ab-runner-compat-vm = import ./tests/ab-runner-compat-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
