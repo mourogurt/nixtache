@@ -2,6 +2,7 @@
 , self
 , system ? "x86_64-linux"
 , failureNode ? "host"
+, faultScenarios ? null
 , appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
 }:
 
@@ -12,6 +13,13 @@ let
     inherit nixpkgs self system topology upperOnUpdate appliancePkgs;
   };
   inherit (fixture) lib pkgs otaLib;
+
+  scenarios = if faultScenarios == null then
+    [ "clone" "repair" "final" ]
+    ++ lib.optional (failureNode == "host") "seed"
+    ++ lib.optional (failureNode == "grand") "parent-root"
+    ++ lib.optional (failureNode == "host") "refs"
+  else faultScenarios;
 
   shimModule = { config, lib, pkgs, ... }:
     let
@@ -35,6 +43,54 @@ let
             exit 70
           fi
         }
+        test_check_store() {
+          local node=$1
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = parent-root ] && [ "$node" = a ]; then
+            echo "nixtache-overlay: checking $node" >&2
+            return 0
+          fi
+          shift
+          check_store "$@"
+        }
+        corrupt_refs() {
+          local node=$1 store_url=$2 layer_stage=$3 merged=$4
+          local root db
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ "$node" = "''${NIXTACHE_TEST_FAILURE_NODE:-}" ]; then
+            root=$(cat /run/nixtache-overlay-test-refs-root)
+            db="$layer_stage/state/db/db.sqlite"
+            nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-expected
+            ${pkgs.sqlite}/bin/sqlite3 "$db" "DELETE FROM Refs WHERE referrer = (SELECT id FROM ValidPaths WHERE path = '$root');"
+            [ "$(${pkgs.sqlite}/bin/sqlite3 "$db" "SELECT COUNT(*) FROM ValidPaths WHERE path = '$root';")" = 1 ]
+            [ -e "$merged$root" ]
+            touch /run/nixtache-overlay-test-refs-armed
+            echo "nixtache-overlay-test: corrupted Refs at $node while retaining ValidPaths and files" >&2
+          fi
+        }
+        audit_refs() {
+          local node=$1 store_url=$2 root
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ -e /run/nixtache-overlay-test-refs-armed ] && [ "$node" = "''${NIXTACHE_TEST_FAILURE_NODE:-}" ]; then
+            root=$(cat /run/nixtache-overlay-test-refs-root)
+            if ! nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-actual; then
+              touch /run/nixtache-overlay-test-refs-incomplete
+            elif ! ${pkgs.diffutils}/bin/cmp -s /run/nixtache-overlay-test-refs-expected /run/nixtache-overlay-test-refs-actual; then
+              touch /run/nixtache-overlay-test-refs-incomplete
+            fi
+          fi
+        }
+        tamper_parent_root() {
+          local node=$1 dependency parent_path child_path
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = parent-root ] && [ "$node" = a ]; then
+            dependency=$(cat /run/nixtache-overlay-test-parent-root-path)
+            parent_path="$stage/layers/a/upper/$(basename "$dependency")"
+            child_path="$stage/layers/grand/upper/$(basename "$dependency")"
+            [ -f "$parent_path" ]
+            [ ! -e "$child_path" ]
+            cp -a "$parent_path" "$child_path"
+            rm -f "$parent_path"
+            touch /run/nixtache-overlay-test-parent-root-armed
+            echo "nixtache-overlay-test: moved a upper-only valid path into grand upper after a final validation" >&2
+          fi
+        }
       '';
       injectedInner = pkgs.writeShellScript "nixtache-overlay-verify-namespace-failure-${failureNode}"
         (builtins.replaceStrings [
@@ -49,8 +105,8 @@ let
           "fail_at host seed\nnix-store --option experimental-features \"ca-derivations\" --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
           "fail_at host repair\nrepair_store \"$host_url\" \"$stage/host/state\" \"$host_root\""
           "fail_at \"$(basename \"$node_stage\")\" repair\nrepair_store \"$node_url\" \"$node_stage/state\" \"$node_root\""
-          "fail_at host final\ncheck_store \"$host_url\" \"$host_root\""
-          "fail_at \"$(basename \"$node_stage\")\" final\ncheck_store \"$node_url\" \"$node_root\""
+          "fail_at host final\ncorrupt_refs host \"$host_url\" \"$stage/host\" \"$host_root\"\ncheck_store \"$host_url\" \"$host_root\"\naudit_refs host \"$host_url\""
+          "fail_at \"$(basename \"$node_stage\")\" final\ncorrupt_refs \"$(basename \"$node_stage\")\" \"$node_url\" \"$node_stage\" \"$node_root\"\ntest_check_store \"$(basename \"$node_stage\")\" \"$node_url\" \"$node_root\"\naudit_refs \"$(basename \"$node_stage\")\" \"$node_url\"\ntamper_parent_root \"$(basename \"$node_stage\")\""
         ] innerText);
       injectedOuter = pkgs.writeShellScript "nixtache-overlay-prepare-failure-${failureNode}"
         (builtins.replaceStrings [
@@ -100,6 +156,12 @@ let
 in
 assert lib.assertMsg (builtins.elem failureNode fixture.nodeIds)
   "overlay-tree failureNode must be host, a, grand or b";
+assert lib.assertMsg (builtins.all (scenario: builtins.elem scenario [ "seed" "clone" "repair" "final" "parent-root" "refs" ]) scenarios)
+  "overlay-tree faultScenarios contains an unknown scenario";
+assert lib.assertMsg (!builtins.elem "seed" scenarios || failureNode == "host")
+  "overlay-tree seed fault scenario requires failureNode=host";
+assert lib.assertMsg (!builtins.elem "parent-root" scenarios || failureNode == "grand")
+  "overlay-tree parent-root fault scenario requires failureNode=grand";
 pkgs.testers.runNixOSTest {
   name = "overlay-tree-failure-${failureNode}";
   globalTimeout = 10800;
@@ -115,6 +177,7 @@ pkgs.testers.runNixOSTest {
     import shlex
 
     FAILURE_NODE = ${builtins.toJSON failureNode}
+    FAULT_SCENARIOS = ${builtins.toJSON scenarios}
     NODE_IDS = ${builtins.toJSON fixture.nodeIds}
     ROOTS = ${builtins.toJSON fixture.roots}
     UPPERS = ${builtins.toJSON fixture.upperDirs}
@@ -200,6 +263,10 @@ pkgs.testers.runNixOSTest {
         for node in NODE_IDS:
             candidate = upper_path(node, path, target)
             if node in expected_nodes:
+                if appliance.succeed("test -e " + q(candidate) + " && echo present || echo missing").strip() == "missing":
+                    print("DIAG missing " + candidate + "; actual locations: " + appliance.succeed(
+                      "find /var/lib/nix-overlay /run/nixtache-overlay-tree -name " + q(basename(path)) + " -print 2>/dev/null"
+                    ))
                 appliance.succeed("test -e " + q(candidate))
             else:
                 appliance.fail("test -e " + q(candidate))
@@ -325,21 +392,25 @@ pkgs.testers.runNixOSTest {
         assert_runtime_consumers()
         assert_markers()
 
+    def record_unready(active_before):
+        unready = appliance.succeed(
+          "grep -l '^state=unready$' " + q(target_root) + "/generations/*/metadata"
+        ).strip().splitlines()
+        assert unready, "failed preparation produced no unready generation"
+        failed_generation = unready[-1][:-len("/metadata")]
+        FAILED_GENERATIONS.append(failed_generation)
+        appliance.fail("grep -l '^state=ready$' " + q(target_root) + "/generations/*/metadata")
+        appliance.fail("test -e " + q(target_root + "/current") + " || test -L " + q(target_root + "/current"))
+        assert_active_v1_unchanged(active_before)
+        return failed_generation
+
     def attempt_failure(mode, version):
         cursor = cache_cursor()
         active_before = active_state_checksum()
         appliance.succeed("printf '%s\\n' " + q(mode) + " > /run/nixtache-overlay-test-failure")
         appliance.succeed("systemctl reset-failed nixtache-overlay-prepare.service || true")
         appliance.fail("systemctl start nixtache-overlay-prepare.service", timeout=900)
-        unready = appliance.succeed(
-          "grep -l '^state=unready$' " + q(target_root) + "/generations/*/metadata"
-        ).strip().splitlines()
-        assert unready, mode + " failure produced no unready generation"
-        failed_generation = unready[-1][:-len("/metadata")]
-        FAILED_GENERATIONS.append(failed_generation)
-        appliance.fail("grep -l '^state=ready$' " + q(target_root) + "/generations/*/metadata")
-        appliance.fail("test -e " + q(target_root + "/current") + " || test -L " + q(target_root + "/current"))
-        assert_active_v1_unchanged(active_before)
+        record_unready(active_before)
         log = cache_log(cursor)
         token = "nixtache-overlay-test: " + mode + (" interruption" if mode == "clone" else " failure") + " at " + FAILURE_NODE
         assert token in log, f"missing injected {mode} failure marker at {FAILURE_NODE}: {log}"
@@ -350,6 +421,53 @@ pkgs.testers.runNixOSTest {
             assert "nixtache-overlay: prepared " + FAILURE_NODE in log
             assert "nixtache-overlay: checking " + FAILURE_NODE in log
         print("OK: v" + version + " " + mode + " failure at " + FAILURE_NODE + " stayed unready; active v1 files, DB, roots and closures survived")
+
+    def attempt_parent_root_tamper(version):
+        cursor = cache_cursor()
+        active_before = active_state_checksum()
+        appliance.succeed("rm -f /run/nixtache-overlay-test-parent-root-armed")
+        appliance.succeed("printf '%s\\n' " + q(PATHS["sharedDependency"]) + " > /run/nixtache-overlay-test-parent-root-path")
+        appliance.succeed("printf '%s\\n' parent-root > /run/nixtache-overlay-test-failure")
+        appliance.succeed("systemctl reset-failed nixtache-overlay-prepare.service || true")
+        status, output = appliance.execute("systemctl start nixtache-overlay-prepare.service", timeout=900)
+        log = cache_log(cursor)
+        appliance.succeed("test -e /run/nixtache-overlay-test-parent-root-armed")
+        assert "nixtache-overlay-test: moved a upper-only valid path into grand upper after a final validation" in log
+        if status == 0:
+            target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+            target = target_root + "/generations/" + target_generation
+            appliance.succeed("grep -q '^state=ready$' " + q(target + "/metadata"))
+            raise AssertionError("grand validation accepted a parent path visible only through grand's own upper; the prepared generation used the wrong parent root")
+        record_unready(active_before)
+        assert "nixtache-overlay: checking a" in log
+        assert "nixtache-overlay: checking grand" in log
+        print("OK: parent-root tamper at a/grand boundary stayed unready and preserved the active tree")
+
+    def attempt_refs_corruption(version):
+        cursor = cache_cursor()
+        active_before = active_state_checksum()
+        appliance.succeed("rm -f /run/nixtache-overlay-test-refs-armed /run/nixtache-overlay-test-refs-expected /run/nixtache-overlay-test-refs-actual /run/nixtache-overlay-test-refs-incomplete")
+        appliance.succeed("printf '%s\\n' " + q(CONSUMERS[FAILURE_NODE]) + " > /run/nixtache-overlay-test-refs-root")
+        appliance.succeed("printf '%s\\n' refs > /run/nixtache-overlay-test-failure")
+        appliance.succeed("systemctl reset-failed nixtache-overlay-prepare.service || true")
+        status, output = appliance.execute("systemctl start nixtache-overlay-prepare.service", timeout=900)
+        log = cache_log(cursor)
+        appliance.succeed("test -e /run/nixtache-overlay-test-refs-armed")
+        assert "nixtache-overlay-test: corrupted Refs at " + FAILURE_NODE + " while retaining ValidPaths and files" in log
+        if status == 0:
+            target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+            target = target_root + "/generations/" + target_generation
+            appliance.succeed("grep -q '^state=ready$' " + q(target + "/metadata"))
+            if appliance.succeed("test -e /run/nixtache-overlay-test-refs-incomplete && echo yes || echo no").strip() == "yes":
+                expected = appliance.succeed("cat /run/nixtache-overlay-test-refs-expected")
+                actual = appliance.succeed("cat /run/nixtache-overlay-test-refs-actual")
+                raise AssertionError("ready generation has an incomplete requisites closure after Refs corruption; expected=" + expected + " actual=" + actual)
+            assert active_state_checksum() == active_before, "successful Refs repair modified the active tree"
+            print("OK: final validation repaired corrupted Refs before marking the generation ready")
+        else:
+            record_unready(active_before)
+            assert "nixtache-overlay: checking " + FAILURE_NODE in log
+            print("OK: corrupted Refs kept the generation unready and preserved the active tree")
 
     def complete_preparation(version):
         active_before_success = active_state_checksum()
@@ -454,14 +572,18 @@ pkgs.testers.runNixOSTest {
     print("OK: composed roots seeded at host, intermediate, grandchild and sibling nodes")
 
     stage_and_install("2")
-    if FAILURE_NODE == "host":
+    if "seed" in FAULT_SCENARIOS:
         attempt_failure("seed", "2")
-    else:
+    elif FAILURE_NODE != "host":
         print("OK: seed=N/A for non-host failure node " + FAILURE_NODE)
-    attempt_failure("clone", "2")
-    attempt_failure("repair", "2")
-    attempt_failure("final", "2")
+    for mode in ("clone", "repair", "final"):
+        if mode in FAULT_SCENARIOS:
+            attempt_failure(mode, "2")
+    if "parent-root" in FAULT_SCENARIOS:
+        attempt_parent_root_tamper("2")
     add_active_writes("2")
+    if "refs" in FAULT_SCENARIOS:
+        attempt_refs_corruption("2")
     target = complete_preparation("2")
 
     appliance.reboot()
@@ -475,6 +597,6 @@ pkgs.testers.runNixOSTest {
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=1800)
     assert_booted_target("3", target)
-    print("PASS: overlay-tree-failure node=" + FAILURE_NODE + " topology=composed upperOnUpdate=reconcile seed=" + ("covered" if FAILURE_NODE == "host" else "N/A"))
+    print("PASS: overlay-tree-failure node=" + FAILURE_NODE + " topology=composed upperOnUpdate=reconcile scenarios=" + ",".join(FAULT_SCENARIOS))
   '';
 }

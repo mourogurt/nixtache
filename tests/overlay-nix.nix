@@ -100,8 +100,20 @@ let
   in builtins.readFile (builtins.head (lib.splitString "\n"
     (builtins.elemAt (lib.splitString "unshare -m --propagation private " script) 1)));
   selectWithLayers = layers: (hostWithLayers layers).config.systemd.services.nixtache-overlay-select.script;
-  tryLayers = layers: builtins.tryEval
-    (hostWithLayers layers).config.system.build.toplevel.outPath;
+  tryHost = extra: builtins.tryEval (mkHost {
+    imports = [ extra ];
+    fileSystems."/" = {
+      device = "/dev/sda";
+      fsType = "ext4";
+    };
+    boot.loader.grub.devices = [ "/dev/sda" ];
+  }).config.system.build.toplevel.outPath;
+  tryLayers = layers: tryHost {
+    services.nixtache.overlay-nix = {
+      inherit layers;
+      upperOnUpdate = "reconcile";
+    };
+  };
   posOf = pat: s: lib.stringLength (builtins.head (lib.splitString pat s));
 
   siblingScript = scriptWithLayers [ (layer "a" null) (layer "b" null) ];
@@ -168,6 +180,69 @@ let
     checks.rejected = !(tryLayers [ (layer "a" "b") (layer "b" "a") ]).success;
   };
 
+  scenarioPathTraversalIdsRejected = {
+    name = "path-traversal overlay node identities are rejected";
+    checks = {
+      dot = !(tryLayers [ (layer "." null) ]).success;
+      dotDot = !(tryLayers [ (layer ".." null) ]).success;
+    };
+  };
+
+  scenarioWithinNodePathCollisionsRejected = {
+    name = "equal and nested runtime paths within one overlay node are rejected";
+    checks = {
+      equalUpperWork = !(tryLayers [
+        ((layer "a" null) // { workDir = "/var/lib/layers/a/upper"; })
+      ]).success;
+      nestedUpperState = !(tryLayers [
+        ((layer "a" null) // { stateDir = "/var/lib/layers/a/upper/state"; })
+      ]).success;
+      nestedWorkState = !(tryLayers [
+        ((layer "a" null) // { stateDir = "/var/lib/layers/a/work/state"; })
+      ]).success;
+      nestedHostUpperWork = !(tryHost {
+        services.nixtache.overlay-nix.workDir = "/var/lib/nix-overlay/upper/work";
+      }).success;
+    };
+  };
+
+  scenarioAcrossNodePathCollisionsRejected = {
+    name = "equal and nested runtime paths across overlay nodes are rejected";
+    checks = {
+      equalUpperWork = !(tryLayers [
+        (layer "a" null)
+        ((layer "b" null) // { workDir = "/var/lib/layers/a/upper"; })
+      ]).success;
+      nestedUpperState = !(tryLayers [
+        (layer "a" null)
+        ((layer "b" null) // { stateDir = "/var/lib/layers/a/upper/state"; })
+      ]).success;
+      nestedStateWork = !(tryLayers [
+        (layer "a" null)
+        ((layer "b" null) // { workDir = "/var/lib/layers/a/state/work"; })
+      ]).success;
+      nestedHostState = !(tryLayers [
+        ((layer "a" null) // { stateDir = "/nix/var/nix/layers/a/state"; })
+      ]).success;
+    };
+  };
+
+  scenarioPathPrefixBoundariesAllowed = {
+    name = "runtime paths sharing only a string prefix are accepted";
+    checks.accepted = (tryLayers [
+      ((layer "a" null) // {
+        upperDir = "/var/lib/layers/shared/path";
+        workDir = "/var/lib/layers/shared/path-work";
+        stateDir = "/var/lib/layers/shared/path-state";
+      })
+      ((layer "b" null) // {
+        upperDir = "/var/lib/layers/shared/path-b";
+        workDir = "/var/lib/layers/shared/path-work-b";
+        stateDir = "/var/lib/layers/shared/path-state-b";
+      })
+    ]).success;
+  };
+
   hostNone = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "none"; };
   tryNone = builtins.tryEval (builtins.deepSeq (cfgOf hostNone).upperOnUpdate (cfgOf hostNone).upperOnUpdate);
   scenarioNoneRejected = {
@@ -193,6 +268,10 @@ let
     scenarioDuplicateRejected
     scenarioMissingParentRejected
     scenarioCycleRejected
+    scenarioPathTraversalIdsRejected
+    scenarioWithinNodePathCollisionsRejected
+    scenarioAcrossNodePathCollisionsRejected
+    scenarioPathPrefixBoundariesAllowed
     scenarioNoneRejected
     scenarioCaFeature
   ];

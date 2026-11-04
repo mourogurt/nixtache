@@ -261,7 +261,7 @@ pkgs.testers.runNixOSTest {
     print("MANUAL ROLLBACK OK: the older physical lower selects its own preserved upper and DB")
 
     # -- Same-version slots retain distinct upper states ----------------------
-    active_device = appliance.succeed("findmnt -n -o SOURCE --target /nix/store | grep '^/dev/' | sort -u").strip()
+    active_device = appliance.succeed(f"readlink -f /dev/disk/by-partuuid/{v1_slot}").strip()
     target_device = appliance.succeed(
       "lsblk -nrpo NAME,PARTUUID,PARTLABEL | "
       f"awk -v active={v1_slot} 'BEGIN{{IGNORECASE=1}} $3 ~ /^nix-store_/ && tolower($2) != active {{print $1; exit}}'"
@@ -271,6 +271,7 @@ pkgs.testers.runNixOSTest {
       f"awk -v active={v1_slot} 'BEGIN{{IGNORECASE=1}} $3 ~ /^nix-store_/ && tolower($2) != active {{print tolower($2); exit}}'"
     ).strip()
     appliance.succeed(f"dd if={active_device} of={target_device} bs=4M conv=fsync status=none", timeout=900)
+    source_number = active_device.rsplit("vda", 1)[-1]
     target_number = target_device.rsplit("vda", 1)[-1]
     appliance.succeed(f"sgdisk -c {target_number}:nix-store_1 /dev/vda && partprobe /dev/vda && udevadm settle")
     appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
@@ -281,27 +282,48 @@ pkgs.testers.runNixOSTest {
     appliance.succeed("nix-store --realize " + P4, timeout=600)
     appliance.succeed("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
     appliance.fail(f"test -d {same_target}/host/upper/${baseNameOf p4Path}")
+    source_db = appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip()
+    same_target_db = appliance.succeed(f"sha256sum {same_target}/host/state/db/db.sqlite | awk '{{print $1}}'").strip()
     print("OK: both physical slots contain v1, with a marker only in the active slot's upper")
 
+    appliance.succeed(
+      f"sgdisk -c {target_number}:nixtache-hidden-target /dev/vda && "
+      "partprobe /dev/vda && udevadm settle"
+    )
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")
     assert appliance.succeed("cat /etc/image-version").strip() == "1"
-    selected_same = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
-    if selected_same == v1_slot:
-        assert appliance.succeed(
-          f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
-        ).strip() == v1_selected
-        appliance.succeed(P4 + "/bin/busybox echo source-upper-selected")
-    elif selected_same == target_slot:
-        assert appliance.succeed(
-          f"readlink -f /var/lib/nix-overlay/upper-slots/{target_slot}/current"
-        ).strip() == same_target
-        appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
-        out = appliance.succeed(f"nix path-info {P4} 2>&1 || true")
-        assert "is not valid" in out, f"same-version target selected the source upper DB ({out!r})"
-    else:
-        raise AssertionError(f"unexpected physical slot selected: {selected_same}")
+    assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == v1_slot
+    assert appliance.succeed(
+      f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
+    ).strip() == v1_selected
+    assert appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip() == source_db
+    appliance.succeed("nix path-info " + P4)
+    appliance.succeed("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
+    out = appliance.succeed(P4 + "/bin/busybox echo source-upper-selected")
+    assert "source-upper-selected" in out
+    appliance.fail(f"test -d {same_target}/host/upper/${baseNameOf p4Path}")
     appliance.succeed(P2 + "/bin/tool")
-    print("PASS: automatic/manual rollback and same-version physical-slot upper selection")
+    print("OK: forced source boot selected its own generation and DB with P4 present")
+
+    appliance.succeed(
+      f"sgdisk -c {source_number}:nixtache-hidden-source /dev/vda && "
+      f"sgdisk -c {target_number}:nix-store_1 /dev/vda && "
+      "partprobe /dev/vda && udevadm settle"
+    )
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target")
+    assert appliance.succeed("cat /etc/image-version").strip() == "1"
+    assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == target_slot
+    assert appliance.succeed(
+      f"readlink -f /var/lib/nix-overlay/upper-slots/{target_slot}/current"
+    ).strip() == same_target
+    assert appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip() == same_target_db
+    appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
+    out = appliance.succeed(f"nix path-info {P4} 2>&1 || true")
+    assert "is not valid" in out, f"same-version target selected the source upper DB ({out!r})"
+    appliance.succeed(f"test -d {v1_selected}/host/upper/${baseNameOf p4Path}")
+    appliance.succeed(P2 + "/bin/tool")
+    print("PASS: forced source/target boots selected distinct same-version generations and DBs")
   '';
 }

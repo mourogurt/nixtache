@@ -304,13 +304,16 @@ pkgs.testers.runNixOSTest {
     # A merged-store GC pass can stop after a deletion batch when it encounters
     # an already-invalid record. Repeat a bounded number of passes; the final
     # upper-file assertion still requires the unrooted path to disappear.
-    gc_journal = appliance.succeed(
-      f"for i in 1 2 3; do nix-collect-garbage 2>&1 || true; "
+    gc_status, gc_journal = appliance.execute(
+      f"gc_status=0; for i in 1 2 3; do "
+      f"nix-collect-garbage 2>&1 || gc_status=$?; "
       f"test -d {UPPER}/{HELLO_B} || break; done; "
-      "journalctl -u nix-daemon --since -10min | grep -i 'remount' || true"
+      "journalctl -u nix-daemon --since -10min | grep -i 'remount' || true; "
+      "exit \"$gc_status\""
     )
     print("INFO gc-remount-journal: " + gc_journal[-400:])
     appliance.fail(f"test -d {UPPER}/{HELLO_B}")
+    assert gc_status == 0, f"nix-collect-garbage failed with status {gc_status}"
     out = appliance.succeed(P2 + "/bin/tool")
     assert "tool-ok" in out, f"rooted tool broken by GC ({out!r})"
     print("OK: GC removed the unrooted path, rooted tool alive")
@@ -383,8 +386,10 @@ pkgs.testers.runNixOSTest {
       out = appliance.succeed(f"nix path-info {P2} 2>&1 || true")
       assert "is not valid" in out, f"tmpfs reboot left a stale DB entry ({out!r})"
       appliance.succeed("nix path-info " + P1)
-      assert appliance.succeed("cat /var/lib/nixtache/lower-db-version").strip() == "1"
-      assert appliance.succeed("cat /var/lib/nixtache/last-boot-image-version").strip() == "1"
+      marker = appliance.succeed("cat " + LOWER_STATE + "/lower-db-sha256").strip()
+      expected_marker = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.lower-db | awk '{print $1}'").strip()
+      assert marker == expected_marker, "tmpfs reboot did not reseed v1's lower records"
+      appliance.succeed("test -f /run/nixtache-overlay/selected-chain-ready")
       appliance.succeed("nix-store --realize " + P2, timeout=600)
       out = appliance.succeed(P2 + "/bin/tool")
       assert "tool-ok" in out, f"tmpfs store could not realize the tool again ({out!r})"

@@ -31,7 +31,7 @@
 # Signing is on (signVerify) — the runner host's pulls verify manifests.
 # Needs KVM. Hermetic: the deployer node stages the signed v2 package; the
 # build is a trivial derivation with substitute=false (no network).
-{ nixpkgs, self, system ? "x86_64-linux", storeMode ? "clone", ephemeral ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, self, system ? "x86_64-linux", storeMode ? "clone", ephemeral ? false, scenario ? "swap", appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
 
 let
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };
@@ -39,6 +39,10 @@ let
 
   cascade = storeMode == "overlay";
   helloBasename = baseNameOf pkgs.hello.outPath;
+  parentFresh = pkgs.runCommand "runner-parent-metadata-fresh" { } ''
+    printf 'runner parent metadata freshness\n' > $out
+  '';
+  parentFreshBasename = baseNameOf parentFresh.outPath;
 
   mkRunnerAppliance = { version, extraPackages ? [ ], brokenBoot ? false }:
     otaLib.mkAppliance {
@@ -110,13 +114,78 @@ let
   };
   v2Pkg = v2.config.system.build.sysupdate-package;
 in
+assert lib.assertMsg (builtins.elem scenario [ "swap" "parent-metadata-freshness" ])
+  "unknown runner store VM scenario: ${scenario}";
+assert lib.assertMsg (scenario == "swap" || (storeMode == "overlay" && !ephemeral))
+  "runner parent metadata freshness requires the persistent overlay variant";
 pkgs.testers.runNixOSTest {
-  name = "runner-store-swap-${storeMode}${lib.optionalString ephemeral "-ephemeral"}";
+  name = if scenario == "parent-metadata-freshness"
+    then "runner-store-parent-metadata-freshness"
+    else "runner-store-swap-${storeMode}${lib.optionalString ephemeral "-ephemeral"}";
   globalTimeout = 7200;
 
-  nodes.deployer = otaLib.deployerNode { extraDependencies = lib.optional (!ephemeral) v2Pkg; };
+  nodes.deployer = otaLib.deployerNode {
+    extraDependencies = lib.optional (!ephemeral && scenario == "swap") v2Pkg
+      ++ lib.optional (scenario == "parent-metadata-freshness") parentFresh;
+  };
 
-  testScript = ''
+  testScript = if scenario == "parent-metadata-freshness" then ''
+    import shlex
+
+    def create_runner_machine(**kwargs):
+        machine = create_machine(start_command="${otaLib.startCommand { image = v1Image; }}", **kwargs)
+        driver.machines_qemu.append(machine)
+        return machine
+
+    def crun(inner):
+        return appliance.succeed(
+          "nixos-container run runner -- /bin/sh -c " + shlex.quote(inner)
+        )
+
+    deployer.start()
+    deployer.wait_for_unit("nginx.service")
+    deployer.wait_for_unit("nix-serve.service")
+    deployer.succeed(
+      "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+    )
+
+    appliance = create_runner_machine(name="appliance")
+    appliance.start(allow_reboot=True)
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
+    appliance.wait_until_succeeds("systemctl is-active --quiet container@runner.service", timeout=600)
+    appliance.wait_until_succeeds(
+      "nixos-container run runner -- systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=600
+    )
+    appliance.wait_until_succeeds(
+      "nixos-container run runner -- systemctl is-active --quiet nix-daemon-custom.service", timeout=600
+    )
+    container_started = appliance.succeed(
+      "systemctl show -p ActiveEnterTimestamp --value container@runner.service"
+    ).strip()
+    daemon_started = crun("systemctl show -p ActiveEnterTimestamp --value nix-daemon-custom.service").strip()
+    crun("test ! -e /srv/nix/store/${parentFreshBasename}")
+
+    appliance.succeed("nix-store --realize ${parentFresh}", timeout=600)
+    appliance.succeed("mkdir -p /nix/var/nix/gcroots && ln -sfn ${parentFresh} /nix/var/nix/gcroots/runner-parent-freshness")
+    appliance.succeed("nix path-info ${parentFresh}")
+    appliance.succeed("test -f /var/lib/nix-overlay/upper/${parentFreshBasename}")
+    appliance.succeed("test -f /nix/store/${parentFreshBasename}")
+    assert appliance.succeed("readlink /nix/var/nix/gcroots/runner-parent-freshness").strip() == "${parentFresh}"
+    crun("test -f /run/nixtache-runner-lower/nix/store/${parentFreshBasename}")
+    crun("test -f /srv/nix/store/${parentFreshBasename}")
+    print("OK: new host-only path and root are visible in the selected parent store after runner startup")
+
+    resolved = crun(
+      "nix --extra-experimental-features nix-command path-info "
+      "--store unix:///srv/nix/var/nix/daemon-socket/socket ${parentFresh}"
+    ).strip()
+    assert resolved == "${parentFresh}", f"custom daemon resolved an unexpected path: {resolved!r}"
+    assert appliance.succeed(
+      "systemctl show -p ActiveEnterTimestamp --value container@runner.service"
+    ).strip() == container_started, "runner container restarted during the freshness check"
+    assert crun("systemctl show -p ActiveEnterTimestamp --value nix-daemon-custom.service").strip() == daemon_started, "custom daemon restarted during the freshness check"
+    print("PASS: custom runner daemon resolves newly rooted host-only paths through fresh selected parent metadata")
+  '' else ''
     import shlex
 
     CASCADE = ${if cascade then "True" else "False"}

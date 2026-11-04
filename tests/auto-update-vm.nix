@@ -22,6 +22,7 @@
 { nixpkgs
 , self
 , system ? "x86_64-linux"
+, scenario ? "full"
 , appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
 }:
 
@@ -242,6 +243,58 @@ let
   v3Auto = mkAutoAppliance { version = "3"; rebootPolicy = "never"; };
   v3AutoPkg = v3Auto.config.system.build.sysupdate-package;
 
+  mkRegressionAppliance = { version, ephemeral ? false, extraPackages ? [ ] }:
+    otaLib.mkAppliance {
+      inherit version extraPackages;
+      storeSize = "1G";
+      extraModules = [
+        autoMod
+        self.nixosModules.overlay-nix
+        ({ lib, ... }: {
+          services.nixtache.overlay-nix = {
+            enable = true;
+            upperOnUpdate = "reconcile";
+          } // lib.optionalAttrs ephemeral {
+            upperDir = "/tmp/nix-overlay/upper";
+            workDir = "/tmp/nix-overlay/work";
+          };
+          services.nixtache.auto-update = {
+            enable = true;
+            rebootPolicy = "window";
+            rebootWindow = {
+              start = "00:00";
+              end = "23:59";
+            };
+          };
+          fileSystems."/tmp/nix-overlay" = lib.mkIf ephemeral {
+            device = "tmpfs";
+            fsType = "tmpfs";
+            options = [ "mode=755" ];
+          };
+        })
+      ];
+    };
+
+  managedTmpfsV1 = mkRegressionAppliance {
+    version = "1";
+    ephemeral = true;
+    extraPackages = [ pkgs_1 ];
+  };
+  managedTmpfsV1Image = "${managedTmpfsV1.config.system.build.image}/abtest_1.raw";
+  managedTmpfsV2 = mkRegressionAppliance {
+    version = "2";
+    ephemeral = true;
+    extraPackages = [ pkgs.hello ];
+  };
+  managedTmpfsV2Pkg = managedTmpfsV2.config.system.build.sysupdate-package;
+
+  stackedV1 = mkRegressionAppliance { version = "1"; };
+  stackedV1Image = "${stackedV1.config.system.build.image}/abtest_1.raw";
+  stackedV2 = mkRegressionAppliance { version = "2"; };
+  stackedV2Pkg = stackedV2.config.system.build.sysupdate-package;
+  stackedV3 = mkRegressionAppliance { version = "3"; };
+  stackedV3Pkg = stackedV3.config.system.build.sysupdate-package;
+
   stageDir = "/var/lib/nixtache/ab-stage/abtest";
   slotsDir = "/var/lib/nixtache/ab-slots";
 
@@ -287,6 +340,197 @@ let
     };
   };
 in
+assert lib.assertMsg (builtins.elem scenario [ "full" "managed-tmpfs-window" "no-intermediate-reboot" ])
+  "unknown auto-update VM scenario: ${scenario}";
+if scenario == "managed-tmpfs-window" then
+  pkgs.testers.runNixOSTest {
+    name = "auto-update-managed-tmpfs-window";
+    globalTimeout = 5400;
+
+    nodes.deployer = otaLib.deployerNode {
+      extraDependencies = [ pkgs_2 managedTmpfsV2Pkg ];
+    };
+
+    testScript = ''
+      def create_auto_machine(**kwargs):
+          machine = create_machine(start_command="${otaLib.startCommand { image = managedTmpfsV1Image; }}", **kwargs)
+          driver.machines_qemu.append(machine)
+          return machine
+
+      def stage(package):
+          deployer.succeed(
+            "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+            "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+            "cp " + package + "/* /var/lib/nixtache/ab-stage/abtest/"
+          )
+
+      def wait_fresh_boot(previous_id):
+          appliance.connected = False
+          appliance.wait_until_succeeds(
+            "test \"$(cat /proc/sys/kernel/random/boot_id)\" != " + previous_id,
+            timeout=1800,
+          )
+          appliance.wait_for_unit("multi-user.target", timeout=1800)
+
+      def assert_no_persistent_proof():
+          copies = appliance.succeed(
+            "find /var/lib/nix-overlay /tmp/nix-overlay/upper-slots /tmp/nix-overlay/legacy-backup -name '${baseNameOf p2Path}' -print 2>/dev/null || true"
+          ).strip()
+          assert copies == "", f"ephemeral upper proof acquired persistent copies: {copies}"
+
+      deployer.start()
+      deployer.wait_for_unit("nginx.service")
+      deployer.wait_for_unit("nix-serve.service")
+      deployer.succeed(
+        "nix-store --load-db < $(grep -oP '(?<=regInfo=)[^ ]+' /proc/cmdline | sed 's#\\.ro-store/nix/store/#.ro-store/#')"
+      )
+
+      appliance = create_auto_machine(name="appliance")
+      appliance.start(allow_reboot=True)
+      appliance.wait_for_unit("multi-user.target", timeout=1800)
+      appliance.wait_until_succeeds("systemctl is-active --quiet boot-complete.target", timeout=300)
+      appliance.wait_until_succeeds("nix --version", timeout=300)
+      assert appliance.succeed("cat /etc/image-version").strip() == "1"
+      appliance.succeed("test ! -e /run/nixtache-overlay/selected-slot")
+      appliance.succeed("test ! -e /tmp/nix-overlay/upper-slots")
+
+      appliance.succeed("nix-store --realize ${p2Path}", timeout=600)
+      appliance.succeed("ln -sfn ${p2Path} /nix/var/nix/gcroots/managed-tmpfs-proof")
+      appliance.succeed("${p2Path}/bin/tool")
+      appliance.succeed("test -d /tmp/nix-overlay/upper/${baseNameOf p2Path}")
+      for directory in [
+        "/tmp/nix-overlay/upper",
+        "/nix/var/nix/db",
+        "/nix/var/nix/gcroots",
+        "/nix/var/nix/profiles",
+        "/nix/var/nix/temproots",
+      ]:
+          appliance.succeed(f"mkdir -p {directory} && touch {directory}/ephemeral-sentinel")
+
+      original_boot = appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+      stage("${managedTmpfsV2Pkg}")
+      appliance.succeed("systemctl start nixtache-auto-update.service", timeout=900)
+      appliance.succeed("${otaLib.assertSysupdateInstalled}")
+      appliance.succeed("sgdisk -p /dev/vda | grep nix-store_2")
+      appliance.succeed("test -f /boot/EFI/Linux/abtest_2+*.efi")
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
+      assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "window policy rebooted during installation"
+      assert_no_persistent_proof()
+      print("OK: managed tmpfs OTA installed and recorded a deferred reboot without a persistent metaslot")
+
+      appliance.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
+      wait_fresh_boot(original_boot)
+      assert appliance.succeed("cat /etc/image-version").strip() == "2"
+      appliance.wait_until_succeeds("nix --version", timeout=300)
+      appliance.wait_until_succeeds(
+        "systemctl is-active --quiet nixtache-lower-store-db-load.service", timeout=180
+      )
+      for directory in [
+        "/tmp/nix-overlay/upper",
+        "/nix/var/nix/db",
+        "/nix/var/nix/gcroots",
+        "/nix/var/nix/profiles",
+        "/nix/var/nix/temproots",
+      ]:
+          appliance.fail(f"test -e {directory}/ephemeral-sentinel")
+      appliance.fail("test -e /tmp/nix-overlay/upper/${baseNameOf p2Path}")
+      appliance.fail("test -e /nix/var/nix/gcroots/managed-tmpfs-proof || test -L /nix/var/nix/gcroots/managed-tmpfs-proof")
+      appliance.fail("nix path-info ${p2Path}")
+      appliance.succeed("nix path-info ${pkgs.hello}")
+      marker = appliance.succeed("cat /tmp/nix-overlay/lower-state/lower-db-sha256").strip()
+      expected_marker = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_2.lower-db | awk '{print $1}'").strip()
+      assert marker == expected_marker, "tmpfs reboot did not load exactly the v2 lower DB dump"
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending")
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
+      assert_no_persistent_proof()
+      copies = appliance.succeed(
+        "find /tmp/nix-overlay -name '${baseNameOf p2Path}' -print 2>/dev/null || true"
+      ).strip()
+      assert copies == "", f"ephemeral upper proof survived reboot in a managed copy: {copies}"
+      print("PASS: managed tmpfs auto-update installed v2, deferred reboot, reset upper and DB, and loaded the v2 lower dump")
+    '';
+  }
+else if scenario == "no-intermediate-reboot" then
+  pkgs.testers.runNixOSTest {
+    name = "auto-update-no-intermediate-reboot";
+    globalTimeout = 5400;
+
+    nodes.deployer = otaLib.deployerNode {
+      extraDependencies = [ stackedV2Pkg stackedV3Pkg ];
+    };
+
+    testScript = ''
+      def create_auto_machine(**kwargs):
+          machine = create_machine(start_command="${otaLib.startCommand { image = stackedV1Image; }}", **kwargs)
+          driver.machines_qemu.append(machine)
+          return machine
+
+      def install(package, version):
+          deployer.succeed(
+            "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
+            "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
+            "cp " + package + "/* /var/lib/nixtache/ab-stage/abtest/"
+          )
+          appliance.succeed("systemctl start nixtache-auto-update.service", timeout=900)
+          appliance.succeed("${otaLib.assertSysupdateInstalled}")
+          appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_" + version, timeout=300)
+          appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_" + version + "+*.efi", timeout=300)
+
+      def prepared_target():
+          slot = appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip()
+          generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+          target = f"/var/lib/nix-overlay/upper-slots/{slot}/generations/{generation}"
+          return slot, generation, target
+
+      def metadata_value(target, key):
+          return appliance.succeed(f"sed -n 's/^{key}=//p' {target}/metadata").strip()
+
+      def wait_fresh_boot(previous_id):
+          appliance.connected = False
+          appliance.wait_until_succeeds(
+            "test \"$(cat /proc/sys/kernel/random/boot_id)\" != " + previous_id,
+            timeout=1800,
+          )
+          appliance.wait_for_unit("multi-user.target", timeout=1800)
+
+      deployer.start()
+      deployer.wait_for_unit("nginx.service")
+      appliance = create_auto_machine(name="appliance")
+      appliance.start(allow_reboot=True)
+      appliance.wait_for_unit("multi-user.target", timeout=1800)
+      appliance.wait_until_succeeds("systemctl is-active --quiet boot-complete.target", timeout=300)
+      assert appliance.succeed("cat /etc/image-version").strip() == "1"
+      original_boot = appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+
+      install("${stackedV2Pkg}", "2")
+      slot_v2, generation_v2, target_v2 = prepared_target()
+      assert metadata_value(target_v2, "image_version") == "2"
+      assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "v2 installation rebooted before v3 was installed"
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
+
+      install("${stackedV3Pkg}", "3")
+      slot_v3, generation_v3, target_v3 = prepared_target()
+      assert generation_v3 != generation_v2, "v3 installation reused the v2 preparation generation"
+      assert metadata_value(target_v3, "state") == "ready"
+      assert metadata_value(target_v3, "image_version") == "3", "pre-reboot metadata does not describe the installed v3 image"
+      expected_v3_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_3.lower-db | awk '{print $1}'").strip()
+      assert metadata_value(target_v3, "lower_sha256") == expected_v3_sha, "pre-reboot metadata does not match the v3 lower DB dump"
+      assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "an intermediate reboot occurred before the v3 assertions"
+      print("OK: v1 -> v2 -> v3 without reboot produced a fresh ready v3 generation and matching lower SHA")
+
+      appliance.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
+      wait_fresh_boot(original_boot)
+      assert appliance.succeed("cat /etc/image-version").strip() == "3"
+      assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == slot_v3
+      assert appliance.succeed("cat /run/nixtache-overlay/selected-generation").strip() == generation_v3, "boot recovery replaced the prepared v3 generation"
+      assert appliance.succeed("readlink -f /var/lib/nix-overlay/upper-slots/" + slot_v3 + "/current").strip() == target_v3
+      assert metadata_value(target_v3, "image_version") == "3"
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending")
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
+      print("PASS: stacked auto-update installs selected the exact pre-reboot v3 generation")
+    '';
+  }
+else
 pkgs.testers.runNixOSTest {
   name = "auto-update-vm";
 
@@ -573,9 +817,11 @@ pkgs.testers.runNixOSTest {
 
     def wait_fresh_boot(node, previous_id):
         node.connected = False
+        node.wait_until_succeeds(
+          "test \"$(cat /proc/sys/kernel/random/boot_id)\" != " + previous_id,
+          timeout=1800,
+        )
         node.wait_for_unit("multi-user.target")
-        current = node.succeed("cat /proc/sys/kernel/random/boot_id").strip()
-        assert current != previous_id, "update did not produce a fresh boot"
 
     deployer.start()
     deployer.wait_for_unit("nginx.service")
