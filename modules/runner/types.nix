@@ -10,7 +10,7 @@
 let
   inherit (lib) types mkOption;
 in
-{
+rec {
   # Known-host entry: a named SSH host key trusted inside the container.
   knownHostEntry = types.submodule {
     options = {
@@ -71,6 +71,79 @@ in
       };
     };
   };
+
+  storeOptions = { defaultHostBackup ? "/srv/bincache" }: {
+    path = mkOption {
+      type = types.str;
+      example = "/srv";
+      description = ''
+        Base directory inside the container that backs the nix store. The
+        store itself lives at `<path>/nix` (nix appends the suffix).
+
+        - `"/"` selects the native `/nix` and reuses the container's system
+          `nix-daemon`.
+        - any other path relocates the store and runs a custom daemon with
+          the corresponding service and bind-mount wiring.
+
+        Mandatory: must not be empty.
+      '';
+    };
+    hostBackup = mkOption {
+      type = types.str;
+      default = defaultHostBackup;
+      defaultText = lib.literalExpression defaultHostBackup;
+      description = ''
+        Host directory bind-mounted into the container at `store.path`. The
+        relocated store materialises at `<hostBackup>/nix` on the host.
+      '';
+    };
+    mode = mkOption {
+      type = types.enum [ "clone" "overlay" ];
+      default = "clone";
+      description = ''
+        How the relocated store is populated. `clone` additively copies the
+        lower closure into one persistent relocated store. `overlay` combines
+        the selected read-only parent lower with a writable upper and requires
+        Nix >= 2.19 plus the capabilities needed for OverlayFS.
+      '';
+    };
+    parent = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        Logical runner declaration whose frozen store is this overlay's
+        parent. `null` selects the host store. Clone and native stores cannot
+        be overlay parents.
+      '';
+    };
+  };
+
+  containerType = types.submodule ({ name, ... }: {
+    options = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Whether to create this runner container.";
+      };
+      containerName = mkOption {
+        type = types.str;
+        default = name;
+        defaultText = lib.literalMD "the declaration attribute name";
+        description = "NixOS container and `container@<name>` unit name.";
+      };
+      store = mkOption {
+        type = types.submodule {
+          options = storeOptions { defaultHostBackup = "/var/lib/runners/${name}"; };
+        };
+        description = "Relocated store and logical parent settings for this runner container.";
+      };
+      instances = mkOption {
+        type = types.attrsOf instanceType;
+        default = { };
+        description = "Forgejo runner registrations to start inside this container.";
+      };
+    };
+  });
 
   # SSH credentials for a single purpose: a user (server RUN_USER) + key pair.
   # Two independent bundles exist — one for fetching private flake inputs

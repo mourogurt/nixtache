@@ -84,7 +84,8 @@ let
 
     services.nixtache.overlay-nix = {
       enable = true;
-      inherit upperOnUpdate layers;
+      inherit upperOnUpdate;
+      _layers = layers;
       upperDir = upperDirs.host;
       workDir = workDirs.host;
     };

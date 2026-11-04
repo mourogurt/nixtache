@@ -15,6 +15,7 @@ with lib;
 
 let
   cfg = config.services.nixtache.runner;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) cfg._declarations;
 
   typesT = import ./types.nix { inherit lib; };
 
@@ -57,11 +58,13 @@ in
       NIXTACHE_GIT_SSH_HOST = head cfg.gitHost.hostNames;
     };
 
-    containers.${cfg.containerName}.config = { ... }: {
-      services.openssh = {
-        enable = false;
-        knownHosts = knownHostsAttrset;
+    containers = mapAttrs' (_: declaration: nameValuePair declaration.containerName {
+      config = { ... }: {
+        services.openssh = {
+          enable = false;
+          knownHosts = knownHostsAttrset;
+        };
       };
-    };
+    }) enabledDeclarations;
   };
 }

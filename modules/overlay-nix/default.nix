@@ -8,12 +8,27 @@ let
   abEnabled = abCfg.enable or false;
   imageId = abCfg.imageId or "nixtache";
   runnerCfg = config.services.nixtache.runner or { };
-  runnerStore = runnerCfg.store or { };
-  runnerOverlay = (runnerCfg.enable or false)
-    && (runnerStore.path or "/") != "/"
-    && (runnerStore.mode or "clone") == "overlay";
-  runnerHostBackup = runnerStore.hostBackup or "/srv/bincache";
-  runnerContainer = "container@${runnerCfg.containerName or "runner"}.service";
+  runnerDeclarations = runnerCfg._declarations or { };
+  runnerLayers = mapAttrsToList (id: declaration:
+    let store = declaration.store; in {
+      inherit id;
+      parent = store.parent;
+      upperDir = "${store.hostBackup}/overlay/upper";
+      workDir = "${store.hostBackup}/overlay/work";
+      stateDir = "${store.hostBackup}/nix/var/nix";
+      lowerRoot = if declaration.isSingleton
+        then "/run/nixtache-runner-lower"
+        else "/run/nixtache-runner-lower/${id}";
+      containerName = declaration.containerName;
+      isSingleton = declaration.isSingleton;
+    }
+  ) (filterAttrs (_: declaration:
+    declaration.enable
+    && declaration.store.path != "/"
+    && declaration.store.mode == "overlay"
+  ) runnerDeclarations);
+  runnerContainerUnits = map (node: "container@${node.containerName}.service") runnerLayers;
+  runnerContainer = concatStringsSep " " runnerContainerUnits;
 
   layerType = types.submodule {
     options = {
@@ -46,7 +61,7 @@ let
     };
   };
 
-  configuredLayers = cfg.layers or [ ];
+  configuredLayers = cfg._layers;
   topologyNodes = [
     {
       id = "host";
@@ -55,19 +70,12 @@ let
       stateDir = "/nix/var/nix";
       lowerRoot = "";
     }
-  ] ++ configuredLayers ++ lib.optional runnerOverlay {
-    id = "runner";
-    parent = null;
-    upperDir = "${runnerHostBackup}/overlay/upper";
-    workDir = "${runnerHostBackup}/overlay/work";
-    stateDir = "${runnerHostBackup}/nix/var/nix";
-    lowerRoot = "/run/nixtache-runner-lower";
-  };
+  ] ++ configuredLayers ++ runnerLayers;
   topologyIds = map (node: node.id) topologyNodes;
   childrenOf = parent: builtins.filter (node: node.id != "host" && (if node.parent == null then "host" else node.parent) == parent) topologyNodes;
   visitTopology = parent: path:
     if builtins.elem parent path then
-      throw "services.nixtache.overlay-nix.layers: topology cycle detected: ${concatStringsSep " -> " (path ++ [ parent ])}"
+      throw "services.nixtache.overlay-nix: topology cycle detected: ${concatStringsSep " -> " (path ++ [ parent ])}"
     else
       [ parent ] ++ builtins.concatLists (map
         (node: visitTopology node.id (path ++ [ parent ]))
@@ -75,6 +83,26 @@ let
   sortedNodeIds = visitTopology "host" [ ];
   sortedTopology = map (id: builtins.head (builtins.filter (node: node.id == id) topologyNodes)) sortedNodeIds;
   nodesById = listToAttrs (map (node: nameValuePair node.id node) topologyNodes);
+  pathComponents = path: filter (component: component != "" && component != ".") (splitString "/" path);
+  pathIsPrefix = parent: child:
+    let
+      parentComponents = pathComponents parent;
+      childComponents = pathComponents child;
+    in
+    builtins.length parentComponents <= builtins.length childComponents
+    && take (builtins.length parentComponents) childComponents == parentComponents;
+  pathsOverlap = a: b: pathIsPrefix a b || pathIsPrefix b a;
+  pathEntries = concatMap (node: map (kind: {
+    owner = "${node.id}.${kind}";
+    path = node.${kind};
+  }) [ "upperDir" "workDir" "stateDir" ]) topologyNodes;
+  pathPairs = concatMap (a: map (b: { inherit a b; }) pathEntries) pathEntries;
+  pathCollisions = filter (pair:
+    pair.a.owner != pair.b.owner && pathsOverlap pair.a.path pair.b.path
+  ) pathPairs;
+  unsafeManagedPaths = filter (entry:
+    !hasPrefix "/" entry.path || builtins.elem ".." (splitString "/" entry.path)
+  ) pathEntries;
   nodeStage = node: if node.id == "host" then "$stage/host" else "$stage/layers/${node.id}";
   parentId = node: if node.parent == null then "host" else node.parent;
   nodeRoot = node: if node.id == "host" then "$host_root" else "$scratch/layers/${node.id}";
@@ -87,7 +115,7 @@ let
   urlExpression = ownId: node: root:
     let
       state = if node.id == ownId then "${nodeStage node}/state" else "$scratch/lower-states/${node.id}";
-      lower = if node.id == "host" then "$lower_url" else "$(uri_encode \"${urlExpression ownId (nodesById.${parentId node}) root}\")";
+      lower = if node.id == "host" then "$lower_url" else "$(uri_encode \"${urlExpression ownId (nodesById.${parentId node}) (nodeRoot (nodesById.${parentId node}))}\")";
     in
     "local-overlay://?root=${root}&state=${state}&lower-store=${lower}&upper-layer=${nodeStage node}/upper&ignore-gc-delete-failure=true&check-mount=false";
   topologyFingerprint = builtins.hashString "sha256" (builtins.toJSON
@@ -141,7 +169,7 @@ let
 
   cloneLayerSnippets = concatMapStrings (node: optionalString (node.id != "host") ''
     source_path=${"$source_dir"}/layers/${node.id}
-    ${optionalString (node.id == "runner") ''
+    ${optionalString (node.isSingleton or false) ''
       if [ ! -d "$source_path" ]; then source_path=${"$source_dir"}/runner; fi
     ''}
     copy_layer "$source_path" "${nodeStage node}"
@@ -185,8 +213,8 @@ let
       for name in ${concatStringsSep " " stateNames}; do reset_dir "${node.stateDir}/$name"; done
     else
       ephemeral_layers[${node.id}]=0
-      ${if node.id == "runner" then ''
-        activate_state_dir "$generation/layers/runner" ${runnerHostBackup}/overlay ${legacyBackup}/layers/runner/overlay
+      ${if node.isSingleton or false then ''
+        activate_state_dir "$generation/layers/${node.id}" ${dirOf node.upperDir} ${legacyBackup}/layers/${node.id}/overlay
       '' else ''
         activate_path "$generation/layers/${node.id}/upper" ${node.upperDir} ${legacyBackup}/layers/${node.id}/upper
         activate_path "$generation/layers/${node.id}/work" ${node.workDir} ${legacyBackup}/layers/${node.id}/work
@@ -700,41 +728,61 @@ in
       '';
     };
 
-    layers = mkOption {
+    _layers = mkOption {
       type = types.listOf layerType;
       default = [ ];
-      description = ''
-        Additional local-overlay nodes in the physical slot's upper metaslot.
-        Each node has a stable identity and names its parent, forming one
-        validated rooted tree with the host overlay. Duplicate identities,
-        missing parents and cycles fail evaluation. Parents are prepared and
-        verified before children; all nodes share one readiness result.
-      '';
+      internal = true;
+      description = "Internal low-level declarations for focused storage fixtures; production nodes derive from runner containers.";
+    };
+
+    _topology = mkOption {
+      type = types.attrs;
+      default = { };
+      internal = true;
+      description = "Derived overlay nodes, parent index, preparation order and graph fingerprint for internal module consumers.";
     };
   };
 
   config = mkIf cfg.enable (mkMerge [
     {
+      services.nixtache.overlay-nix._topology = {
+        nodes = topologyNodes;
+        byId = nodesById;
+        order = sortedNodeIds;
+        fingerprint = topologyFingerprint;
+      };
       assertions = [
         {
           assertion = (builtins.compareVersions config.nix.package.version "2.19") >= 0;
           message = "services.nixtache.overlay-nix requires Nix >= 2.19 for local-overlay-store";
         }
         {
-          assertion = builtins.all (id: builtins.match "[A-Za-z0-9._-]+" id != null) topologyIds;
-          message = "services.nixtache.overlay-nix.layers: node identities may contain only letters, digits, '.', '_' and '-'.";
+          assertion = builtins.all (id:
+            builtins.match "[A-Za-z0-9._-]+" id != null && !builtins.elem id [ "." ".." ]
+          ) topologyIds;
+          message = "services.nixtache.overlay-nix: node identities must be safe, unique path components.";
         }
         {
           assertion = builtins.length topologyIds == builtins.length (lists.unique topologyIds);
-          message = "services.nixtache.overlay-nix.layers: duplicate node identity in the upper topology.";
+          message = "services.nixtache.overlay-nix: duplicate node identity in the upper topology.";
         }
         {
-          assertion = builtins.all (node: node.parent == null || builtins.elem node.parent topologyIds) configuredLayers;
-          message = "services.nixtache.overlay-nix.layers: every parent must name an existing overlay node.";
+          assertion = builtins.all (node:
+            node.id == "host" || node.parent == null || builtins.elem node.parent topologyIds
+          ) topologyNodes;
+          message = "services.nixtache.overlay-nix: every parent must name an eligible existing overlay node.";
         }
         {
           assertion = builtins.length sortedNodeIds == builtins.length topologyIds;
-          message = "services.nixtache.overlay-nix.layers: every node must be reachable from the host root.";
+          message = "services.nixtache.overlay-nix: every node must be reachable from the host root without cycles.";
+        }
+        {
+          assertion = unsafeManagedPaths == [ ];
+          message = "services.nixtache.overlay-nix: managed paths must be absolute and cannot contain '..' components.";
+        }
+        {
+          assertion = pathCollisions == [ ];
+          message = "services.nixtache.overlay-nix: upper, work and state paths must be component-wise disjoint within and across nodes.";
         }
       ];
 
@@ -821,11 +869,13 @@ in
       };
     })
 
-    (mkIf runnerOverlay {
-      systemd.services."container@${runnerCfg.containerName}" = {
-        after = [ "nixtache-overlay-ready.target" ];
-        requires = [ "nixtache-overlay-ready.target" ];
-      };
+    (mkIf (runnerLayers != [ ]) {
+      systemd.services = listToAttrs (map (node:
+        nameValuePair "container@${node.containerName}" {
+          after = [ "nixtache-overlay-ready.target" ];
+          requires = [ "nixtache-overlay-ready.target" ];
+        }
+      ) runnerLayers);
     })
   ]);
 }

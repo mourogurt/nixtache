@@ -22,6 +22,15 @@ with lib;
 
 let
   cfg = config.services.nixtache.runner;
+  typesT = import ./types.nix { inherit lib; };
+  declarations = if cfg.containers == { } then {
+    ${cfg.containerName} = {
+      inherit (cfg) containerName store instances;
+      enable = true;
+      isSingleton = true;
+    };
+  } else mapAttrs (_: declaration: declaration // { isSingleton = false; }) cfg.containers;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) declarations;
 
   # Host values that must propagate into the container (evaluated on the host).
   system_version = config.system.stateVersion;
@@ -84,6 +93,24 @@ in
       type = types.str;
       default = "runner";
       description = "Name of the NixOS container (and the `container@<name>` systemd unit).";
+    };
+
+    containers = mkOption {
+      type = types.attrsOf typesT.containerType;
+      default = { };
+      description = ''
+        Named runner containers with independent stores, Forgejo registrations
+        and logical store-parent relationships. A non-empty collection replaces
+        the legacy singleton declaration while retaining the shared runner
+        defaults. Attribute names are stable logical store identities.
+      '';
+    };
+
+    _declarations = mkOption {
+      type = types.attrs;
+      default = { };
+      internal = true;
+      description = "Normalized singleton or named runner-container declarations used by runner and overlay modules.";
     };
 
     package = mkOption {
@@ -205,20 +232,19 @@ in
   };
 
   config = mkIf cfg.enable {
-    containers.${cfg.containerName} = {
+    services.nixtache.runner._declarations = declarations;
+    assertions = [
+      {
+        assertion = builtins.length (mapAttrsToList (_: declaration: declaration.containerName) declarations)
+          == builtins.length (lists.unique (mapAttrsToList (_: declaration: declaration.containerName) declarations));
+        message = "services.nixtache.runner containerName values must be unique.";
+      }
+    ];
+    containers = mapAttrs (_: declaration: {
       autoStart = true;
-
-      # `system_version` / `system_features` are evaluated on the host and
-      # propagated verbatim into the container. specialArgs merges across all
-      # sub-modules, so every container-config contribution can destructure
-      # them (most use `...` and ignore them).
       specialArgs = {
         inherit system_version system_features;
       };
-
-      # Base container config: nix gc/optimise/settings + stateVersion.
-      # Sub-modules (store/cache/ssh/sandbox/known-hosts/instances) inject
-      # their own keys into this same attrset via mkMerge.
       config =
         {
           config,
@@ -229,10 +255,6 @@ in
           ...
         }:
         {
-          # The forced experimental-features live in ./nix-features.nix —
-          # one definition, also exported as `nixosModules.nix-features`
-          # for environments that handle nixtache closures without the
-          # whole runner module.
           imports = [ ./nix-features.nix ];
           nix = {
             gc = {
@@ -252,27 +274,24 @@ in
                   "@users"
                 ];
                 system-features = system_features;
-                # `sandbox` itself is forced by sandbox.nix (it tracks the
-                # CAP_SYS_ADMIN grant 1:1 — sandbox without the cap fails; cap
-                # without sandbox is a pointless privilege).
               }
             ];
           };
-
           system.stateVersion = system_version;
         };
-    };
+    }) enabledDeclarations;
 
-    # Container resource limits (host side). Swap/CPU/IO knobs are omitted
-    # (not set to systemd defaults) when null, so host-wide systemd policy
-    # (DefaultCPUWeight, admin drop-ins) is not shadowed by the module.
-    systemd.services."container@${cfg.containerName}".serviceConfig = {
-      TimeoutStartSec = lib.mkForce cfg.timeoutStartSec;
-      MemoryMax = cfg.memoryMax;
-      MemoryHigh = cfg.memoryHigh;
-    }
-    // lib.optionalAttrs (cfg.memorySwapMax != null) { MemorySwapMax = cfg.memorySwapMax; }
-    // lib.optionalAttrs (cfg.cpuWeight != null) { CPUWeight = cfg.cpuWeight; }
-    // lib.optionalAttrs (cfg.ioWeight != null) { IOWeight = cfg.ioWeight; };
+    systemd.services = mapAttrs' (_: declaration:
+      nameValuePair "container@${declaration.containerName}" {
+        serviceConfig = {
+          TimeoutStartSec = lib.mkForce cfg.timeoutStartSec;
+          MemoryMax = cfg.memoryMax;
+          MemoryHigh = cfg.memoryHigh;
+        }
+        // lib.optionalAttrs (cfg.memorySwapMax != null) { MemorySwapMax = cfg.memorySwapMax; }
+        // lib.optionalAttrs (cfg.cpuWeight != null) { CPUWeight = cfg.cpuWeight; }
+        // lib.optionalAttrs (cfg.ioWeight != null) { IOWeight = cfg.ioWeight; };
+      }
+    ) enabledDeclarations;
   };
 }

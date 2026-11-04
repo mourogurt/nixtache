@@ -31,9 +31,7 @@ let
   runnerCfg = config.services.nixtache.runner;
   cfg = runnerCfg.deploy;
 
-  # Host-side computations (the inner container `config` can't see host
-  # `services.nixtache.*`). Same pattern as ssh.nix / instances.nix.
-  enabledInstances = filterAttrs (_: i: i.enable) runnerCfg.instances;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) runnerCfg._declarations;
 
   # Per-target deploy key bind-mounts (only targets that actually have a key).
   targetsWithKey = filterAttrs (_: t: t.sshPrivateKey != null) cfg.targets;
@@ -93,31 +91,37 @@ in
     # 2) Keys → container (bind-mount + per-service LoadCredential), mirroring
     #    ssh.nix. The inner `config` runs in the CONTAINER eval — it only uses
     #    host-side `let` bindings above, never host `config.*`.
-    containers.${runnerCfg.containerName} = {
-      bindMounts = (mapAttrs' (name: t:
-        nameValuePair "deploy_ssh_${name}" {
-          mountPoint = "/var/secrets/runner/deploy/${name}/id_ed25519";
-          # `toString`: bindMounts.hostPath is string-typed; sshPrivateKey may be
-          # a path literal (tests) or a string (real sops/agenix paths). Coerce
-          # robustly — identity for strings.
-          hostPath = toString t.sshPrivateKey;
-          isReadOnly = true;
-        }
-      ) targetsWithKey) // (mapAttrs' (name: t:
-        nameValuePair "deploy_ssh_${name}-pub" {
-          mountPoint = "/var/secrets/runner/deploy/${name}/id_ed25519.pub";
-          hostPath = toString t.sshPublicKey;
-          isReadOnly = true;
-        }
-      ) targetsWithPubKey);
+    containers = mapAttrs'
+      (_: declaration:
+        nameValuePair declaration.containerName (let
+          enabledInstances = filterAttrs (_: instance: instance.enable) declaration.instances;
+        in
+        {
+          bindMounts = (mapAttrs' (name: t:
+            nameValuePair "deploy_ssh_${name}" {
+              mountPoint = "/var/secrets/runner/deploy/${name}/id_ed25519";
+              # `toString`: bindMounts.hostPath is string-typed; sshPrivateKey may be
+              # a path literal (tests) or a string (real sops/agenix paths). Coerce
+              # robustly — identity for strings.
+              hostPath = toString t.sshPrivateKey;
+              isReadOnly = true;
+            }
+          ) targetsWithKey) // (mapAttrs' (name: t:
+            nameValuePair "deploy_ssh_${name}-pub" {
+              mountPoint = "/var/secrets/runner/deploy/${name}/id_ed25519.pub";
+              hostPath = toString t.sshPublicKey;
+              isReadOnly = true;
+            }
+          ) targetsWithPubKey);
 
-      config = { ... }: {
-        systemd.services = mapAttrs' (iname: _:
-          nameValuePair "forgejo-runner-${iname}" {
-            serviceConfig.LoadCredential = mkIf (deployLoadCreds != [ ]) deployLoadCreds;
-          }
-        ) enabledInstances;
-      };
-    };
+          config = { ... }: {
+            systemd.services = mapAttrs' (iname: _:
+              nameValuePair "forgejo-runner-${iname}" {
+                serviceConfig.LoadCredential = mkIf (deployLoadCreds != [ ]) deployLoadCreds;
+              }
+            ) enabledInstances;
+          };
+        }))
+      enabledDeclarations;
   };
 }
