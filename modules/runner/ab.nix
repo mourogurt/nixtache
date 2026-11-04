@@ -18,7 +18,7 @@ let
   runnerCfg = config.services.nixtache.runner;
   cfg = runnerCfg.deploy.ab;
 
-  enabledInstances = filterAttrs (_: i: i.enable) runnerCfg.instances;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) runnerCfg._declarations;
 
   # nginx URI prefix and the on-disk staging subdir MUST share their basename so
   # the vhost `root` maps `<stagingPath>` onto the `/<basename>/` URI. Enforced
@@ -144,29 +144,35 @@ in
     ];
 
     # --- staging store bind-mounted into the container (CI writes images) -----
-    containers.${runnerCfg.containerName} = {
-      bindMounts."ab-stage" = {
-        mountPoint = cfg.stagingPath;
-        hostPath = cfg.stagingPath;
-        isReadOnly = false;
-      };
+    containers = mapAttrs'
+      (_: declaration:
+        nameValuePair declaration.containerName (let
+          enabledInstances = filterAttrs (_: instance: instance.enable) declaration.instances;
+        in
+        {
+          bindMounts."ab-stage" = {
+            mountPoint = cfg.stagingPath;
+            hostPath = cfg.stagingPath;
+            isReadOnly = false;
+          };
 
-      config = { ... }: {
-        # gpg is needed by the deploy action to sign SHA256SUMS at stage time.
-        environment.systemPackages = [ pkgs.gnupg ];
+          config = { ... }: {
+            # gpg is needed by the deploy action to sign SHA256SUMS at stage time.
+            environment.systemPackages = [ pkgs.gnupg ];
 
-        # Expose the signing key to every forgejo-runner-* service (same pattern
-        # as the deploy keys in deploy.nix). The action imports it into a
-        # throwaway GNUPGHOME, signs, and discards.
-        systemd.services = mapAttrs' (iname: _:
-          nameValuePair "forgejo-runner-${iname}" {
-            serviceConfig.LoadCredential = mkIf (cfg.signingKeyFile != null) [
-              "sysupdate_signing_key:${toString cfg.signingKeyFile}"
-            ];
-          }
-        ) enabledInstances;
-      };
-    };
+            # Expose the signing key to every forgejo-runner-* service (same pattern
+            # as the deploy keys in deploy.nix). The action imports it into a
+            # throwaway GNUPGHOME, signs, and discards.
+            systemd.services = mapAttrs' (iname: _:
+              nameValuePair "forgejo-runner-${iname}" {
+                serviceConfig.LoadCredential = mkIf (cfg.signingKeyFile != null) [
+                  "sysupdate_signing_key:${toString cfg.signingKeyFile}"
+                ];
+              }
+            ) enabledInstances;
+          };
+        }))
+      enabledDeclarations;
 
     # --- staging store served over HTTPS (remote ab-image targets) ------------
     # Reuses the cache vhost (domain + TLS). `root` = parent of stagingPath so a

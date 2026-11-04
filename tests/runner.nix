@@ -964,6 +964,121 @@ self.nixosModules.runner
     };
   };
 
+  namedContainer =
+    { name
+    , parent ? null
+    , mode ? "overlay"
+    , path ? "/srv/${name}"
+    , hostBackup ? "/var/lib/runners/${name}"
+    }: {
+      store = {
+        inherit parent mode path hostBackup;
+      };
+    };
+
+  namedBoot = {
+    fileSystems."/" = {
+      device = "/dev/sda";
+      fsType = "ext4";
+    };
+    boot.loader.grub.devices = [ "/dev/sda" ];
+  };
+
+  tryNamedContainers = containers: builtins.tryEval (mkHost "/" {
+    imports = [ namedBoot ];
+    services.nixtache.runner = {
+      cache.enable = lib.mkForce false;
+      inherit containers;
+    };
+    services.nixtache.overlay-nix.enable = true;
+  }).config.system.build.toplevel.outPath;
+
+  hostNamed = mkHost "/" {
+    imports = [ namedBoot ];
+    services.nixtache.runner = {
+      cache.enable = lib.mkForce false;
+      containers = {
+        alpha = (namedContainer { name = "alpha"; }) // {
+          instances.default = { uuid = dummyUuid; tokenFile = dummySecret; };
+        };
+        beta = namedContainer { name = "beta"; parent = "alpha"; };
+        additive = namedContainer { name = "additive"; mode = "clone"; };
+      };
+    };
+    services.nixtache.overlay-nix.enable = true;
+  };
+  namedTopology = hostNamed.config.services.nixtache.overlay-nix._topology;
+  namedNodeIds = lib.sort (a: b: a < b) (map (node: node.id) namedTopology.nodes);
+  scenarioNamedContainers = {
+    name = "named runner containers derive internal sibling, nested and clone-free topology";
+    checks = {
+      containersCreated = hostNamed.config.containers ? alpha
+        && hostNamed.config.containers ? beta
+        && hostNamed.config.containers ? additive;
+      singletonNotDuplicated = !(hostNamed.config.containers ? runner);
+      perContainerInstances = hostNamed.config.containers.alpha.config.services.forgejo-runner.instances.default.settings.server.connections.default.uuid == dummyUuid;
+      topologyNodes = namedNodeIds == [ "alpha" "beta" "host" ];
+      nestedParent = namedTopology.byId.beta.parent == "alpha";
+      lowerRootsDistinct = namedTopology.byId.alpha.lowerRoot != namedTopology.byId.beta.lowerRoot;
+      managedPathsDerived = namedTopology.byId.alpha.upperDir == "/var/lib/runners/alpha/overlay/upper"
+        && namedTopology.byId.alpha.workDir == "/var/lib/runners/alpha/overlay/work"
+        && namedTopology.byId.alpha.stateDir == "/var/lib/runners/alpha/nix/var/nix";
+      siblingCompatibility = (hostCascadeOverlay.config.services.nixtache.overlay-nix._topology.byId.runner).parent == null;
+      cloneOutsideReadiness = !(lib.elem "nixtache-overlay-ready.target"
+        (hostNamed.config.systemd.services."container@additive".requires or [ ]));
+    };
+  };
+
+  hostPrefixOnly = mkHost "/" {
+    imports = [ namedBoot ];
+    services.nixtache.runner = {
+      cache.enable = lib.mkForce false;
+      containers = {
+        a = namedContainer { name = "a"; hostBackup = "/var/lib/shared"; };
+        b = namedContainer { name = "b"; hostBackup = "/var/lib/shared-b"; };
+      };
+    };
+    services.nixtache.overlay-nix.enable = true;
+  };
+  scenarioNamedContainerValidation = {
+    name = "runner declarations reject unsafe identities, invalid parents, cycles and managed path collisions";
+    checks = {
+      missingParent = !(tryNamedContainers {
+        a = namedContainer { name = "a"; parent = "missing"; };
+      }).success;
+      cloneParent = !(tryNamedContainers {
+        a = namedContainer { name = "a"; mode = "clone"; };
+        b = namedContainer { name = "b"; parent = "a"; };
+      }).success;
+      nativeParent = !(tryNamedContainers {
+        a = namedContainer { name = "a"; path = "/"; };
+        b = namedContainer { name = "b"; parent = "a"; };
+      }).success;
+      selfParent = !(tryNamedContainers {
+        a = namedContainer { name = "a"; parent = "a"; };
+      }).success;
+      cycle = !(tryNamedContainers {
+        a = namedContainer { name = "a"; parent = "b"; };
+        b = namedContainer { name = "b"; parent = "a"; };
+      }).success;
+      dot = !(tryNamedContainers {
+        "." = namedContainer { name = "dot"; };
+      }).success;
+      dotDot = !(tryNamedContainers {
+        ".." = namedContainer { name = "dotdot"; };
+      }).success;
+      equalPaths = !(tryNamedContainers {
+        a = namedContainer { name = "a"; hostBackup = "/var/lib/shared"; };
+        b = namedContainer { name = "b"; hostBackup = "/var/lib/shared"; };
+      }).success;
+      nestedPaths = !(tryNamedContainers {
+        a = namedContainer { name = "a"; hostBackup = "/var/lib/shared"; };
+        b = namedContainer { name = "b"; hostBackup = "/var/lib/shared/overlay/upper/child"; };
+      }).success;
+      prefixOnlyPaths = hostPrefixOnly.config.system.build.toplevel.outPath != "";
+    };
+  };
+
   # --- scenario: gitHost → NIXTACHE_GIT_SSH_HOST env + known_hosts ---------
   # The FIRST hostName is the canonical SSH endpoint exported to every job as
   # NIXTACHE_GIT_SSH_HOST (update-flake push target). gitHost=null (hostSrv)
@@ -1101,6 +1216,8 @@ self.nixosModules.runner
     scenarioApplianceHost
     scenarioOverlayLower
     scenarioCascadeLower
+    scenarioNamedContainers
+    scenarioNamedContainerValidation
     scenarioGitSshHost
     scenarioResources
     scenarioNginxCache

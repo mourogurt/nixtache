@@ -32,7 +32,7 @@ let
   flakeSshEnabled = flakeSsh != null;
   updateSshEnabled = updateSsh != null;
 
-  enabledInstances = filterAttrs (_: i: i.enable) cfg.instances;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) cfg._declarations;
 in
 {
   options.services.nixtache.runner = {
@@ -93,79 +93,81 @@ in
   };
 
   config = mkIf cfg.enable {
-    # One container literal: per-instance token mounts + the
-    # `services.forgejo-runner` map. Single use of the dynamic key
-    # `${cfg.containerName}` (Nix forbids two path-assignments that share a
-    # dynamic prefix inside the same literal).
-    containers.${cfg.containerName} = {
-      bindMounts = listToAttrs (mapAttrsToList
-        (iname: i:
-          nameValuePair "runner-token-${iname}" {
-            mountPoint = "/var/secrets/runner/${iname}/token";
-            # `toString`: bindMounts.hostPath is string-typed; tokenFile may be
-            # a path literal (tests) or a string (real sops/agenix paths).
-            # Coerce robustly — identity for strings.
-            hostPath = toString i.tokenFile;
-            isReadOnly = true;
-          })
-        enabledInstances);
+    containers = mapAttrs'
+      (_: declaration:
+        nameValuePair declaration.containerName (let
+          enabledInstances = filterAttrs (_: instance: instance.enable) declaration.instances;
+        in
+        {
+          bindMounts = listToAttrs (mapAttrsToList
+            (iname: instance:
+              nameValuePair "runner-token-${iname}" {
+                mountPoint = "/var/secrets/runner/${iname}/token";
+                # `toString`: bindMounts.hostPath is string-typed; tokenFile may be
+                # a path literal (tests) or a string (real sops/agenix paths).
+                # Coerce robustly — identity for strings.
+                hostPath = toString instance.tokenFile;
+                isReadOnly = true;
+              })
+            enabledInstances);
 
-      config = { lib, ... }: {
-      # forgejo-runner-<name> is a DynamicUser unit whose user is NSS-visible
-      # under the unit's own name (nss-systemd). Dynamic users are NOT in the
-      # `users` group, so the base config's `@users` entry does not cover
-      # them — list each instance's user explicitly, or host-mode jobs lose
-      # trusted-client status (no substituters, no `nix copy --to` for direct
-      # deploy).
-      nix.settings.trusted-users = mapAttrsToList
-        (iname: _: "forgejo-runner-${iname}")
-        enabledInstances;
+          config = { lib, ... }: {
+            # forgejo-runner-<name> is a DynamicUser unit whose user is NSS-visible
+            # under the unit's own name (nss-systemd). Dynamic users are NOT in the
+            # `users` group, so the base config's `@users` entry does not cover
+            # them — list each instance's user explicitly, or host-mode jobs lose
+            # trusted-client status (no substituters, no `nix copy --to` for direct
+            # deploy).
+            nix.settings.trusted-users = mapAttrsToList
+              (iname: _: "forgejo-runner-${iname}")
+              enabledInstances;
 
-      services.forgejo-runner = {
-        package = cfg.package;
-        # One instance per enabled entry; all share forgejoUrl, host packages,
-        # timeouts and log level. Each instance is its own registration:
-        # connection `default` carries the shared URL + the per-instance uuid,
-        # and the bare runner token is read at service start from the
-        # read-only bind mount via the upstream module's secrets templating
-        # (token_url → systemd LoadCredential). The runner name is fixed in
-        # Forgejo at registration time and is not configured here.
-        instances = mapAttrs (iname: i: {
-          enable = true;
-          settings = {
-            server.connections.default = {
-              url = cfg.forgejoUrl;
-              uuid = i.uuid;
-            };
-            runner = {
-              labels = i.labels;
-              timeout = cfg.runnerTimeout;
-              shutdown_timeout = cfg.runnerTimeout;
-              # Export SSH users + bot identity to every job step (act_runner
-              # `runner.envs` — mode-agnostic, applies to host mode too).
-              # `ssh-setup` picks the right pair via its `creds` input.
-              # HAS_SANDBOX_CAP tells the reusable actions whether the daemon
-              # can sandbox (1) or whether they must fall back to --no-sandbox
-              # (0); mirrors `enableSandbox` 1:1.
-              envs = {
-                NIXTACHE_FLAKE_GIT_USER = lib.optionalString flakeSshEnabled flakeSsh.user;
-                NIXTACHE_UPDATE_GIT_USER = lib.optionalString updateSshEnabled updateSsh.user;
-                NIXTACHE_BOT_NAME = cfg.bot.name;
-                NIXTACHE_BOT_EMAIL = cfg.bot.email;
-                HAS_SANDBOX_CAP = if cfg.enableSandbox then "1" else "0";
-              } // cfg._extraRunnerEnvs;
-            };
-            log = {
-              level = cfg.logLevel;
-              job_level = cfg.logLevel;
+            services.forgejo-runner = {
+              package = cfg.package;
+              # One instance per enabled entry; all share forgejoUrl, host packages,
+              # timeouts and log level. Each instance is its own registration:
+              # connection `default` carries the shared URL + the per-instance uuid,
+              # and the bare runner token is read at service start from the
+              # read-only bind mount via the upstream module's secrets templating
+              # (token_url → systemd LoadCredential). The runner name is fixed in
+              # Forgejo at registration time and is not configured here.
+              instances = mapAttrs (iname: instance: {
+                enable = true;
+                settings = {
+                  server.connections.default = {
+                    url = cfg.forgejoUrl;
+                    uuid = instance.uuid;
+                  };
+                  runner = {
+                    labels = instance.labels;
+                    timeout = cfg.runnerTimeout;
+                    shutdown_timeout = cfg.runnerTimeout;
+                    # Export SSH users + bot identity to every job step (act_runner
+                    # `runner.envs` — mode-agnostic, applies to host mode too).
+                    # `ssh-setup` picks the right pair via its `creds` input.
+                    # HAS_SANDBOX_CAP tells the reusable actions whether the daemon
+                    # can sandbox (1) or whether they must fall back to --no-sandbox
+                    # (0); mirrors `enableSandbox` 1:1.
+                    envs = {
+                      NIXTACHE_FLAKE_GIT_USER = lib.optionalString flakeSshEnabled flakeSsh.user;
+                      NIXTACHE_UPDATE_GIT_USER = lib.optionalString updateSshEnabled updateSsh.user;
+                      NIXTACHE_BOT_NAME = cfg.bot.name;
+                      NIXTACHE_BOT_EMAIL = cfg.bot.email;
+                      HAS_SANDBOX_CAP = if cfg.enableSandbox then "1" else "0";
+                    } // cfg._extraRunnerEnvs;
+                  };
+                  log = {
+                    level = cfg.logLevel;
+                    job_level = cfg.logLevel;
+                  };
+                };
+                secrets.server.connections.default.token_url =
+                  "/var/secrets/runner/${iname}/token";
+                hostPackages = cfg.hostPackages;
+              }) enabledInstances;
             };
           };
-          secrets.server.connections.default.token_url =
-            "/var/secrets/runner/${iname}/token";
-          hostPackages = cfg.hostPackages;
-        }) enabledInstances;
-      };
-      };
-    };
+        }))
+      enabledDeclarations;
   };
 }

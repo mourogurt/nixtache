@@ -87,7 +87,7 @@ let
   };
   hostWithLayers = layers: mkHost {
     services.nixtache.overlay-nix = {
-      inherit layers;
+      _layers = layers;
       upperOnUpdate = "reconcile";
     };
   };
@@ -110,15 +110,24 @@ let
   }).config.system.build.toplevel.outPath;
   tryLayers = layers: tryHost {
     services.nixtache.overlay-nix = {
-      inherit layers;
+      _layers = layers;
       upperOnUpdate = "reconcile";
     };
   };
+  topologyWithLayers = layers: (cfgOf (hostWithLayers layers))._topology;
   posOf = pat: s: lib.stringLength (builtins.head (lib.splitString pat s));
+
+  scenarioPublicLayersRejected = {
+    name = "low-level overlay layers are not a consumer-facing option";
+    checks.rejected = !(tryHost {
+      services.nixtache.overlay-nix.layers = [ ];
+    }).success;
+  };
 
   siblingScript = scriptWithLayers [ (layer "a" null) (layer "b" null) ];
   siblingNamespace = namespaceWithLayers [ (layer "a" null) (layer "b" null) ];
   siblingSelection = selectWithLayers [ (layer "a" null) (layer "b" null) ];
+  siblingTopology = topologyWithLayers [ (layer "a" null) (layer "b" null) ];
   scenarioSiblings = {
     name = "sibling overlays share the host parent and one atomic readiness result";
     checks = {
@@ -131,6 +140,8 @@ let
       activatesBoth = lib.hasInfix "$generation/layers/a/upper" siblingSelection
         && lib.hasInfix "$generation/layers/b/upper" siblingSelection;
       topologyFingerprinted = lib.hasInfix "topology_sha256=" siblingScript;
+      derivedNodeIds = lib.sort (a: b: a < b) (map (node: node.id) siblingTopology.nodes) == [ "a" "b" "host" ];
+      derivedParents = siblingTopology.byId.a.parent == null && siblingTopology.byId.b.parent == null;
     };
   };
 
@@ -262,6 +273,7 @@ let
     scenarioDefault
     scenarioReconcile
     scenarioWipe
+    scenarioPublicLayersRejected
     scenarioSiblings
     scenarioNested
     scenarioComposed

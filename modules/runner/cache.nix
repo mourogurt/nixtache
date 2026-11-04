@@ -14,6 +14,7 @@ with lib;
 
 let
   cfg = config.services.nixtache.runner;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) cfg._declarations;
 in
 {
   options.services.nixtache.runner = {
@@ -90,13 +91,10 @@ in
   };
 
   config = mkIf cfg.enable {
-    # One container literal: the cache-key mount + the in-container nix-serve.
-    # Single use of the dynamic key `${cfg.containerName}` (Nix forbids two
-    # path-assignments sharing a dynamic prefix inside one literal).
-    containers.${cfg.containerName} = {
+    containers = mapAttrs' (_: declaration: nameValuePair declaration.containerName {
       bindMounts."cache-private-key" = {
         mountPoint = "/var/secrets/runner/cache-private-key.pem";
-        hostPath = cfg.secrets.cachePrivateKey;
+        hostPath = toString cfg.secrets.cachePrivateKey;
         isReadOnly = true;
       };
 
@@ -120,7 +118,7 @@ in
           };
         };
       };
-    };
+    }) enabledDeclarations;
 
     # Public binary cache vhost (host side). Requires nginx to be configured
     # on the host; the module only adds the virtual host.

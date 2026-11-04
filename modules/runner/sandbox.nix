@@ -24,6 +24,7 @@ with lib;
 
 let
   cfg = config.services.nixtache.runner;
+  enabledDeclarations = filterAttrs (_: declaration: declaration.enable) cfg._declarations;
 in
 {
   options.services.nixtache.runner = {
@@ -62,12 +63,9 @@ in
   };
 
   config = mkIf cfg.enable {
-    # One container literal: the capabilities grant + the forced sandbox
-    # setting. Single use of the dynamic key `${cfg.containerName}` (Nix
-    # forbids two path-assignments sharing a dynamic prefix inside one
-    # literal). `additionalCapabilities` is a list and does not auto-merge
-    # across modules — it MUST be set in exactly one place (here).
-    containers.${cfg.containerName} = {
+    # `additionalCapabilities` is a list and does not auto-merge across
+    # modules — it MUST be set in exactly one place for each container (here).
+    containers = mapAttrs' (_: declaration: nameValuePair declaration.containerName {
       # CAP_SYS_ADMIN (when enableSandbox) so nix-daemon inside the container
       # can create the user/mount namespaces + bind-mounts that Nix's build
       # sandbox requires. systemd-nspawn drops CAP_SYS_ADMIN by default, and
@@ -124,6 +122,6 @@ in
             ];
           };
         };
-    };
+    }) enabledDeclarations;
   };
 }
