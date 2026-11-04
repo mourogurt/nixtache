@@ -16,11 +16,18 @@ the [quickstart](doc/user_guide/quickstart.md).
 
 | Module | What it gives you |
 |---|---|
-| [`runner`](doc/user_guide/quickstart.md) | `services.nixtache.runner`: the Forgejo Actions runner (`forgejo-runner`, multi-instance, uuid+token registration) inside a NixOS container, with a configurable/relocatable nix store, a `nix-serve` binary cache behind an edge-caching nginx vhost, and credential wiring for private flake inputs and deploy keys. |
+| [`runner`](doc/user_guide/quickstart.md) | `services.nixtache.runner`: Forgejo Actions runners (`forgejo-runner`, multi-instance, uuid+token registration) in NixOS containers, with configurable/relocatable nix stores, a `nix-serve` binary cache behind an edge-caching nginx vhost, and credential wiring for private flake inputs and deploy keys. Named `runner.containers` declarations and logical `store.parent` edges derive the internal overlay topology; the singleton configuration remains supported. |
 | [`deploy-target`](doc/user_guide/deploy.md) | `services.nixtache.deploy-target`: the receiving side of direct deploy — root `nixtache-apply.service` (low-disk guard → activate → probe `criticalUnits` → rollback), polkit start-only rules, gated deploy user, Tier-0 health check. Import on every deploy target. |
 | [`ab-image`](doc/user_guide/ota.md) | `services.nixtache.ab-image`: build-time A/B appliance image config (repart slots, UKI, sysupdate transfers, boot counting, GPG verify, the slot's lower store DB dump + boot-time loader) — the OTA route. |
-| [`overlay-nix`](doc/user_guide/overlay-nix.md) | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` with delta installs against the shipped lower store DB. Each physical A/B slot has its own upper metaslot, prepared with `"wipe"` (default) or `"reconcile"` and selected unchanged again on rollback. |
+| [`overlay-nix`](doc/user_guide/overlay-nix.md) | `services.nixtache.overlay-nix`: writable OverlayFS on `/nix/store` with delta installs against the shipped lower store DB. Each physical A/B slot has its own upper metaslot, prepared with `"wipe"` (default) or `"reconcile"` and selected unchanged again on rollback. Runner declarations derive internal frozen lowers and runtime continuations; there is no consumer low-level topology configuration. |
 | [`auto-update`](doc/user_guide/auto-update.md) | `services.nixtache.auto-update`: unified auto-update channel replacing `system.autoUpgrade` — flake and A/B paths, one poll timer plus a deferred-reboot timer in window mode. |
+
+Canonical store and update requirements:
+[`runner`](openspec/specs/runner/spec.md),
+[`overlay-nix`](openspec/specs/overlay-nix/spec.md) and
+[`ab-ota`](openspec/specs/ab-ota/spec.md). The
+[overlay guide](doc/user_guide/overlay-nix.md) owns the detailed upper-generation
+lifecycle; the [glossary](doc/GLOSSARY.md#overlay-store) defines its vocabulary.
 
 ### Reusable workflows (`.forgejo/workflows/`) and actions
 

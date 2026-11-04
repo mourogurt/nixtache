@@ -20,7 +20,7 @@ deploy-map entry.
    ┌───────────────────────────────┐        ┌──────────────────────────────┐
    │ nix build sysupdate-package   │        │  ESP:  abtest_1.efi (blessed)│
    │  = nix-store.raw + UKI +      │ stage  │        abtest_2.efi (new)    │
-   │    lower-db dump + sums       │───────►│  slot A: nix-store_1 (v1)    │
+   │    lower-db + topology + sums │───────►│  slot A: nix-store_1 (v1)    │
    │ gpg --detach-sign SHA256SUMS  │        │  slot B: nix-store_2 (v2) ←──┼── systemd-sysupdate
    │ (HTTPS or local dir)          │        │  root:   persistent /etc,/var│
    └───────────────────────────────┘        └──────────────────────────────┘
@@ -40,8 +40,8 @@ deploy-map entry.
   `deploy-target.ab` on every A/B target). It runs the stock update unit to
   COMPLETION — the unit is Type=simple, so even `systemctl start --wait`
   returns long before a large slot write finishes, which is why the
-  completion is polled explicitly. On journal evidence that THIS run installed
-  a new version, it prepares the inactive slot's persistent upper chain (when
+  completion is polled explicitly. On journal evidence that THIS run completed
+  a lower installation, it prepares the inactive slot's upper chain (when
   `overlay-nix` is enabled) and only then starts
   `systemd-sysupdate-reboot.service` (the offline check for a newer installed
   version). Failed or empty updates, and failed upper preparation, leave the
@@ -52,7 +52,10 @@ deploy-map entry.
   `image-version` file before `nix build` (wire it via
   `ab-image.imageVersionFile`) — the same value ends up in the staged
   filenames, the signed manifest and the target's slot label. Re-deploying
-  the same version is a no-op on the target.
+  the same version is normally a no-op on the target. If a same-version lower
+  replacement is installed through another sysupdate flow, a changed lower-dump
+  checksum still requires a fresh upper generation; version equality alone is
+  not readiness evidence.
 
 ## The shipped lower store database
 
@@ -84,6 +87,46 @@ module asserts it with an actionable error), and every machine that
 evaluates/builds the image needs the `ca-derivations` experimental feature
 in its SYSTEM nix.conf — see the daemon quirk in
 [`lower-store-db.md`](../technical_details/lower-store-db.md).
+
+## Lower installation, upper readiness and rollback
+
+A completed sysupdate installation and a ready upper chain are separate
+milestones. With `overlay-nix`, the signed package also carries the target
+topology descriptor through the `17-overlay-topology` transfer. After each
+completed installation, `nixtache-overlay-prepare.service` validates that
+descriptor against the target version and lower-dump checksum, constructs only
+the inactive slot's physical upper graph and publishes it as ready. A missing
+or inconsistent descriptor, failed repair or incomplete graph suppresses the
+reboot; the active lower and upper remain available.
+
+Readiness always refers to the **latest installed lower**. Installing v2 and
+then v3 without an intervening reboot runs preparation twice and selects the
+ready v3 generation, rather than treating the earlier successful oneshot or v2
+metadata as sufficient. The same lower-dump and descriptor checks distinguish
+a rewritten lower even if its image version did not change. The detailed
+operation, publication and retention rules live in
+[`overlay-nix.md`](overlay-nix.md#target-preparation-and-topology-operations).
+
+With a deferred reboot, the persistent source generation is fingerprinted when
+the update is prepared. Changes during the window trigger another target-only
+preparation before cutover: `reconcile` rebases children onto the latest frozen
+parent runtime state, while `wipe` keeps target state clean and validates it
+against the latest lower. No live lower is refreshed beneath a running child.
+See [`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots)
+for the policy mechanics and current ephemeral-window restriction.
+
+An entirely ephemeral upper chain returns a successful no-persistent-metaslot
+preparation result. Direct and immediate cutovers can therefore reboot without
+inventing persistent upper state; the new boot resets every ephemeral
+descendant and loads exactly its own lower dump. Windowed ephemeral auto-update
+has the limitation linked above.
+
+Rollback is graph selection, not reverse reconciliation. Automatic boot
+counting and manual selection of an older prepared slot restore that slot's
+lower-state, declared logical topology, frozen lowers, runtime continuations,
+writable uppers and databases as preserved. Changes made only in the newer
+slot do not leak back, and no wipe, clone or reconcile runs merely because the
+image version changed.
 
 ## First deploy — three routes
 
@@ -208,11 +251,14 @@ all runners report idle (Forgejo API), then `nixtache-ab-apply` triggers
 sysupdate + reboot. The auto-update poll is a deliberate no-op there.
 
 The runner's relocated store remains usable across the slot swap. In `clone`
-mode, the boot-time re-clone is additive: existing build outputs remain in the
-persistent store and paths introduced by the new lower are added. In `overlay`
-mode, the merged store remounts over the new lower while retaining its
-persistent upper. Both modes continue to serve builds after reboot; see the
-[runner requirements](../../openspec/specs/runner/spec.md).
+mode, the boot-time re-seed is additive: existing build outputs remain in the
+single persistent relocated store and paths introduced by the new lower are
+added; clone never acquires a per-slot metaslot copy. In `overlay` mode, the
+runner's upper and upper-owned state come from the target slot's prepared
+generation, and rollback selects the previous generation unchanged. Both modes
+continue to serve builds after reboot; see the
+[runner requirements](../../openspec/specs/runner/spec.md) and
+[store-mode guide](quickstart.md#store-modes-and-named-runner-containers).
 
 ## CI wiring
 
@@ -246,11 +292,13 @@ write; the runner host cutover is idle-gated.
 | upper preparation failed | installation stays on disk but the trigger does not reboot; the active upper remains usable, and a later retry prepares only the target |
 | unrelated reboot into an unprepared UKI | boot-time selection attempts target-only recovery before upper consumers start; failure leaves the boot unblessed so boot counting returns to the preserved slot |
 | new boot broken | tries exhaust (default 3) → previous blessed lower and its preserved upper chain boot without a reverse wipe/reconcile. Before another update, run the [post-rollback recovery](#post-rollback-recovery) so version-driven selection cannot target the running oldest slot |
-| same version staged | no-op: nothing written, no upper preparation, trigger green |
+| same version staged | no lower write, upper preparation or reboot. The auto-update poll treats this as a successful no-op; `nixtache-ab-update` reports that nothing installed and exits nonzero |
 | interrupted update | the active slot is never the write target; the half-written slot never boots; re-install is refused until `systemd-sysupdate vacuum` removes the partial instance, then the next update rewrites the slot |
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
 | tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |
-| timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls, prepares the upper chain and reboots per `rebootPolicy`; window mode records the source generation and refreshes a changed target before the deferred reboot — see [`auto-update.md`](auto-update.md) |
+| consecutive installations without reboot | each installation reruns preparation; the eventual boot selects the exact ready generation for the latest lower and checksum |
+| entirely ephemeral update | preparation succeeds without persistent upper state; immediate or manual reboot resets the chain and loads the new lower. The current window-mode restriction is in [`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots) |
+| timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls, prepares the upper chain and reboots per `rebootPolicy`; persistent window mode records the source generation and refreshes a changed target before the deferred reboot — see [`auto-update.md`](auto-update.md) |
 
 ### Post-rollback recovery
 
@@ -273,7 +321,8 @@ The recovery command refuses to remove the running version, a missing or
 ambiguous slot, or ambiguous UKI artifacts. For partition-backed slots it
 relabels only the failed partition to `_empty`; for regular-file slots it
 removes only the failed store file. It also removes that version's UKI and
-lower-store-DB artifact while preserving the running slot. Once it succeeds,
+lower-store-DB and topology-descriptor artifacts while preserving the running
+slot. Once it succeeds,
 stage a fixed newer image and start the sysupdate unit appropriate for the
 host's systemd version (`systemd-sysupdate-update.service` on 262 and newer,
 `systemd-sysupdate.service` on older releases). The fixed image is written only
@@ -294,16 +343,12 @@ failure instead rejects the manifest (see the table above).
 
 ## Overlay synergy (runtime installs)
 
-Appliances can still install packages at runtime via
-[`overlay-nix.md`](overlay-nix.md) — including an explicit policy for what
-happens to the writable upper layer across these updates
-(`upperOnUpdate = "wipe" | "reconcile"`).
+Appliances can still install packages at runtime through the writable overlay.
+The [`overlay-nix` guide](overlay-nix.md) owns the complete `upperOnUpdate`,
+frozen-parent, generation-readiness, ephemeral and rollback lifecycle described
+above.
 
 Storage outside the A/B slots, such as a ZFS pool holding service state, is
 not rewritten by an update and must remain importable on either slot and after
-rollback. Upper metaslots follow the same preservation rule: the default
-`"wipe"` creates an empty target upper, while `"reconcile"` clones and repairs
-the active upper into that target. On rollback, the earlier slot's upper and
-DB are selected as preserved rather than wiped or reconciled back. Mount
-ordering and the external-upper contract are documented in
-[`overlay-nix.md`](overlay-nix.md).
+rollback. Mount ordering and the external-upper filesystem contract are
+documented in [`overlay-nix.md`](overlay-nix.md#upper-metaslots-and-generations).

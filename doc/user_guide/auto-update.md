@@ -60,6 +60,40 @@ services.nixtache.auto-update = {
   — a sparse schedule (daily/weekly) with a large `randomizedDelaySec` is
   typical.
 
+## A/B upper readiness and deferred reboots
+
+A completed lower installation triggers `nixtache-overlay-prepare.service`
+before any reboot decision, including with `rebootPolicy = "never"`; a failed or
+no-op installation does not. Preparation failure makes the poll fail and
+suppresses the reboot while the active slot remains available. Each later
+installation runs preparation again, so a pending reboot always describes the
+latest installed lower and target descriptor rather than an earlier ready
+upper generation.
+
+On a persistent overlay in window mode, the poll records the active upper
+generation's fingerprint after preparation. At the deferred cutover, a changed
+fingerprint causes another target-only preparation. `reconcile` therefore
+freezes the latest parent runtime continuations before the child rebase;
+`wipe` validates a clean target against the latest installed lower. Neither
+policy refreshes an active mounted lower or reconciles the previous slot during
+rollback. The lifecycle details are owned by
+[`overlay-nix.md`](overlay-nix.md), with canonical requirements in
+[`ab-ota`](../../openspec/specs/ab-ota/spec.md) and
+[`overlay-nix`](../../openspec/specs/overlay-nix/spec.md).
+
+An entirely tmpfs upper chain needs no persistent metaslot: preparation returns
+an ephemeral success result and the next boot resets the chain and loads the
+new lower dump. Immediate (`if-needed`) and manual (`never` followed by an
+operator reboot) cutovers use that result directly.
+
+**Current window-mode limitation:** an ephemeral chain has no selected
+persistent slot or source generation to fingerprint. After installing the
+lower, the windowed poll cannot record its deferred-reboot source fingerprint,
+so it exits unsuccessfully without scheduling the reboot. The deferred reboot
+service has the same fingerprint requirement. Use `if-needed` for an automated
+ephemeral cutover, or `never` and reboot manually after checking the installed
+slot; do not interpret a failed windowed poll as a failed lower installation.
+
 ## Migrating from `system.autoUpgrade`
 
 ```nix

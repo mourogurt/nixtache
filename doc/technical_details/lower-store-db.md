@@ -2,8 +2,9 @@
 
 How the A/B appliance image ships a nix store database for its read-only
 slot closure, and why the dump's hashes are computed the way they are.
-Functional behaviour (what loads when, lifecycle across swaps) lives in
-[`doc/user_guide/ota.md`](../user_guide/ota.md). Canonical requirements:
+OTA staging and installation live in [`ota.md`](../user_guide/ota.md); the
+upper-generation lifecycle has one owner in
+[`overlay-nix.md`](../user_guide/overlay-nix.md). Canonical requirements:
 [`ab-ota`](../../openspec/specs/ab-ota/spec.md),
 [`overlay-nix`](../../openspec/specs/overlay-nix/spec.md), and
 [`runner`](../../openspec/specs/runner/spec.md). This document is for
@@ -38,20 +39,22 @@ boot-time loader imports them into the selected lower-state, or directly into
 runner container also disables its internal nix module, renders `nix.conf`
 with the preserved settings plus `ca-derivations`, and ships the CLI
 explicitly. Clone mode then enumerates a scratch copy of the real host DB.
-Overlay mode binds the selected parent's store and metadata read-only under
-`/run/nixtache-runner-lower`. Without host `overlay-nix`, that root is a plain
-read-only local lower. With host `overlay-nix`, the runner opens a composite
-`local-overlay` lower there: the parent's merged store, lower-state and
-upper-owned DB, roots, profiles and temproots remain visible together. The
-physical lower-state opens with `read-only=true`. A `local-overlay` parent also
-registers newly visible lower paths in its upper DB during queries, so the
-runner copies the read-only parent state to `/run/nixtache-runner-parent-state`
-before starting its daemon. Those internal registrations touch only the scratch
-copy, never the selected parent's metadata. The dedicated root is required
-because the custom daemon rebinds `/nix` to the runner's merged relocated store:
-a lower rooted at `/nix` would read the runner's upper DB rather than the
-selected parent's metadata. A daemon lower is not an alternative on appliances
-because no host daemon exists.
+Overlay mode binds the selected parent's frozen store and metadata read-only
+under `/run/nixtache-runner-lower` for the singleton, or
+`/run/nixtache-runner-lower/<logical-id>` for a named declaration. Without host
+`overlay-nix`, that root is a plain read-only local lower. With host
+`overlay-nix`, it exposes the selected parent's frozen files and the matching
+`db`, `gcroots`, `profiles` and `temproots`. The parent's own consumer instead
+uses that frozen lower plus its separate writable runtime continuation. A child
+sees later parent runtime writes only after a generation rebase and child
+restart; there is no live SQLite view or startup metadata-only copy. The
+generation lifecycle is owned by [`overlay-nix.md`](../user_guide/overlay-nix.md).
+
+The dedicated root is required because the custom daemon rebinds `/nix` to the
+runner's merged relocated store: a lower rooted at `/nix` would read the
+runner's own upper DB rather than the selected parent's frozen metadata. A
+daemon lower is not an alternative on appliances because no host daemon exists,
+and a write-capable parent daemon would not be a read-only lower boundary.
 
 Clone mode is deliberately outside the upper-metaslot tree. Its single relocated
 store at `<hostBackup>/nix` already contains a complete writable local store and
@@ -74,16 +77,28 @@ metadata sets for the physical slot selected by the lower partition's GPT
   the read-only records imported from that slot's lower dump. The loader
   tracks the dump's SHA-256, so replacing a lower image with the same version
   but different records still invalidates the old metadata.
-- `.../host/state` holds the writable upper database, roots, profiles and
-  temproots. Runtime installations change this upper-owned state, not the
-  lower-state.
+- `.../host/state` holds the host runtime consumer's writable upper database,
+  roots, profiles and temproots. Other physical nodes keep the same roles under
+  `.../nodes/<physical-node>/state`. A frozen parent's state belongs to its
+  immutable lower view; a runtime continuation has a distinct writable upper
+  database. Runtime installations change only their own consumer's upper-owned
+  state, never the physical lower-state or a sibling's database.
 
-The stable `lower-state` link beside `upperDir` selects the first role;
-`/nix/var/nix/{db,gcroots,profiles,temproots}` selects the second. These
-selection links are installed before the lower loader, overlay mount and Nix
-daemon start. A plain reboot reselects the same generation, while booting an
-older physical slot selects that slot's own preserved lower-state and upper
-state together; no dump is merged into another slot's upper database.
+A child upper database may duplicate ancestor validity and reference records
+needed by the local-store schema. Preparation refreshes and validates those
+records together with visible files against the child's selected frozen parent;
+they are not a shared writable ancestor database. Parent-first repair,
+publication and rollback are documented once in
+[`overlay-nix.md`](../user_guide/overlay-nix.md).
+
+The stable `lower-state` link beside `upperDir` selects the physical lower
+records; `/nix/var/nix/{db,gcroots,profiles,temproots}` selects the host
+runtime consumer's upper-owned state. Equivalent links and read-only binds
+select named runner and frozen-parent state before the lower loader, overlay
+mounts and Nix daemons start. A plain reboot reselects the same generation,
+while booting an older physical slot selects that slot's own preserved
+lower-state and complete upper-state graph together; no dump is merged into
+another slot's upper database.
 
 Without `overlay-nix`, the appliance keeps its ordinary local-store layout
 and the loader writes `/nix/var/nix/db` directly. In both layouts the ESP

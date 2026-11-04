@@ -144,11 +144,44 @@ location and lifecycle policy decide persistence across reboots and updates.
 _Avoid_: writable store, delta dir
 
 **Upper metaslot**:
-The persistent upper chain belonging to one physical slot: the host upper
-and its Nix state, plus the corresponding runner-overlay upper and state
-when that layer is enabled. Layers stay distinct but are prepared, selected
-and rolled back as one coherent chain.
+The persistent upper tree belonging to one physical slot. Its generations
+contain the host and eligible runner-overlay uppers, their distinct Nix state,
+and the frozen lowers needed by descendants; the complete tree is prepared,
+selected and rolled back as one coherent unit.
 _Avoid_: shared upper, versioned upper (the key is the partition, not its version)
+
+**Upper generation**:
+One prepared realization of an upper metaslot, bound to a physical lower, its
+dump checksum and the target logical and physical store graphs. Publication
+fixes that identity and graph; frozen lowers stay immutable while runtime
+continuations and leaf uppers remain writable. Stable runtime paths select one
+upper generation for the booted slot.
+_Avoid_: system generation (that is the NixOS profile concept), slot upper
+
+**Logical store topology**:
+The host and runner containers as declared by a consumer, with logical
+store-parent edges. It is the input to topology derivation, not a description
+of the physical OverlayFS mount tree.
+_Avoid_: layer list, mount topology
+
+**Frozen lower**:
+The immutable parent store files and complete Nix metadata exposed to child
+consumers for one upper generation. A child never consumes its parent's
+writable runtime continuation as a lower.
+_Avoid_: live parent lower
+
+**Runtime continuation**:
+The writable upper and upper-owned Nix state used by a parent logical node's
+own consumer after that node acquires a frozen lower. The continuation and
+the node's children are siblings over that frozen lower.
+_Avoid_: writable parent lower, shared upper
+
+**Generation rebase**:
+Constructing a new frozen lower from a parent's latest logical store view,
+including its previous runtime continuation, then selecting that generation
+and restarting its children. Parent runtime writes do not cross this boundary
+incrementally.
+_Avoid_: live refresh, metadata sync
 
 **Merged store**:
 The OverlayFS view at `/nix/store` that combines lower and upper — what

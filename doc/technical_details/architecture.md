@@ -1,9 +1,9 @@
 # Architecture
 
 How the pieces fit: consumer integration, the flake's module layout, and the
-way sub-modules merge into one container. Consumer-facing wiring (what to put
-in your config) lives in [`doc/user_guide/`](../user_guide/); this document
-is for contributors.
+way runner sub-modules merge into each declared container. Consumer-facing
+wiring (what to put in your config) lives in
+[`doc/user_guide/`](../user_guide/); this document is for contributors.
 
 ## Consumer integration
 
@@ -30,17 +30,17 @@ actions)            |                  |   |- lib.mkDocs (consumer docs)
 
 ### `modules/runner/` — split by responsibility
 
-All contributions merge into one container via `mkMerge`. The NixOS
-`containers.<name>.config` option merges every sub-module's contribution into
-one container evaluation (see nixpkgs
+All contributions for a declaration merge into its container via `mkMerge`.
+The NixOS `containers.<name>.config` option merges every sub-module's
+contribution into that container evaluation (see nixpkgs
 `nixos/modules/virtualisation/nixos-containers.nix` — its `merge` concatenates
 all definitions into the inner `eval-config` modules list).
 
 | File | Owns |
 |---|---|
-| `default.nix` | Orchestrator: imports, container shell, identity options (`enable`, `forgejoUrl`, `containerName`, `package`, limits, `nixSettings`), base nix gc/optimise, host-side `container@<name>` limits. |
-| `types.nix` | Shared option types (`knownHostEntry`, `instanceType`, `sshCredsType`, `deployTargetType`, default GitHub known-hosts). |
-| `store.nix` | Relocated store: `store.{path,mode,hostBackup}`, custom daemon + socket + `BindPaths`; `nix-daemon-storage` in clone mode or `nix-daemon-overlay-mount` in overlay mode. |
+| `default.nix` | Orchestrator: imports, shared defaults, named `containers` declarations normalized with the singleton `containerName`/`store`/`instances` compatibility path, container shells and host-side `container@<name>` limits. |
+| `types.nix` | Shared option types (`knownHostEntry`, `instanceType`, `sshCredsType`, `deployTargetType`, runner container/store declarations, default GitHub known-hosts). |
+| `store.nix` | Per-declaration relocated store: `store.{path,mode,hostBackup,parent}`, custom daemon + socket + `BindPaths`; additive `nix-daemon-storage` in clone mode or `nix-daemon-overlay-mount` over the selected frozen parent root in overlay mode. |
 | `cache.nix` | Binary cache: `cache.*`, `secrets.cachePrivateKey`, in-container `nix-serve`, host-side nginx vhost with an edge cache ([availability machinery](binary-cache-availability.md)). |
 | `ssh.nix` | `flakeSshCreds` / `updateSshCreds`: key bindMounts + per-service `LoadCredential`. |
 | `sandbox.nix` | `enableSandbox` / `additionalCapabilities` (sole owner of container caps), forced `nix.settings.sandbox`. |
@@ -70,34 +70,49 @@ from targeting the other daemon's processes. Canonical requirements:
 | Module | Owns |
 |---|---|
 | `modules/deploy-target/` | Target side of direct deploy: root `nixtache-apply.service` (activate → probe `criticalUnits` → rollback), polkit start-only rule, `nixtache-deploy` group + pointer dir, deploy-user provisioning with the SSH gate, Tier-0 health check, `ab.*` runtime (gating, partition provisioning). |
-| `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)). |
-| `modules/overlay-nix/` | Writable OverlayFS `/nix/store` (lower = RO image store, upper = writable) via `local-overlay-store`; physical-slot upper metaslots, out-of-place target preparation and rollback-preserving selection. |
+| `modules/ab-image/` | Build-time A/B image config: repart slots, UKI, sysupdate transfers, `system.image.{id,version}`, boot counting, GPG verify, the slot's lower store DB dump + boot loader ([`lower-store-db.md`](lower-store-db.md)), and the overlay-enabled target topology descriptor. |
+| `modules/overlay-nix/` | Writable OverlayFS `/nix/store` via `local-overlay-store`; `topology.nix`/`physical.nix` derive logical and frozen/runtime graphs from runner declarations, `planner.py` validates target descriptors and operations, `preparation.nix` owns private target construction/publication, `selection.nix` and `migration.nix` activate or restore one physical-slot generation, and `systemd.nix` orders consumers behind readiness. |
 | `modules/auto-update/` | Unified auto-update replacing `system.autoUpgrade` (asserted): flake + ab-image paths, poll timer, target preparation, and deferred-reboot source refresh in window mode. |
 
 ### Lower installation versus upper readiness
 
 The A/B image and overlay modules own different steps of an update:
 
-- `ab-image`/sysupdate installs the inactive lower partition, UKI and lower
-  dump. Completing that write does not make the upper chain ready.
-- `overlay-nix` prepares only the inactive physical slot's upper generation.
-  Wipe creates empty upper-owned state; reconcile clones the current active
-  generation and repairs the copy in a private namespace. Readiness is
-  recorded only after the complete target validates.
-- `nixtache-ab-update` and the auto-update poll invoke that preparation after
-  confirmed lower installation and before reboot. The deferred-reboot path
-  fingerprints the complete active generation, so changes at any layer during
-  the window force a fresh target preparation; an unchanged source is not
-  prepared twice.
+- `ab-image`/sysupdate installs the inactive lower partition, UKI, lower dump
+  and, when overlay is enabled, the target topology descriptor. Completing
+  that write does not make the upper chain ready.
+- `overlay-nix` validates the descriptor and prepares only the inactive
+  physical slot's target graph. Wipe creates empty upper-owned state;
+  reconcile clones the current active generation and repairs the copy in a
+  private namespace. Readiness binds the lower checksum, descriptor and final
+  logical/physical graph only after the complete target validates.
+- `nixtache-ab-update` and the auto-update poll invoke preparation after every
+  confirmed lower installation and before reboot. Preparation is rerunnable,
+  so v2 followed by v3 without an intermediate reboot publishes and selects
+  the exact ready v3 generation. A same-version rewrite is likewise detected
+  by a changed lower-dump checksum.
+- The persistent deferred-reboot path fingerprints the complete active upper
+  generation. Changes during the window force another target preparation:
+  reconcile freezes the latest parent runtime continuations before children
+  rebase, while wipe keeps target state clean. A running child never receives
+  a live lower refresh; parent writes cross only when it restarts into the
+  rebased generation.
+- An entirely ephemeral chain returns a successful no-persistent-metaslot
+  result, then resets all descendants and loads exactly the new lower dump at
+  boot. The current deferred-window fingerprint restriction is documented in
+  [`auto-update.md`](../user_guide/auto-update.md#ab-upper-readiness-and-deferred-reboots).
 - Early boot selects a ready generation from the mounted lower's GPT
-  `PARTUUID`, with lower-dump checksum validation. Upper consumers and
-  `boot-complete.target` require that selection. Recovery of an unprepared
-  target runs before consumers start; failure does not bless the boot.
-- Rollback selects the previous lower and its preserved upper generation and
-  DB. It never performs a reverse wipe or reconcile.
+  `PARTUUID`, with descriptor, graph and lower-dump checksum validation. Upper
+  consumers and `boot-complete.target` require that selection. Recovery of an
+  unprepared target runs before consumers start; failure does not bless the
+  boot.
+- Automatic or manual rollback selects the previous lower and its complete
+  preserved logical and physical upper graph. It never performs a reverse
+  wipe, clone, metadata merge or reconcile.
 
-Canonical contracts:
-[`ab-ota`](../../openspec/specs/ab-ota/spec.md),
+The detailed lifecycle has one owner:
+[`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md). Canonical
+contracts: [`ab-ota`](../../openspec/specs/ab-ota/spec.md),
 [`overlay-nix`](../../openspec/specs/overlay-nix/spec.md), and
 [`runner`](../../openspec/specs/runner/spec.md) for dependent runner overlays.
 

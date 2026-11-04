@@ -57,6 +57,7 @@ it from the flake's lexical scope):
     cache = { enable = true; domain = "bincache.example.com"; port = 5000; };
     store.path      = "/srv";       # base dir; store lives at <path>/nix. "/" = system nix-daemon
     store.hostBackup = "/srv/bincache";
+    store.mode      = "clone";     # default: one additive relocated store; "overlay" is the alternative
     gitHost = { name = "forgejo_ed25519"; hostNames = [ "code.zinzaguras.ru" ]; publicKey = "ssh-ed25519 AAAA..."; };
     secrets.cachePrivateKey = config.sops.secrets.cache-private-key.path;
   };
@@ -88,6 +89,80 @@ is backend-agnostic by design.
 - How these values reach CI jobs (`runner.envs`, `LoadCredential`) is
   documented in
   [`doc/technical_details/module-ci-wiring.md`](../technical_details/module-ci-wiring.md).
+
+### Store modes and named runner containers
+
+The configuration above is the **singleton** form: top-level `containerName`,
+`store` and `instances` declare one container. It remains the compatibility
+path for existing configurations. A non-empty `containers` collection replaces
+those three singleton declarations; shared Forgejo, cache, credential, resource
+and Nix settings remain top-level. Each attribute name is the stable logical
+store identity and the default NixOS container name:
+
+```nix
+services.nixtache.runner = {
+  enable = true;
+  forgejoUrl = "http://localhost:3000";
+  containers = {
+    build = {
+      store = {
+        path = "/srv";
+        hostBackup = "/var/lib/runners/build";
+        mode = "overlay";
+        parent = null;             # the host store
+      };
+      instances.default = {
+        uuid = "00000000-0000-4000-8000-000000000001";
+        tokenFile = config.sops.secrets.runner-token-build.path;
+      };
+    };
+    nested = {
+      store = {
+        path = "/srv";
+        hostBackup = "/var/lib/runners/nested";
+        mode = "overlay";
+        parent = "build";         # another overlay declaration's logical identity
+      };
+      instances.default = {
+        uuid = "00000000-0000-4000-8000-000000000002";
+        tokenFile = config.sops.secrets.runner-token-nested.path;
+      };
+    };
+  };
+};
+```
+
+On an A/B appliance with `overlay-nix`, these declarations are the only runner
+topology input. The module derives internal paths, mount ordering, frozen
+lowers and runtime continuations; consumers do not configure a separate
+low-level topology. Siblings use the same parent, while nesting names another
+overlay declaration. Missing parents, cycles, unsafe identities and colliding
+managed paths fail evaluation. A declaration rename is a remove-plus-add
+operation, not a state-preserving identity rename.
+
+A child's lower contains its parent's frozen files **and** Nix metadata. The
+parent's own container writes to a separate runtime continuation, so those
+writes are not visible to an already-running child. A later prepared generation
+rebase and child restart expose them coherently; no live parent database copy or
+writable parent-daemon socket provides freshness. The complete generation
+lifecycle is owned by [`overlay-nix.md`](overlay-nix.md).
+
+Store-mode boundaries:
+
+- `clone` keeps one full relocated store and seeds the selected lower into it
+  additively after a slot swap. Existing CI outputs remain, and no per-slot
+  upper-metaslot copy is made. Clone and native stores cannot parent an overlay
+  child.
+- `store.path = "/"` selects the native container store and likewise creates no
+  upper-metaslot node. Native stores are incompatible with `ab-image`, whose
+  read-only host store cannot accept CI outputs.
+- `overlay` creates an independent writable upper and upper-owned Nix state in
+  the selected physical slot's upper generation. Siblings and descendants are
+  prepared and rolled back with the host as one graph.
+
+Canonical requirements:
+[`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md) and
+[`openspec/specs/overlay-nix/spec.md`](../../openspec/specs/overlay-nix/spec.md).
 
 ### Registering runner instances
 
