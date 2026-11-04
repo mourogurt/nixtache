@@ -178,6 +178,86 @@ let
     };
   };
 
+  promotedTopology = topologyWithLayers [ (layer "b" null) (layer "c" "b") ];
+  promotedPhysical = promotedTopology.physical;
+  scenarioFirstChildPromotion = {
+    name = "first child promotes a logical parent into a frozen lower and runtime continuation";
+    checks = {
+      frozenRole = promotedPhysical.byId."b-lower".role == "frozen-lower";
+      runtimeParent = promotedPhysical.byId."b-runtime".parent == "b-lower";
+      childParent = promotedPhysical.byId.c.parent == "b-lower";
+      consumerMapping = promotedTopology.consumerNodeByLogical.b == "b-runtime"
+        && promotedTopology.consumerNodeByLogical.c == "c";
+      frozenMapping = promotedTopology.frozenLowerByLogical.b == "b-lower";
+    };
+  };
+
+  siblingPromotion = topologyWithLayers [
+    (layer "b" null)
+    (layer "c" "b")
+    (layer "d" "b")
+  ];
+  scenarioAdditionalSibling = {
+    name = "additional siblings reuse the existing frozen lower without another split";
+    checks = {
+      oneFrozenLower = builtins.length (builtins.filter (node: node.logicalId == "b" && node.role == "frozen-lower") siblingPromotion.physical.nodes) == 1;
+      oneContinuation = builtins.length (builtins.filter (node: node.logicalId == "b" && node.role == "runtime" && node.id == "b-runtime") siblingPromotion.physical.nodes) == 1;
+      siblingParents = siblingPromotion.physical.byId.c.parent == "b-lower"
+        && siblingPromotion.physical.byId.d.parent == "b-lower";
+    };
+  };
+
+  rebasedPromotion = promotedTopology.rebase {
+    viewFingerprints = { b = "b-view-2"; };
+  };
+  unrelatedTopology = topologyWithLayers [
+    (layer "b" null)
+    (layer "c" "b")
+    (layer "e" null)
+  ];
+  rebasedUnrelated = unrelatedTopology.rebase {
+    viewFingerprints = { b = "b-view-2"; };
+  };
+  scenarioGenerationRebase = {
+    name = "generation rebase changes only dependent frozen lineage and resets the continuation";
+    checks = {
+      continuationRebased = rebasedPromotion.physical.byId."b-runtime".rebasedFrom == "b-view-2";
+      childLineageChanges = rebasedPromotion.lineageByPhysical.c != promotedTopology.lineageByPhysical.c;
+      unrelatedLineageStable = rebasedUnrelated.lineageByPhysical.e == unrelatedTopology.lineageByPhysical.e;
+      wholeGraphChanges = rebasedUnrelated.generationFingerprint != unrelatedTopology.generationFingerprint;
+      unchangedRebaseReuses = (promotedTopology.rebase { }).generationFingerprint == promotedTopology.generationFingerprint;
+    };
+  };
+
+  removedChild = promotedTopology.rebase {
+    logicalNodes = (topologyWithLayers [ (layer "b" null) ]).nodes;
+  };
+  scenarioRemovalWithoutCollapse = {
+    name = "child removal does not collapse the parent's runtime continuation into a live lower";
+    checks = {
+      splitRetained = removedChild.physical.byId ? "b-lower" && removedChild.physical.byId ? "b-runtime";
+      childRemoved = !(removedChild.physical.byId ? c);
+      consumerStillContinuation = removedChild.consumerNodeByLogical.b == "b-runtime";
+    };
+  };
+
+  reparented = unrelatedTopology.rebase {
+    logicalNodes = (topologyWithLayers [
+      (layer "b" null)
+      (layer "c" "b")
+      ((layer "e" null) // { parent = "b"; })
+    ]).nodes;
+  };
+  scenarioReparentLineage = {
+    name = "reparenting invalidates the moved branch without changing unrelated lineage";
+    checks = {
+      movedParent = reparented.physical.byId.e.parent == "b-lower";
+      movedLineageChanges = reparented.lineageByPhysical.e != unrelatedTopology.lineageByPhysical.e;
+      unrelatedStable = reparented.lineageByPhysical.c == unrelatedTopology.lineageByPhysical.c;
+      graphFingerprintChanges = reparented.generationFingerprint != unrelatedTopology.generationFingerprint;
+    };
+  };
+
   scenarioDuplicateRejected = {
     name = "duplicate overlay node identities are rejected";
     checks.rejected = !(tryLayers [ (layer "a" null) (layer "a" null) ]).success;
@@ -277,6 +357,11 @@ let
     scenarioSiblings
     scenarioNested
     scenarioComposed
+    scenarioFirstChildPromotion
+    scenarioAdditionalSibling
+    scenarioGenerationRebase
+    scenarioRemovalWithoutCollapse
+    scenarioReparentLineage
     scenarioDuplicateRejected
     scenarioMissingParentRejected
     scenarioCycleRejected
