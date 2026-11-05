@@ -151,6 +151,7 @@ in
           RemainAfterExit = true;
         };
         script = ''
+          set -euo pipefail
           slot=$(cat ${runtimeState}/selected-slot 2>/dev/null || true)
           generation=$(cat ${runtimeState}/selected-generation 2>/dev/null || true)
           if [ -n "$slot" ] || [ -n "$generation" ]; then

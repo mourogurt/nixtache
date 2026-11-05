@@ -31,6 +31,13 @@ let
   inherit (topology) parentRoot physicalHostRoot;
   frozenMountByPhysical = topology.frozenMountByPhysical;
   runtimeBackup = "${runtimeState}/activation-backup";
+  plannerSource = pkgs.writeText "nixtache-overlay-planner.py" (builtins.readFile ./planner.py);
+  planner = pkgs.writeShellScript "nixtache-overlay-planner" ''
+    exec ${pkgs.python3}/bin/python3 ${plannerSource} "$@"
+  '';
+  descriptorValidator = pkgs.writeShellScript "nixtache-overlay-validate-descriptor" ''
+    exec ${planner} validate --image-id ${escapeShellArg imageId} "$@"
+  '';
 
   discoverySnippet = ''
     discover_booted() {
@@ -63,27 +70,35 @@ let
 
   readyGenerationSnippet = ''
     ready_generation() {
-      local slot=$1 generation metadata dump_sha current_sha metadata_graph metadata_descriptor current_descriptor current_dump
+      local slot=$1 generation metadata dump_sha current_sha metadata_graph metadata_descriptor current_descriptor current_dump image_version booted_system
       generation=$(readlink -f "${slotsDir}/$slot/current" 2>/dev/null || true)
       [ -n "$generation" ] && [ -d "$generation" ] || return 1
       metadata="$generation/metadata"
+      image_version=$(cat /etc/image-version 2>/dev/null) || return 1
+      [ -n "$image_version" ] || return 1
       [ "$(metadata_value "$metadata" state)" = "ready" ] || return 1
       [ "$(metadata_value "$metadata" slot)" = "$slot" ] || return 1
+      [ "$(metadata_value "$metadata" image_id)" = ${imageId} ] || return 1
+      [ "$(metadata_value "$metadata" image_version)" = "$image_version" ] || return 1
       [ "$(metadata_value "$metadata" topology_sha256)" = "${topologyFingerprint}" ] || return 1
+      current_dump="$generation/lower-db"
+      [ -f "$current_dump" ] || return 1
+      dump_sha=$(metadata_value "$metadata" lower_sha256)
+      current_sha=$(sha256sum "$current_dump" | awk '{print $1}')
+      [ "$dump_sha" = "$current_sha" ] || return 1
+      booted_system=$(readlink -f /run/booted-system 2>/dev/null) || return 1
+      case "$booted_system" in /nix/store/*) ;; *) return 1 ;; esac
+      grep -Fqx -- "$booted_system" "$current_dump" || return 1
       metadata_graph=$(metadata_value "$metadata" graph_sha256)
       metadata_descriptor=$(metadata_value "$metadata" descriptor_sha256)
       current_descriptor="$generation/overlay-topology.json"
       if [ -n "$metadata_descriptor" ]; then
         [ -f "$current_descriptor" ] || return 1
         [ "$metadata_descriptor" = "$(sha256sum "$current_descriptor" | awk '{print $1}')" ] || return 1
+        ${descriptorValidator} "$current_descriptor" "$image_version" "$dump_sha" >/dev/null 2>&1 || return 1
       else
         [ -z "$metadata_graph" ] || [ "$metadata_graph" = "${graphFingerprint}" ] || return 1
       fi
-      current_dump="$generation/lower-db"
-      [ -f "$current_dump" ] || return 1
-      dump_sha=$(metadata_value "$metadata" lower_sha256)
-      current_sha=$(sha256sum "$current_dump" | awk '{print $1}')
-      [ "$dump_sha" = "$current_sha" ] || return 1
       printf '%s\n' "$generation"
     }
   '';
