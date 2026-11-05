@@ -135,3 +135,17 @@ Successful publication MUST remove superseded ready generations according to a b
 
 - **WHEN** several reconcile preparations for one target slot complete successfully
 - **THEN** the number of retained ready generations reaches a fixed bound, each rerun produces current metadata for the latest source, and no staging directories remain after publication
+
+### Requirement: AB/OTA systems disable import from derivation
+
+An enabled AB/OTA image or receiving deploy-target AB mode MUST set `allow-import-from-derivation = false` in its Nix configuration. Content-addressed image and update flows MUST NOT depend on import from derivation; required closures MUST be realized ahead of time.
+
+#### Scenario: Enabling AB/OTA disables IFD
+
+- **WHEN** the AB/OTA image module is enabled, with or without the overlay module, or an existing target enables deploy-target AB mode
+- **THEN** the evaluated target Nix configuration disables import from derivation
+
+#### Scenario: CA build hosts use the same restriction
+
+- **WHEN** an operator evaluates or builds the content-addressed appliance closure on another host
+- **THEN** the documented host configuration disables import from derivation because the target module cannot change the builder's own Nix configuration
