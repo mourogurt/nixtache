@@ -32,6 +32,70 @@ let
   frozenMountByPhysical = topology.frozenMountByPhysical;
   runtimeBackup = "${runtimeState}/activation-backup";
 
+  discoverySnippet = ''
+    discover_booted() {
+      local source partuuid resolved selected
+      if [ -r ${runtimeState}/selected-slot ]; then
+        selected=$(cat ${runtimeState}/selected-slot)
+        resolved=$(readlink -f "/dev/disk/by-partuuid/$selected")
+        [ -n "$selected" ] && [ -b "$resolved" ] || { echo "nixtache-overlay: selected lower PARTUUID is unavailable" >&2; return 1; }
+        partuuid=$(blkid -s PARTUUID -o value "$resolved" | tr 'A-F' 'a-f')
+        [ "$partuuid" = "$selected" ] || { echo "nixtache-overlay: selected lower PARTUUID is ambiguous" >&2; return 1; }
+        printf '%s\n' "$selected"
+        return 0
+      fi
+      source=$(findmnt -n -o SOURCE --target ${physicalHostRoot}/nix/store | grep '^/dev/' | sort -u)
+      [ -n "$source" ] && [ -b "$source" ] || { echo "nixtache-overlay: cannot resolve the preserved physical lower block device" >&2; return 1; }
+      partuuid=$(blkid -s PARTUUID -o value "$source" | tr 'A-F' 'a-f')
+      [ -n "$partuuid" ] || { echo "nixtache-overlay: preserved physical lower $source has no GPT PARTUUID" >&2; return 1; }
+      resolved=$(readlink -f "/dev/disk/by-partuuid/$partuuid")
+      [ "$resolved" = "$source" ] || { echo "nixtache-overlay: ambiguous PARTUUID $partuuid for $source" >&2; return 1; }
+      printf '%s\n' "$partuuid"
+    }
+  '';
+
+  metadataValueSnippet = ''
+    metadata_value() {
+      local file=$1 key=$2
+      [ -f "$file" ] && sed -n "s/^$key=//p" "$file" | head -n 1
+    }
+  '';
+
+  readyGenerationSnippet = ''
+    ready_generation() {
+      local slot=$1 generation metadata dump_sha current_sha metadata_graph metadata_descriptor current_descriptor current_dump
+      generation=$(readlink -f "${slotsDir}/$slot/current" 2>/dev/null || true)
+      [ -n "$generation" ] && [ -d "$generation" ] || return 1
+      metadata="$generation/metadata"
+      [ "$(metadata_value "$metadata" state)" = "ready" ] || return 1
+      [ "$(metadata_value "$metadata" slot)" = "$slot" ] || return 1
+      [ "$(metadata_value "$metadata" topology_sha256)" = "${topologyFingerprint}" ] || return 1
+      metadata_graph=$(metadata_value "$metadata" graph_sha256)
+      metadata_descriptor=$(metadata_value "$metadata" descriptor_sha256)
+      current_descriptor="$generation/overlay-topology.json"
+      if [ -n "$metadata_descriptor" ]; then
+        [ -f "$current_descriptor" ] || return 1
+        [ "$metadata_descriptor" = "$(sha256sum "$current_descriptor" | awk '{print $1}')" ] || return 1
+      else
+        [ -z "$metadata_graph" ] || [ "$metadata_graph" = "${graphFingerprint}" ] || return 1
+      fi
+      current_dump="$generation/lower-db"
+      [ -f "$current_dump" ] || return 1
+      dump_sha=$(metadata_value "$metadata" lower_sha256)
+      current_sha=$(sha256sum "$current_dump" | awk '{print $1}')
+      [ "$dump_sha" = "$current_sha" ] || return 1
+      printf '%s\n' "$generation"
+    }
+  '';
+
+  preservePhysicalLowerSnippet = ''
+    mkdir -p ${physicalHostRoot}/nix/store
+    if ! mountpoint -q ${physicalHostRoot}/nix/store; then
+      mount --bind /nix/store ${physicalHostRoot}/nix/store
+    fi
+    mount -o remount,ro,bind ${physicalHostRoot}/nix/store
+  '';
+
   legacyFrozenActivation = concatMapStrings (mount: ''
     if [ "''${ephemeral_layers[${mount.logicalId}]}" = 1 ]; then
       activate_frozen_state ${if mount.parent == null then lowerStateLink else frozenMountByPhysical.${mount.parent}.stateDir} ${mount.stateDir} ${runtimeBackup}/frozen/${mount.id}
@@ -67,11 +131,8 @@ let
   '';
 
   activatePhysicalHostSnippet = ''
-    mkdir -p ${physicalHostRoot}/nix/store ${physicalHostRoot}/nix/var/nix
-    if ! mountpoint -q ${physicalHostRoot}/nix/store; then
-      mount --bind /nix/store ${physicalHostRoot}/nix/store
-    fi
-    mount -o remount,ro,bind ${physicalHostRoot}/nix/store
+    ${preservePhysicalLowerSnippet}
+    mkdir -p ${physicalHostRoot}/nix/var/nix
     activate_frozen_state ${lowerStateLink} ${physicalHostRoot}/nix/var/nix ${runtimeBackup}/physical-host
   '';
 
@@ -176,6 +237,12 @@ let
 
     ${migration.activateStateDirSnippet}
 
+    ${discoverySnippet}
+
+    ${metadataValueSnippet}
+
+    ${readyGenerationSnippet}
+
     reset_frozen_path() {
       local path=$1
       if mountpoint -q "$path"; then umount "$path"; fi
@@ -261,6 +328,10 @@ let
       exit 0
     fi
 
+    ${preservePhysicalLowerSnippet}
+    slot=$(discover_booted)
+    printf '%s\n' "$slot" > ${runtimeState}/selected-slot
+
     upper_fs=$(findmnt -T ${cfg.upperDir} -n -o FSTYPE 2>/dev/null || echo unknown)
     if [ "$upper_fs" = "tmpfs" ]; then
       reset_dir ${cfg.upperDir}
@@ -277,32 +348,10 @@ let
     fi
 
     ${resetLayerSnippets}
-    lower_source=$(findmnt -n -o SOURCE --target /nix/store | grep '^/dev/' | sort -u)
-    [ -n "$lower_source" ] && [ -b "$lower_source" ] || { echo "nixtache-overlay: mounted lower is not one block device" >&2; exit 1; }
-    slot=$(blkid -s PARTUUID -o value "$lower_source" | tr 'A-F' 'a-f')
-    [ -n "$slot" ] || { echo "nixtache-overlay: cannot select an upper without a lower PARTUUID" >&2; exit 1; }
-    [ "$(readlink -f "/dev/disk/by-partuuid/$slot")" = "$lower_source" ] || { echo "nixtache-overlay: ambiguous lower PARTUUID" >&2; exit 1; }
-    generation=$(readlink -f "${slotsDir}/$slot/current" 2>/dev/null || true)
-    ready=0
-    if [ -n "$generation" ] && [ "$(sed -n 's/^state=//p' "$generation/metadata" 2>/dev/null)" = ready ]; then
-      if [ "$(sed -n 's/^topology_sha256=//p' "$generation/metadata")" = "${topologyFingerprint}" ]; then
-        metadata_graph=$(sed -n 's/^graph_sha256=//p' "$generation/metadata")
-        metadata_descriptor=$(sed -n 's/^descriptor_sha256=//p' "$generation/metadata")
-        current_descriptor="/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).overlay-topology.json"
-        identity_ready=0
-        if [ -n "$metadata_descriptor" ]; then
-          if [ -f "$current_descriptor" ] && [ "$metadata_descriptor" = "$(sha256sum "$current_descriptor" | awk '{print $1}')" ]; then identity_ready=1; fi
-        elif [ -z "$metadata_graph" ] || [ "$metadata_graph" = "${graphFingerprint}" ]; then
-          identity_ready=1
-        fi
-        if [ "$identity_ready" = 1 ]; then
-          if [ ! -f "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" ] || [ "$(sed -n 's/^lower_sha256=//p' "$generation/metadata")" = "$(sha256sum "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" | awk '{print $1}')" ]; then ready=1; fi
-        fi
-      fi
-    fi
-    if [ "$ready" = 0 ]; then
+    generation=$(ready_generation "$slot" || true)
+    if [ -z "$generation" ]; then
       ${prepareScript} --booted
-      generation=$(readlink -f "${slotsDir}/$slot/current")
+      generation=$(ready_generation "$slot")
     fi
     [ -n "$generation" ] && [ -d "$generation/host/upper" ] || { echo "nixtache-overlay: selected chain is not ready" >&2; exit 1; }
     activate_generation "$generation"
@@ -319,61 +368,6 @@ let
   '';
 in
 {
-  discoverySnippet = ''
-    discover_booted() {
-      local source partuuid resolved selected
-      if [ -r ${runtimeState}/selected-slot ]; then
-        selected=$(cat ${runtimeState}/selected-slot)
-        resolved=$(readlink -f "/dev/disk/by-partuuid/$selected")
-        [ -n "$selected" ] && [ -b "$resolved" ] || { echo "nixtache-overlay: selected lower PARTUUID is unavailable" >&2; return 1; }
-        partuuid=$(blkid -s PARTUUID -o value "$resolved" | tr 'A-F' 'a-f')
-        [ "$partuuid" = "$selected" ] || { echo "nixtache-overlay: selected lower PARTUUID is ambiguous" >&2; return 1; }
-        printf '%s\n' "$selected"
-        return 0
-      fi
-      source=$(findmnt -n -o SOURCE --target /nix/store | grep '^/dev/' | sort -u)
-      [ -n "$source" ] && [ -b "$source" ] || { echo "nixtache-overlay: cannot resolve the mounted lower block device" >&2; return 1; }
-      partuuid=$(blkid -s PARTUUID -o value "$source" | tr 'A-F' 'a-f')
-      [ -n "$partuuid" ] || { echo "nixtache-overlay: mounted lower $source has no GPT PARTUUID" >&2; return 1; }
-      resolved=$(readlink -f "/dev/disk/by-partuuid/$partuuid")
-      [ "$resolved" = "$source" ] || { echo "nixtache-overlay: ambiguous PARTUUID $partuuid for $source" >&2; return 1; }
-      printf '%s\n' "$partuuid"
-    }
-  '';
-
-  metadataValueSnippet = ''
-    metadata_value() {
-      local file=$1 key=$2
-      [ -f "$file" ] && sed -n "s/^$key=//p" "$file" | head -n 1
-    }
-  '';
-
-  readyGenerationSnippet = ''
-    ready_generation() {
-      local slot=$1 generation metadata dump_sha current_sha metadata_graph metadata_descriptor current_descriptor
-      generation=$(readlink -f "${slotsDir}/$slot/current" 2>/dev/null || true)
-      [ -n "$generation" ] && [ -d "$generation" ] || return 1
-      metadata="$generation/metadata"
-      [ "$(metadata_value "$metadata" state)" = "ready" ] || return 1
-      [ "$(metadata_value "$metadata" slot)" = "$slot" ] || return 1
-      [ "$(metadata_value "$metadata" topology_sha256)" = "${topologyFingerprint}" ] || return 1
-      metadata_graph=$(metadata_value "$metadata" graph_sha256)
-      metadata_descriptor=$(metadata_value "$metadata" descriptor_sha256)
-      current_descriptor="/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).overlay-topology.json"
-      if [ -n "$metadata_descriptor" ]; then
-        [ -f "$current_descriptor" ] || return 1
-        [ "$metadata_descriptor" = "$(sha256sum "$current_descriptor" | awk '{print $1}')" ] || return 1
-      else
-        [ -z "$metadata_graph" ] || [ "$metadata_graph" = "${graphFingerprint}" ] || return 1
-      fi
-      if [ -f "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" ]; then
-        dump_sha=$(metadata_value "$metadata" lower_sha256)
-        current_sha=$(sha256sum "/boot/EFI/nixtache/${imageId}_$(cat /etc/image-version).lower-db" | awk '{print $1}')
-        [ "$dump_sha" = "$current_sha" ] || return 1
-      fi
-      printf '%s\n' "$generation"
-    }
-  '';
-
+  inherit discoverySnippet metadataValueSnippet readyGenerationSnippet;
   script = selectionScript;
 }
