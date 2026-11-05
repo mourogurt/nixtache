@@ -154,6 +154,17 @@ new records to `lower-db`; the temporary SQLite database, locks, profiles and
 roots never enter the artifact. These legacy local-store operations need no
 daemon, network, host database writes or `ca-derivations` support.
 
+### IFD policy
+
+AB/OTA evaluation is intentionally IFD-free. `services.nixtache.ab-image` and
+the receiving `services.nixtache.deploy-target.ab` mode set
+`nix.settings.allow-import-from-derivation = false` on every enabled target,
+so image and update closures must be realized ahead of time. Build and
+deployment hosts need the same setting in their own Nix configuration: the
+appliance module cannot rewrite the evaluator's configuration. IFD-based
+expressions are outside the AB/OTA evaluation contract rather than a fallback
+for missing prebuilt outputs.
+
 Registration computes content metadata but does not rediscover references.
 The reference graph therefore crosses a trust boundary from the source Nix
 store: ordinary Nix build and substitution machinery must have supplied
