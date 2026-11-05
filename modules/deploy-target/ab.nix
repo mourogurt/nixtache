@@ -119,6 +119,9 @@ in
 
   config = mkIf (cfg.enable && ab.enable) {
     nix.settings.allow-import-from-derivation = false;
+    environment.etc."nix/nix.conf".text = mkIf (!config.nix.enable) (mkAfter ''
+      allow-import-from-derivation = false
+    '');
     assertions = [
       {
         assertion = config.systemd.sysupdate.enable or false;

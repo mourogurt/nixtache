@@ -601,6 +601,12 @@ in
     # systemd#40702, means relying on /etc alone can fail).
     environment.etc = optionalAttrs verify {
       "systemd/import-pubring.pgp".source = pubringSource;
+    } // {
+      # Image-based appliances disable the Nix module but still ship the CLI,
+      # so render the IFD restriction when no daemon configuration is generated.
+      "nix/nix.conf".text = mkIf (!config.nix.enable) (mkAfter ''
+        allow-import-from-derivation = false
+      '');
     };
     systemd.tmpfiles.rules = optionals verify [
       "L+ /usr/lib/systemd/import-pubring.pgp - - - - ${pubringSource}"

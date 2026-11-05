@@ -81,6 +81,8 @@ let
       verifyNo = (transfers hostFixed)."10-nix-store".Transfer.Verify == "no";
       verifyNoBoot = (transfers hostFixed)."20-boot-image".Transfer.Verify == "no";
       ifdDisabled = hostFixed.config.nix.settings.allow-import-from-derivation == false;
+      ifdConfRendered = lib.hasInfix "allow-import-from-derivation = false"
+        (hostFixed.config.environment.etc."nix/nix.conf".text or "");
     };
   };
 
