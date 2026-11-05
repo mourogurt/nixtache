@@ -13,8 +13,9 @@
 # v2 repairs that service's old-lower dependency into its target upper, runs the
 # tool, then deliberately fails criticalUnits (ukiTries=2, healthCheckTimeout=20s).
 # Rollback and a later manual older-slot boot must select v1's original upper
-# generation and DB without another reconcile. Two physical slots containing the
-# same v1 lower are also given different uppers to pin PARTUUID-based selection.
+# generation and DB without another reconcile. Two physical slots carrying the
+# same version with different lower dumps and topology descriptors also retain
+# distinct uppers to pin PARTUUID-based selection and generation-owned identity.
 # v3 is the fixed follow-up. Needs KVM. Hermetic (deployer LAN only).
 { nixpkgs
 , self
@@ -81,8 +82,26 @@ let
     })
   ];
 
-  v1 = otaLib.mkAppliance { version = "1"; extraPackages = [ pkgs_1 ]; extraModules = overlayModules; };
+  v1 = otaLib.mkAppliance { version = "1"; extraPackages = [ pkgs_1 pkgs.curl ]; extraModules = overlayModules; };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
+  sameVersion = otaLib.mkAppliance {
+    version = "1";
+    extraModules = overlayModules ++ [
+      {
+        services.nixtache.overlay-nix._layers = [
+          {
+            id = "same-version-target";
+            parent = null;
+            upperDir = "/var/lib/nix-overlay/same-version-target/upper";
+            workDir = "/var/lib/nix-overlay/same-version-target/work";
+            stateDir = "/var/lib/nix-overlay/same-version-target/state";
+          }
+        ];
+      }
+    ];
+  };
+  sameVersionPkg = sameVersion.config.system.build.sysupdate-package;
+  sameVersionUkiName = sameVersion.config.system.boot.loader.ukiFile;
   v2 = otaLib.mkAppliance { version = "2"; extraModules = overlayModules ++ brokenBootModules; };
   v2Pkg = v2.config.system.build.sysupdate-package;
   v3 = otaLib.mkAppliance {
@@ -98,7 +117,7 @@ pkgs.testers.runNixOSTest {
   name = "ab-ota-rollback";
   globalTimeout = 5400;
 
-  nodes.deployer = otaLib.deployerNode { extraDependencies = [ pkgs_1 pkgs_2 pkgs_4 v2Pkg v3Pkg ]; };
+  nodes.deployer = otaLib.deployerNode { extraDependencies = [ pkgs_1 pkgs_2 pkgs_4 sameVersionPkg v2Pkg v3Pkg ]; };
 
   testScript = ''
     P2 = "${p2Path}"
@@ -260,7 +279,7 @@ pkgs.testers.runNixOSTest {
     appliance.succeed(P2 + "/bin/tool")
     print("MANUAL ROLLBACK OK: the older physical lower selects its own preserved upper and DB")
 
-    # -- Same-version slots retain distinct upper states ----------------------
+    # -- Same-version slots retain distinct physical and upper identities ----
     active_device = appliance.succeed(f"readlink -f /dev/disk/by-partuuid/{v1_slot}").strip()
     target_device = appliance.succeed(
       "lsblk -nrpo NAME,PARTUUID,PARTLABEL | "
@@ -270,7 +289,36 @@ pkgs.testers.runNixOSTest {
       "lsblk -nrpo NAME,PARTUUID,PARTLABEL | "
       f"awk -v active={v1_slot} 'BEGIN{{IGNORECASE=1}} $3 ~ /^nix-store_/ && tolower($2) != active {{print tolower($2); exit}}'"
     ).strip()
-    appliance.succeed(f"dd if={active_device} of={target_device} bs=4M conv=fsync status=none", timeout=900)
+    source_lower_sha = appliance.succeed(f"sha256sum {v1_selected}/lower-db | awk '{{print $1}}'").strip()
+    source_descriptor_sha = appliance.succeed(f"sha256sum {v1_selected}/overlay-topology.json | awk '{{print $1}}'").strip()
+    source_lower_db = appliance.succeed(f"sha256sum {v1_selected}/host/lower-state/db/db.sqlite | awk '{{print $1}}'").strip()
+    appliance.succeed("cp /boot/EFI/Linux/abtest_1.efi /root/abtest-source.efi")
+    deployer.succeed(
+      "mkdir -p /var/lib/nixtache/ab-stage/same-version && "
+      "find /var/lib/nixtache/ab-stage/same-version -mindepth 1 -delete && "
+      "cp ${sameVersionPkg}/* /var/lib/nixtache/ab-stage/same-version/"
+    )
+    appliance.succeed(
+      f"curl -fsS http://deployer/ab-stage/same-version/abtest_1.nix-store.raw | "
+      f"dd of={target_device} bs=4M conv=fsync status=none",
+      timeout=900,
+    )
+    appliance.succeed(
+      "curl -fsS http://deployer/ab-stage/same-version/abtest_1.lower-db "
+      "> /boot/EFI/nixtache/abtest_1.lower-db"
+    )
+    appliance.succeed(
+      "curl -fsS http://deployer/ab-stage/same-version/abtest_1.overlay-topology.json "
+      "> /boot/EFI/nixtache/abtest_1.overlay-topology.json"
+    )
+    appliance.succeed(
+      "curl -fsS http://deployer/ab-stage/same-version/${sameVersionUkiName} "
+      "> /root/abtest-target.efi"
+    )
+    target_lower_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.lower-db | awk '{print $1}'").strip()
+    target_descriptor_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.overlay-topology.json | awk '{print $1}'").strip()
+    assert target_lower_sha != source_lower_sha, "same-version target lower dump is not distinct"
+    assert target_descriptor_sha != source_descriptor_sha, "same-version target topology descriptor is not distinct"
     source_number = active_device.rsplit("vda", 1)[-1]
     target_number = target_device.rsplit("vda", 1)[-1]
     appliance.succeed(f"sgdisk -c {target_number}:nix-store_1 /dev/vda && partprobe /dev/vda && udevadm settle")
@@ -279,14 +327,19 @@ pkgs.testers.runNixOSTest {
     same_target = f"/var/lib/nix-overlay/upper-slots/{target_slot}/generations/{same_target_generation}"
     appliance.succeed(f"grep -q '^image_version=1$' {same_target}/metadata")
     appliance.succeed(f"grep -q '^state=ready$' {same_target}/metadata")
+    assert appliance.succeed(f"sha256sum {same_target}/lower-db | awk '{{print $1}}'").strip() == target_lower_sha
+    assert appliance.succeed(f"sha256sum {same_target}/overlay-topology.json | awk '{{print $1}}'").strip() == target_descriptor_sha
+    assert appliance.succeed(f"sha256sum {v1_selected}/lower-db | awk '{{print $1}}'").strip() == source_lower_sha
+    assert appliance.succeed(f"sha256sum {v1_selected}/overlay-topology.json | awk '{{print $1}}'").strip() == source_descriptor_sha
     appliance.succeed("nix-store --realize " + P4, timeout=600)
     appliance.succeed("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
     appliance.fail(f"test -d {same_target}/host/upper/${baseNameOf p4Path}")
     source_db = appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip()
     same_target_db = appliance.succeed(f"sha256sum {same_target}/host/state/db/db.sqlite | awk '{{print $1}}'").strip()
-    print("OK: both physical slots contain v1, with a marker only in the active slot's upper")
+    print("OK: distinct same-version target artifacts prepared from the unchanged source generation")
 
     appliance.succeed(
+      "cp /root/abtest-source.efi /boot/EFI/Linux/abtest_1.efi && "
       f"sgdisk -c {target_number}:nixtache-hidden-target /dev/vda && "
       "partprobe /dev/vda && udevadm settle"
     )
@@ -298,6 +351,13 @@ pkgs.testers.runNixOSTest {
       f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
     ).strip() == v1_selected
     assert appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip() == source_db
+    assert appliance.succeed(f"sha256sum {v1_selected}/host/lower-state/db/db.sqlite | awk '{{print $1}}'").strip() == source_lower_db
+    assert appliance.succeed("cat /var/lib/nix-overlay/lower-state/lower-db-sha256").strip() == source_lower_sha
+    same_version_log = appliance.succeed(
+      "journalctl -b -u nixtache-overlay-select.service -u nixtache-overlay-prepare.service --no-pager -o cat"
+    )
+    for marker in ("nixtache-overlay: repairing ", "nixtache-overlay: prepared ", "nixtache-overlay: checking "):
+        assert marker not in same_version_log, f"same-version rollback ran reverse preparation: {same_version_log}"
     appliance.succeed("nix path-info " + P4)
     appliance.succeed("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
     out = appliance.succeed(P4 + "/bin/busybox echo source-upper-selected")
@@ -307,6 +367,7 @@ pkgs.testers.runNixOSTest {
     print("OK: forced source boot selected its own generation and DB with P4 present")
 
     appliance.succeed(
+      "cp /root/abtest-target.efi /boot/EFI/Linux/abtest_1.efi && "
       f"sgdisk -c {source_number}:nixtache-hidden-source /dev/vda && "
       f"sgdisk -c {target_number}:nix-store_1 /dev/vda && "
       "partprobe /dev/vda && udevadm settle"
@@ -319,6 +380,7 @@ pkgs.testers.runNixOSTest {
       f"readlink -f /var/lib/nix-overlay/upper-slots/{target_slot}/current"
     ).strip() == same_target
     assert appliance.succeed("sha256sum /nix/var/nix/db/db.sqlite | awk '{print $1}'").strip() == same_target_db
+    assert appliance.succeed("cat /var/lib/nix-overlay/lower-state/lower-db-sha256").strip() == target_lower_sha
     appliance.fail("test -d /var/lib/nix-overlay/upper/${baseNameOf p4Path}")
     out = appliance.succeed(f"nix path-info {P4} 2>&1 || true")
     assert "is not valid" in out, f"same-version target selected the source upper DB ({out!r})"

@@ -618,11 +618,13 @@ in
       # when overlay-nix re-enables nix). Ordering against an absent unit is
       # a no-op.
       before = [ "nix-daemon.service" ];
-      # The ESP holds one dump per installed instance; the running slot's is
-      # named by the baked image id + version. Absent (a wholesale `transfers`
-      # override dropped 15-lower-db, or a pre-DB image) → skip, leaving the
+      # Persistent overlay selections load the exact dump published in their
+      # generation. Non-overlay systems and ephemeral overlay chains use the
+      # boot version's ESP dump; an absent dump there is skipped, leaving the
       # lower unregistered rather than failing the boot.
-      unitConfig.ConditionPathExists = "/boot${lowerStoreDbEspPath}";
+      unitConfig = optionalAttrs (!overlayEnabled) {
+        ConditionPathExists = "/boot${lowerStoreDbEspPath}";
+      };
       path = [ pkgs.nix pkgs.coreutils pkgs.util-linux pkgs.gawk ];
       serviceConfig = {
         Type = "oneshot";
@@ -638,6 +640,16 @@ in
         db="$state/db/db.sqlite"
         version=${escapeShellArg config.system.image.version}
         dump=/boot${lowerStoreDbEspPath}
+        ${optionalString overlayEnabled ''
+          selected_generation=$(cat /run/nixtache-overlay/selected-generation 2>/dev/null || true)
+          if [ -n "$selected_generation" ]; then
+            dump="$selected_generation/lower-db"
+            [ -f "$dump" ] || { echo "nixtache-lower-store-db-load: selected generation has no lower dump: $selected_generation" >&2; exit 1; }
+          elif [ ! -f "$dump" ]; then
+            echo "nixtache-lower-store-db-load: ephemeral chain has no boot lower dump; skipping"
+            exit 0
+          fi
+        ''}
         identity="$version"
         ${optionalString overlayEnabled ''identity=$(sha256sum "$dump" | awk '{print $1}')''}
         if [ -f "$db" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$identity" ]; then

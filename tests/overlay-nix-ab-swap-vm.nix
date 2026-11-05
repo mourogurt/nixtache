@@ -243,8 +243,8 @@ pkgs.testers.runNixOSTest {
     out = appliance.succeed("nix path-info ${vimPath} 2>&1 || true")
     assert "is not valid" in out, f"wipe left a DB entry for vim ({out!r})"
     marker = appliance.succeed("cat /var/lib/nix-overlay/lower-state/lower-db-sha256").strip()
-    expected_marker = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_2.lower-db | awk '{print $1}'").strip()
-    assert marker == expected_marker, "the selected lower-state was not loaded from v2's dump"
+    expected_marker = appliance.succeed(f"sha256sum {target}/lower-db | awk '{{print $1}}'").strip()
+    assert marker == expected_marker, "the selected lower-state was not loaded from v2's generation-owned dump"
     print("OK: wipe policy — upper cleared, vim's DB entry gone, DB re-seeded from v2")
 
     # -- v2 lower paths visible AND valid through the merged store ------------

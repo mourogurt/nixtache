@@ -257,9 +257,12 @@ let
       flock -x "$prepare_lock_fd"
       current_before=$(readlink -f "$slot_dir/current" 2>/dev/null || true)
       if [ -n "$current_before" ] && [ -f "$current_before/plan.json" ] \
+        && [ -f "$current_before/lower-db" ] && [ -f "$current_before/overlay-topology.json" ] \
         && [ "$(metadata_value "$current_before/metadata" state)" = ready ] \
         && [ "$(metadata_value "$current_before/metadata" lower_sha256)" = "$lower_sha" ] \
         && [ "$(metadata_value "$current_before/metadata" descriptor_sha256)" = "$descriptor_sha" ] \
+        && [ "$lower_sha" = "$(sha256sum "$current_before/lower-db" | awk '{print $1}')" ] \
+        && [ "$descriptor_sha" = "$(sha256sum "$current_before/overlay-topology.json" | awk '{print $1}')" ] \
         && { [ ! -f "${runtimeState}/prepared-generation" ] \
           || [ "$(cat "${runtimeState}/prepared-generation")" != "$(basename "$current_before")" ]; }; then
         printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
@@ -276,7 +279,10 @@ let
         rm -rf "$old"
       done < <(find "$slot_dir/generations" -mindepth 1 -maxdepth 1 -type d)
       mkdir -p "$slot_dir/generations/$generation" "$stage"
+      cp "$target_dump" "$stage/lower-db"
       cp "$target_descriptor" "$stage/overlay-topology.json"
+      target_dump="$stage/lower-db"
+      target_descriptor="$stage/overlay-topology.json"
       source_dir=""
       if [ "$initial" != 1 ] && [ -n "$source_slot" ]; then
         source_dir=$(readlink -f "${slotsDir}/$source_slot/generations/$source_generation")
@@ -336,7 +342,7 @@ let
         ${encodeStoreUri}
         rows="$stage/persistent-plan.rows"
         if [ "$target_device" = "BOOTED" ]; then
-          mount --bind /nix/store "$lower_store"
+          mount --bind ${topology.physicalHostRoot}/nix/store "$lower_store"
           mount -o remount,ro,bind "$lower_store"
         else
           mount -o ro "$target_device" "$lower_store"
@@ -511,13 +517,23 @@ let
         [ -n "$candidate" ] || continue
         source_slot=$(metadata_value "$candidate/metadata" source_slot)
         source_generation=$(metadata_value "$candidate/metadata" source_generation)
-        [ -n "$source_slot" ] && [ -n "$source_generation" ] && break
+        source_dir=""
+        if [ -n "$source_slot" ] && [ -n "$source_generation" ]; then
+          source_dir=$(readlink -f "${slotsDir}/$source_slot/generations/$source_generation" 2>/dev/null || true)
+        fi
+        if [ -n "$source_dir" ] && [ -d "$source_dir" ] \
+          && [ "$(metadata_value "$source_dir/metadata" state)" = ready ]; then
+          break
+        fi
+        source_slot=""
+        source_generation=""
       done < <(find "$slot_dir/generations" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
       if [ -z "$source_slot" ]; then
         while read -r candidate; do
           [ -n "$candidate" ] && [ "$candidate" != "$target_slot" ] || continue
           generation=$(readlink -f "${slotsDir}/$candidate/current" 2>/dev/null || true)
-          if [ -n "$generation" ] && [ "$(metadata_value "$generation/metadata" state)" = ready ]; then
+          if [ -n "$generation" ] && [ -d "$generation" ] \
+            && [ "$(metadata_value "$generation/metadata" state)" = ready ]; then
             source_slot=$candidate
             source_generation=$(basename "$generation")
             break

@@ -858,6 +858,51 @@ let
     };
   };
 
+  scenarioGenerationArtifactIdentity = {
+    name = "prepared generations own their physical lower identity and recovery ignores stale source records";
+    checks = {
+      tmpfsRecordsBootedSlot = (posOf ''slot=$(discover_booted)'' selectScript)
+        < (posOf ''reset_dir /var/lib/nix-overlay/lower-state'' selectScript)
+        && (posOf ''printf '%s\n' "$slot" > /run/nixtache-overlay/selected-slot'' selectScript)
+          < (posOf ''reset_dir /var/lib/nix-overlay/lower-state'' selectScript);
+      discoveryUsesPreservedPhysicalLower = lib.hasInfix
+        "findmnt -n -o SOURCE --target /run/nixtache-overlay/physical-host/nix/store"
+        prepareScript
+        && !(lib.hasInfix "findmnt -n -o SOURCE --target /nix/store" prepareScript)
+        && lib.hasInfix "mount --bind /run/nixtache-overlay/physical-host/nix/store \"$lower_store\"" (namespaceWithLayers [ ])
+        && !(lib.hasInfix "mount --bind /nix/store \"$lower_store\"" (namespaceWithLayers [ ]));
+      lowerDumpPublished = lib.hasInfix ''cp "$target_dump" "$stage/lower-db"'' prepareScript;
+      descriptorPublished = lib.hasInfix ''cp "$target_descriptor" "$stage/overlay-topology.json"'' prepareScript;
+      readinessUsesGenerationCopies = lib.hasInfix ''current_descriptor="$generation/overlay-topology.json"'' prepareScript
+        && lib.hasInfix ''current_dump="$generation/lower-db"'' prepareScript
+        && !(lib.hasInfix ''current_descriptor="/boot/EFI/'' prepareScript)
+        && !(lib.hasInfix ''current_dump="/boot/EFI/'' prepareScript);
+      selectionUsesGenerationCopies = lib.hasInfix ''generation=$(ready_generation "$slot" || true)'' selectScript
+        && !(lib.hasInfix "/boot/EFI/nixtache" selectScript);
+      lowerLoaderUsesGenerationCopy = lib.hasInfix ''dump="$selected_generation/lower-db"''
+        frozenServices.nixtache-lower-store-db-load.script;
+      targetDescriptorValidationRetained = lib.hasInfix
+        ''"$descriptor_validator" "$target_descriptor" "$target_version" "$lower_sha"''
+        prepareScript;
+      targetReuseChecksGenerationCopies = lib.hasInfix
+        ''[ "$lower_sha" = "$(sha256sum "$current_before/lower-db" | awk '{print $1}')" ]''
+        prepareScript
+        && lib.hasInfix
+          ''[ "$descriptor_sha" = "$(sha256sum "$current_before/overlay-topology.json" | awk '{print $1}')" ]''
+          prepareScript;
+      staleRecordedSourceIgnored = lib.hasInfix
+        ''[ "$(metadata_value "$source_dir/metadata" state)" = ready ]''
+        prepareScript
+        && lib.hasInfix ''source_dir=$(readlink -f "/var/lib/nix-overlay/upper-slots/$source_slot/generations/$source_generation"'' prepareScript
+        && lib.hasInfix ''source_slot=""'' prepareScript
+        && lib.hasInfix ''source_generation=""'' prepareScript;
+      fallbackUsesOtherCurrentReadyGeneration = lib.hasInfix
+        ''source_generation=$(basename "$generation")''
+        prepareScript
+        && lib.hasInfix ''[ "$(metadata_value "$generation/metadata" state)" = ready ]'' prepareScript;
+    };
+  };
+
   retainedLeafRunners = mkRunnerAppliance {
     services.nixtache.runner.containers = {
       alpha = runnerOverlayStore "alpha" null;
@@ -1041,6 +1086,7 @@ let
     scenarioStorageModeTransitions
     scenarioTransitionOperations
     scenarioRuntimeFrozenLowers
+    scenarioGenerationArtifactIdentity
     scenarioRetainedRuntimePlan
     scenarioDuplicateRejected
     scenarioPhysicalIdCollisionsRejected
