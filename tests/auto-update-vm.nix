@@ -294,6 +294,8 @@ let
   stackedV2Pkg = stackedV2.config.system.build.sysupdate-package;
   stackedV3 = mkRegressionAppliance { version = "3"; };
   stackedV3Pkg = stackedV3.config.system.build.sysupdate-package;
+  stackedV3Rewritten = mkRegressionAppliance { version = "3"; extraPackages = [ pkgs_1 ]; };
+  stackedV3RewrittenPkg = stackedV3Rewritten.config.system.build.sysupdate-package;
 
   stageDir = "/var/lib/nixtache/ab-stage/abtest";
   slotsDir = "/var/lib/nixtache/ab-slots";
@@ -456,7 +458,7 @@ else if scenario == "no-intermediate-reboot" then
     globalTimeout = 5400;
 
     nodes.deployer = otaLib.deployerNode {
-      extraDependencies = [ stackedV2Pkg stackedV3Pkg ];
+      extraDependencies = [ stackedV2Pkg stackedV3Pkg stackedV3RewrittenPkg ];
     };
 
     testScript = ''
@@ -465,12 +467,15 @@ else if scenario == "no-intermediate-reboot" then
           driver.machines_qemu.append(machine)
           return machine
 
-      def install(package, version):
+      def stage(package):
           deployer.succeed(
             "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
             "find /var/lib/nixtache/ab-stage/abtest -mindepth 1 -delete && "
             "cp " + package + "/* /var/lib/nixtache/ab-stage/abtest/"
           )
+
+      def install(package, version):
+          stage(package)
           appliance.succeed("systemctl start nixtache-auto-update.service", timeout=900)
           appliance.succeed("${otaLib.assertSysupdateInstalled}")
           appliance.wait_until_succeeds("sgdisk -p /dev/vda | grep -q nix-store_" + version, timeout=300)
@@ -508,15 +513,40 @@ else if scenario == "no-intermediate-reboot" then
       assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "v2 installation rebooted before v3 was installed"
       appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
 
-      install("${stackedV3Pkg}", "3")
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending-overlay")
+      stage("${stackedV3Pkg}")
+      appliance.succeed(
+        "mkdir -p /etc/systemd/system/nixtache-overlay-prepare.service.d && "
+        "echo '[Service]' > /etc/systemd/system/nixtache-overlay-prepare.service.d/fail.conf && "
+        "echo 'ExecStartPre=/run/current-system/sw/bin/false' >> /etc/systemd/system/nixtache-overlay-prepare.service.d/fail.conf && "
+        "systemctl daemon-reload"
+      )
+      appliance.fail("systemctl start nixtache-auto-update.service", timeout=900)
+      appliance.succeed("${otaLib.assertSysupdateInstalled}")
+      failed_v3_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_3.lower-db | cut -d ' ' -f 1").strip()
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending")
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
+      appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay.tmp")
+      assert prepared_target() == (slot_v2, generation_v2, target_v2), "failed v3 preparation replaced the ready v2 target"
+      appliance.succeed("systemctl start nixtache-auto-update-reboot.service", timeout=300)
+      assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "stale v2 markers rebooted after v3 preparation failed"
+      print("OK: failed consecutive preparation invalidated the v2 deferred reboot markers")
+
+      appliance.succeed(
+        "rm -rf /etc/systemd/system/nixtache-overlay-prepare.service.d && systemctl daemon-reload"
+      )
+      install("${stackedV3RewrittenPkg}", "3")
       slot_v3, generation_v3, target_v3 = prepared_target()
       assert generation_v3 != generation_v2, "v3 installation reused the v2 preparation generation"
       assert metadata_value(target_v3, "state") == "ready"
       assert metadata_value(target_v3, "image_version") == "3", "pre-reboot metadata does not describe the installed v3 image"
-      expected_v3_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_3.lower-db | awk '{print $1}'").strip()
-      assert metadata_value(target_v3, "lower_sha256") == expected_v3_sha, "pre-reboot metadata does not match the v3 lower DB dump"
+      expected_v3_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_3.lower-db | cut -d ' ' -f 1").strip()
+      assert expected_v3_sha != failed_v3_sha, "same-version rewrite did not change the lower DB checksum"
+      assert metadata_value(target_v3, "lower_sha256") == expected_v3_sha, "pre-reboot metadata does not match the rewritten v3 lower DB dump"
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending-overlay")
       assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "an intermediate reboot occurred before the v3 assertions"
-      print("OK: v1 -> v2 -> v3 without reboot produced a fresh ready v3 generation and matching lower SHA")
+      print("OK: v1 -> v2 -> rewritten v3 without reboot produced a fresh ready v3 generation and matching lower SHA")
 
       appliance.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
       wait_fresh_boot(original_boot)
