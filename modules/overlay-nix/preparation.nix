@@ -27,6 +27,15 @@ let
   descriptorValidator = pkgs.writeShellScript "nixtache-overlay-validate-descriptor" ''
     exec ${planner} validate --image-id ${escapeShellArg imageId} "$@"
   '';
+  ephemeralSourceDescriptor = pkgs.writeText "nixtache-overlay-ephemeral-source.json" (builtins.toJSON {
+    schema = "nixtache.overlay-topology/v1";
+    imageId = imageId;
+    imageVersion = "ephemeral";
+    lowerDbSha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+    logicalTopology = topology.descriptor // {
+      nodes = map (node: node // { ephemeral = true; }) topology.descriptor.nodes;
+    };
+  });
 
   materializeScript = pkgs.writeShellScript "nixtache-overlay-materialize" ''
     set -euo pipefail
@@ -206,19 +215,22 @@ let
 
     ${readyGenerationSnippet}
 
-    quiesced=0
     stopped_units=""
+    probe=""
     resume_writers() {
       local unit
-      if [ "$quiesced" = 1 ]; then
+      if [ -n "$stopped_units" ]; then
         for unit in $stopped_units; do systemctl start "$unit" || true; done
-        quiesced=0
+        stopped_units=""
       fi
     }
     rollback_stage() {
       local status=$?
       trap - EXIT TERM INT HUP
       resume_writers
+      if [ -n "$probe" ] && [ -d "$probe" ]; then
+        rm -rf "$probe" || true
+      fi
       if [ "''${stage:-}" != "" ] && [ -d "$stage" ]; then
         mkdir -p "$slot_dir/generations/$generation"
         cp -a "$stage/." "$slot_dir/generations/$generation/" && rm -rf "$stage" || true
@@ -234,24 +246,42 @@ let
 
     prepare_chain() {
       local target_slot=$1 target_version=$2 target_device=$3 source_slot=$4 source_generation=$5 initial=$6
-      local target_dump target_descriptor lower_sha descriptor_sha scratch lower_root lower_store source_dir current_before
+      local target_dump target_descriptor lower_sha descriptor_sha scratch lower_root lower_store source_dir current_before source_ephemeral
       slot_dir="${slotsDir}/$target_slot"
       generation="$(date +%Y%m%d%H%M%S)-$$"
       stage="$slot_dir/.staging-$generation"
+      probe=""
+      source_ephemeral=0
+      if [ "$source_generation" = ephemeral ]; then source_ephemeral=1; fi
       target_dump="/boot/EFI/nixtache/${imageId}_$target_version.lower-db"
       [ -f "$target_dump" ] || { echo "nixtache-overlay: target lower dump is missing: $target_dump" >&2; return 1; }
-      [ "$target_slot" != "$source_slot" ] || [ "$initial" = 1 ] || { echo "nixtache-overlay: active and target slots must differ" >&2; return 1; }
+      [ "$target_slot" != "$source_slot" ] || [ "$initial" = 1 ] || [ "$source_ephemeral" = 1 ] || { echo "nixtache-overlay: active and target slots must differ" >&2; return 1; }
       lower_sha=$(sha256sum "$target_dump" | awk '{print $1}')
       target_descriptor="/boot/EFI/nixtache/${imageId}_$target_version.overlay-topology.json"
       "$descriptor_validator" "$target_descriptor" "$target_version" "$lower_sha"
       descriptor_sha=$(sha256sum "$target_descriptor" | awk '{print $1}')
-      if [ "$(findmnt -T ${cfg.upperDir} -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
+      probe=$(mktemp -d "${runtimeState}/target-plan.XXXXXX")
+      "$planner" plan \
+        --target-descriptor "$target_descriptor" \
+        --image-id ${imageId} \
+        --image-version "$target_version" \
+        --lower-sha256 "$lower_sha" \
+        --policy ${cfg.upperOnUpdate} \
+        --initial \
+        --output-json "$probe/plan.json" \
+        --output-rows "$probe/plan.rows" \
+        --output-metadata "$probe/plan.metadata"
+      if ! grep -q '|0$' "$probe/plan.rows"; then
+        rm -rf "$probe"
+        probe=""
         printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
         printf 'ephemeral\n' > "${runtimeState}/prepared-generation"
-        printf '%s\n' "$source_slot:ephemeral" > "${runtimeState}/prepared-source"
+        printf '%s\n' "$source_slot:$source_generation" > "${runtimeState}/prepared-source"
         trap - EXIT
         return 0
       fi
+      rm -rf "$probe"
+      probe=""
       mkdir -p "$slot_dir"
       exec {prepare_lock_fd}> "$slot_dir/.prepare.lock"
       flock -x "$prepare_lock_fd"
@@ -259,6 +289,9 @@ let
       if [ -n "$current_before" ] && [ -f "$current_before/plan.json" ] \
         && [ -f "$current_before/lower-db" ] && [ -f "$current_before/overlay-topology.json" ] \
         && [ "$(metadata_value "$current_before/metadata" state)" = ready ] \
+        && [ "$(metadata_value "$current_before/metadata" slot)" = "$target_slot" ] \
+        && [ "$(metadata_value "$current_before/metadata" image_id)" = ${imageId} ] \
+        && [ "$(metadata_value "$current_before/metadata" image_version)" = "$target_version" ] \
         && [ "$(metadata_value "$current_before/metadata" lower_sha256)" = "$lower_sha" ] \
         && [ "$(metadata_value "$current_before/metadata" descriptor_sha256)" = "$descriptor_sha" ] \
         && [ "$lower_sha" = "$(sha256sum "$current_before/lower-db" | awk '{print $1}')" ] \
@@ -284,12 +317,12 @@ let
       target_dump="$stage/lower-db"
       target_descriptor="$stage/overlay-topology.json"
       source_dir=""
-      if [ "$initial" != 1 ] && [ -n "$source_slot" ]; then
+      if [ "$initial" != 1 ] && [ "$source_ephemeral" != 1 ] && [ -n "$source_slot" ]; then
         source_dir=$(readlink -f "${slotsDir}/$source_slot/generations/$source_generation")
         [ "$(metadata_value "$source_dir/metadata" state)" = "ready" ] || { echo "nixtache-overlay: transition source is not ready" >&2; return 1; }
         [ -d "$source_dir/host" ] || { echo "nixtache-overlay: transition source has no host consumer" >&2; return 1; }
       fi
-      if [ "${cfg.upperOnUpdate}" = reconcile ] && [ "$initial" != 1 ]; then
+      if [ "${cfg.upperOnUpdate}" = reconcile ] && [ "$initial" != 1 ] && [ "$source_ephemeral" != 1 ]; then
         [ -n "$source_dir" ] || { echo "nixtache-overlay: reconcile source is unavailable" >&2; return 1; }
         if [ "$mode" = "--installed" ]; then
           for unit in ${runnerContainer} nix-daemon.service nix-daemon.socket; do
@@ -298,7 +331,6 @@ let
               stopped_units="$unit $stopped_units"
             fi
           done
-          quiesced=1
         fi
       fi
       plan_args=(
@@ -313,6 +345,8 @@ let
       )
       if [ -n "$source_dir" ]; then
         plan_args+=(--source-root "$source_dir" --allow-legacy-source)
+      elif [ "$source_ephemeral" = 1 ]; then
+        plan_args+=(--source-descriptor ${ephemeralSourceDescriptor})
       else
         plan_args+=(--initial)
       fi
@@ -399,6 +433,13 @@ let
           done < "$rows"
           return 1
         }
+        physical_is_parent() {
+          local wanted=$1 physical_id logical_id role parent rest
+          while IFS='|' read -r physical_id logical_id role parent rest; do
+            if [ "$parent" = "$wanted" ]; then return 0; fi
+          done < "$rows"
+          return 1
+        }
         store_url() {
           local own=$1 current=$2 parent logical role current_stage current_root state lower
           parent=$(physical_parent "$current")
@@ -476,6 +517,14 @@ let
             check_store "$node_url" "$node_root"
           fi
         done < "$rows"
+        while IFS='|' read -r physical_id logical_id role parent rest; do
+          [ -n "$physical_id" ] || continue
+          if ! physical_is_parent "$physical_id"; then continue; fi
+          parent_url=$(store_url "$physical_id" "$physical_id")
+          parent_merged_root=$(physical_root "$physical_id")
+          echo "nixtache-overlay: rechecking parent $physical_id"
+          check_store "$parent_url" "$parent_merged_root"
+        done < "$rows"
         unmount_all
       ''}
 
@@ -518,6 +567,9 @@ let
         source_slot=$(metadata_value "$candidate/metadata" source_slot)
         source_generation=$(metadata_value "$candidate/metadata" source_generation)
         source_dir=""
+        if [ -n "$source_slot" ] && [ "$source_generation" = ephemeral ]; then
+          break
+        fi
         if [ -n "$source_slot" ] && [ -n "$source_generation" ]; then
           source_dir=$(readlink -f "${slotsDir}/$source_slot/generations/$source_generation" 2>/dev/null || true)
         fi

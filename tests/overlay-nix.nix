@@ -214,12 +214,62 @@ let
   hostReconcile = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "reconcile"; };
   reconcileCommand = hostReconcile.config.systemd.services.nixtache-overlay-prepare.script;
   reconcileScript = builtins.readFile (builtins.head (lib.splitString " " reconcileCommand));
+  quiesceRecoveryCheck = pkgs.runCommand "overlay-nix-quiesce-recovery-test" {
+    inherit reconcileScript;
+    passAsFile = [ "reconcileScript" ];
+  } ''
+    set -euo pipefail
+    awk '
+      /^[[:space:]]*resume_writers\(\) \{/ { copy = 1 }
+      copy { print }
+      copy && /^[[:space:]]*\}/ { exit }
+    ' "$reconcileScriptPath" > resume.sh
+    awk '
+      /^[[:space:]]*for unit in .*nix-daemon\.service nix-daemon\.socket; do$/ { copy = 1 }
+      copy { print }
+      copy && /^[[:space:]]*done$/ { exit }
+    ' "$reconcileScriptPath" > quiesce.sh
+    grep -q '^resume_writers()' resume.sh
+    grep -q 'systemctl stop' quiesce.sh
+    events=$PWD/events
+    : > "$events"
+    systemctl() {
+      local action=$1 unit=''${2:-}
+      printf '%s %s\n' "$action" "$unit" >> "$events"
+      if [ "$action" = is-active ]; then return 0; fi
+      if [ "$action" = stop ] && [ "$unit" = nix-daemon.socket ]; then return 1; fi
+      return 0
+    }
+    set +e
+    (
+      set -euo pipefail
+      quiesced=0
+      stopped_units=""
+      source ./resume.sh
+      trap resume_writers EXIT
+      source ./quiesce.sh
+    )
+    quiesce_status=$?
+    set -e
+    if [ "$quiesce_status" = 0 ]; then
+      echo "quiesce unexpectedly ignored a writer stop failure" >&2
+      exit 1
+    fi
+    grep -Fx 'stop nix-daemon.service' "$events"
+    grep -Fx 'start nix-daemon.service' "$events"
+    if grep -Fq 'start nix-daemon.socket' "$events"; then
+      echo "a writer that failed to stop was incorrectly resumed" >&2
+      exit 1
+    fi
+    touch "$out"
+  '';
   scenarioReconcile = {
     name = "reconcile clones a ready active generation and resumes writers before target repair";
     checks = {
       valueIsReconcile = (cfgOf hostReconcile).upperOnUpdate == "reconcile";
       clonesActiveGeneration = lib.hasInfix ''"$materializer" "$stage/plan.rows" "$source_dir" "$stage"'' reconcileScript;
       quiescesWriters = lib.hasInfix "nix-daemon.socket" reconcileScript;
+      failedStopResumesStoppedWriters = lib.isDerivation quiesceRecoveryCheck;
       verifiesPrivateTarget = lib.hasInfix "unshare -m --propagation private" reconcileScript;
       readinessIsExplicit = lib.hasInfix "state=unready" reconcileScript
         && lib.hasInfix "state=ready" reconcileScript;
@@ -332,6 +382,82 @@ let
     expect_failure graph "$descriptorValidator" "$wrongGraphDescriptor" 1 "$descriptorLowerSha"
     touch "$out"
   '';
+  readinessCheck = pkgs.runCommand "overlay-nix-readiness-test" {
+    selectionText = selectScript;
+    inherit validDescriptor descriptorLowerSha;
+    topologyFingerprint = (cfgOf hostDefault)._topology.fingerprint;
+    passAsFile = [ "selectionText" ];
+  } ''
+    set -euo pipefail
+    sed -n '/^[[:space:]]*metadata_value() {/,/^[[:space:]]*}/p' "$selectionTextPath" > readiness.sh
+    sed -n '/^[[:space:]]*ready_generation() {/,/^[[:space:]]*}/p' "$selectionTextPath" >> readiness.sh
+    grep -q 'ready_generation()' readiness.sh
+    sed -i \
+      -e "s#/var/lib/nix-overlay/upper-slots#$PWD/slots#g" \
+      -e "s#/etc/image-version#$PWD/image-version#g" \
+      -e "s#/run/booted-system#$PWD/booted-system#g" \
+      readiness.sh
+    generation=$PWD/slots/slot-a/generations/ready
+    mkdir -p "$generation"
+    printf '%s\n' /nix/store/nixtache-test-system 'source lower' > "$generation/lower-db"
+    ln -s /nix/store/nixtache-test-system booted-system
+    cp "$generation/lower-db" lower-db.valid
+    lower_sha=$(sha256sum "$generation/lower-db" | awk '{print $1}')
+    sed "s/$descriptorLowerSha/$lower_sha/g" "$validDescriptor" > "$generation/overlay-topology.json"
+    cp "$generation/overlay-topology.json" descriptor.valid
+    descriptor_sha=$(sha256sum "$generation/overlay-topology.json" | awk '{print $1}')
+    cat > "$generation/metadata" <<EOF
+    slot=slot-a
+    state=ready
+    image_id=nixtache
+    image_version=1
+    topology_sha256=$topologyFingerprint
+    descriptor_sha256=$descriptor_sha
+    lower_sha256=$lower_sha
+    EOF
+    ln -s generations/ready slots/slot-a/current
+    printf '1\n' > image-version
+    source ./readiness.sh
+    test "$(ready_generation slot-a)" = "$generation"
+
+    printf '2\n' > image-version
+    if ready_generation slot-a >/dev/null; then
+      echo "readiness accepted a generation from a different boot version" >&2
+      exit 1
+    fi
+    printf '1\n' > image-version
+
+    sed 's/"imageVersion":"1"/"imageVersion":"2"/' descriptor.valid > "$generation/overlay-topology.json"
+    descriptor_sha=$(sha256sum "$generation/overlay-topology.json" | awk '{print $1}')
+    sed -i "s/^descriptor_sha256=.*/descriptor_sha256=$descriptor_sha/" "$generation/metadata"
+    if ready_generation slot-a >/dev/null; then
+      echo "readiness accepted an owned descriptor from a different installation" >&2
+      exit 1
+    fi
+    cp descriptor.valid "$generation/overlay-topology.json"
+    descriptor_sha=$(sha256sum "$generation/overlay-topology.json" | awk '{print $1}')
+    sed -i "s/^descriptor_sha256=.*/descriptor_sha256=$descriptor_sha/" "$generation/metadata"
+
+    printf '%s\n' /nix/store/nixtache-test-system 'stale lower' > "$generation/lower-db"
+    lower_sha=$(sha256sum "$generation/lower-db" | awk '{print $1}')
+    sed -i "s/^lower_sha256=.*/lower_sha256=$lower_sha/" "$generation/metadata"
+    if ready_generation slot-a >/dev/null; then
+      echo "readiness accepted a lower dump inconsistent with its owned descriptor" >&2
+      exit 1
+    fi
+    cp lower-db.valid "$generation/lower-db"
+    lower_sha=$(sha256sum "$generation/lower-db" | awk '{print $1}')
+    sed -i "s/^lower_sha256=.*/lower_sha256=$lower_sha/" "$generation/metadata"
+
+    ln -sfn /nix/store/nixtache-different-system booted-system
+    if ready_generation slot-a >/dev/null; then
+      echo "readiness accepted a generation that does not own the booted toplevel registration" >&2
+      exit 1
+    fi
+    ln -sfn /nix/store/nixtache-test-system booted-system
+    test "$(ready_generation slot-a)" = "$generation"
+    touch "$out"
+  '';
   scenarioDescriptorValidation = {
     name = "target descriptors are validated before staging and bound into readiness metadata";
     checks = {
@@ -387,6 +513,10 @@ let
       leafHasOwnState = lib.hasInfix ''destination="$stage/nodes/$physical_id"'' materializerSource;
       finalWholeTreeCheck = lib.hasInfix "check_store \"$node_url\" \"$node_root\"" nestedScript
         && lib.hasInfix "unmount_all" nestedScript;
+      parentsRecheckedAfterChildren = lib.hasInfix "physical_is_parent" nestedScript
+        && lib.hasInfix "check_store \"$parent_url\" \"$parent_merged_root\"" nestedScript
+        && (posOf "nixtache-overlay: rechecking parent" nestedScript)
+          > (posOf "check_store \"$node_url\" \"$node_root\"" nestedScript);
     };
   };
 
@@ -573,6 +703,30 @@ let
     targetLogical = storageModeSourceTopology.descriptor.nodes;
     policy = "reconcile";
   };
+  wholeEphemeralTopology = (cfgOf (mkHost {
+    services.nixtache.overlay-nix = {
+      _layers = storageModeLayers;
+      upperOnUpdate = "reconcile";
+    };
+    fileSystems = {
+      "/" = {
+        device = "/dev/sda";
+        fsType = "ext4";
+      };
+      "/var/lib/nix-overlay/upper" = {
+        device = "tmpfs";
+        fsType = "tmpfs";
+      };
+    };
+  }))._topology;
+  wholeEphemeralToPersistent = wholeEphemeralTopology.transition {
+    targetLogical = storageModeSourceTopology.descriptor.nodes;
+    policy = "reconcile";
+  };
+  persistentToWholeEphemeral = storageModeSourceTopology.transition {
+    targetLogical = wholeEphemeralTopology.descriptor.nodes;
+    policy = "reconcile";
+  };
   storageModeTargetById = lib.listToAttrs (map
     (node: lib.nameValuePair node.id node)
     storageModeEphemeralTopology.descriptor.nodes);
@@ -616,6 +770,8 @@ let
       storage-reset = plannerCase operationSource changedStorage "reconcile";
       persistent-to-ephemeral = plannerCase storageModeSourceTopology persistentToEphemeral "reconcile";
       ephemeral-to-persistent = plannerCase storageModeEphemeralTopology ephemeralToPersistent "reconcile";
+      whole-ephemeral-to-persistent = plannerCase wholeEphemeralTopology wholeEphemeralToPersistent "reconcile";
+      persistent-to-whole-ephemeral = plannerCase storageModeSourceTopology persistentToWholeEphemeral "reconcile";
       wipe = plannerCase operationSource wipedChild "wipe";
     };
   });
@@ -735,6 +891,23 @@ let
       fingerprintsReflectBothDirections =
         persistentToEphemeral.generationFingerprint != storageModeSourceTopology.generationFingerprint
         && ephemeralToPersistent.generationFingerprint != storageModeEphemeralTopology.generationFingerprint;
+      wholeEphemeralSourceResetsEveryPersistentTarget = builtins.all
+        (node: node.ephemeral or false)
+        wholeEphemeralTopology.descriptor.nodes
+        && builtins.all
+          (operation: operation == "storage-reset")
+          (builtins.attrValues wholeEphemeralToPersistent.operations);
+      wholeEphemeralTargetHasNoPersistentRows = builtins.all
+        (node: node.ephemeral or false)
+        persistentToWholeEphemeral.physical.nodes;
+      preparationGatesEphemeralSuccessOnTargetRows = lib.hasInfix
+        ''if ! grep -q '|0$' "$probe/plan.rows"; then''
+        prepareScript
+        && (posOf ''if ! grep -q '|0$' "$probe/plan.rows"; then'' prepareScript)
+          < (posOf ''mkdir -p "$slot_dir"'' prepareScript);
+      ephemeralSourceUsesDescriptorWithoutSourceRoot = lib.hasInfix
+        ''plan_args+=(--source-descriptor'' prepareScript
+        && lib.hasInfix ''[ "$source_ephemeral" != 1 ] && [ -n "$source_slot" ]'' prepareScript;
       materializerUsesTargetRows = !(lib.hasInfix "findmnt -T" materializerSource)
         && lib.hasInfix "target_ephemeral" materializerSource;
       plannerAndMaterializerCoverBothDirections = lib.isDerivation plannerTransitionCheck;
@@ -807,6 +980,10 @@ let
       privateRunWork = lib.hasInfix ''frozen_root="/run/nixtache-overlay/frozen/$physical_id"'' frozenPlanService.script
         && lib.hasInfix ''lowerdir="$upper_dir":"$lower_root",upperdir="$private_upper",workdir="$work_dir" "$store_dir"'' frozenPlanService.script;
       frozenStoresReadOnly = lib.hasInfix ''mount -o remount,ro,bind "$store_dir"'' frozenPlanService.script;
+      frozenReadinessIsStrict = lib.hasPrefix "set -euo pipefail\n" frozenPlanService.script
+        && lib.hasInfix ''if [ "$published_plan" = 1 ] && ! grep -q "^$physical_id|" "$generation/persistent-plan.rows"; then'' frozenPlanService.script
+        && lib.hasInfix ''if mountpoint -q "$store_dir"; then'' frozenPlanService.script
+        && lib.hasInfix ''mountpoint -q "$lower_root"'' frozenPlanService.script;
       frozenParentsFirst = lib.hasInfix ''lower_root="/run/nixtache-overlay/frozen/$parent/nix/store"'' frozenPlanService.script
         && lib.hasInfix ''mountpoint -q "$lower_root"'' frozenPlanService.script
         && lib.hasInfix ''done < "$rows"'' frozenPlanService.script
@@ -877,6 +1054,16 @@ let
         && lib.hasInfix ''current_dump="$generation/lower-db"'' prepareScript
         && !(lib.hasInfix ''current_descriptor="/boot/EFI/'' prepareScript)
         && !(lib.hasInfix ''current_dump="/boot/EFI/'' prepareScript);
+      readinessRejectsStaleBootArtifacts = lib.isDerivation readinessCheck
+        && lib.hasInfix ''[ "$(metadata_value "$metadata" image_version)" = "$image_version" ]'' selectScript
+        && lib.hasInfix ''grep -Fqx -- "$booted_system" "$current_dump"'' selectScript
+        && lib.hasInfix ''"$current_descriptor" "$image_version" "$dump_sha"'' selectScript;
+      targetReuseChecksBootIdentity = lib.hasInfix
+        ''[ "$(metadata_value "$current_before/metadata" image_version)" = "$target_version" ]''
+        prepareScript
+        && lib.hasInfix
+          ''[ "$(metadata_value "$current_before/metadata" image_id)" = nixtache ]''
+          prepareScript;
       selectionUsesGenerationCopies = lib.hasInfix ''generation=$(ready_generation "$slot" || true)'' selectScript
         && !(lib.hasInfix "/boot/EFI/nixtache" selectScript);
       lowerLoaderUsesGenerationCopy = lib.hasInfix ''dump="$selected_generation/lower-db"''
@@ -1115,7 +1302,7 @@ in
 pkgs.runCommand "overlay-nix-module-test"
   {
     inherit report failMsg;
-    deps = [ descriptorValidationCheck plannerTransitionCheck plannerPhysicalIdCheck migrationCheck ];
+    deps = [ descriptorValidationCheck plannerTransitionCheck plannerPhysicalIdCheck migrationCheck quiesceRecoveryCheck readinessCheck ];
     passAsFile = [ "report" "failMsg" ];
   }
   ''
