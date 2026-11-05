@@ -181,6 +181,28 @@ pkgs.testers.runNixOSTest {
             appliance.fail("find " + q(base) + " -mindepth 1 -print -quit 2>/dev/null | grep -q .")
 
     def assert_generation_layout(generation, persistent_nodes):
+        rows = [
+          line.split("|")
+          for line in appliance.succeed("cat " + q(generation + "/plan.rows")).splitlines()
+          if line
+        ]
+        expected_persistent = []
+        for row in rows:
+            assert len(row) == 12
+            physical_id, logical_id = row[0], row[1]
+            assert (row[11] == "1") == (logical_id in RESET_NODES)
+            physical = generation + "/nodes/" + physical_id
+            if logical_id in RESET_NODES:
+                appliance.fail("test -e " + q(physical) + " || test -L " + q(physical))
+            else:
+                expected_persistent.append(physical_id)
+                appliance.succeed("test -d " + q(physical))
+        persistent_rows = [
+          line.split("|")
+          for line in appliance.succeed("cat " + q(generation + "/persistent-plan.rows")).splitlines()
+          if line
+        ]
+        assert [row[0] for row in persistent_rows] == expected_persistent
         for node in RESET_NODES:
             base = node_dir(generation, node)
             directories = [base + "/upper"] + [

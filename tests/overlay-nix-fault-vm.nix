@@ -15,6 +15,8 @@ let
   scenarios = [
     "migration-mv"
     "migration-exdev"
+    "migration-exdev-copy"
+    "migration-exdev-unlink"
     "activation-state"
     "publication-stage-mv"
     "publication-ready"
@@ -23,7 +25,9 @@ let
     "concurrent-booted"
     "retention"
   ];
-  selectionScenario = builtins.elem scenario [ "migration-mv" "activation-state" ];
+  migrationFaultScenarios = [ "migration-mv" "migration-exdev-copy" "migration-exdev-unlink" ];
+  exdevScenarios = [ "migration-exdev" "migration-exdev-copy" "migration-exdev-unlink" ];
+  selectionScenario = builtins.elem scenario (migrationFaultScenarios ++ [ "activation-state" ]);
   preparationScenario = builtins.elem scenario [
     "publication-stage-mv"
     "publication-ready"
@@ -136,6 +140,32 @@ let
                 return 1
               elif ! mv "$link" "$backup"; then''
         selectionWithFaultFunction
+    else if scenario == "migration-exdev-copy" then
+      replaceChecked "cross-filesystem copy"
+        ''if ! cp -a -- "$link" "$temporary"; then''
+        ''
+          if overlay_test_fault migration-exdev-copy && [ "$link" = "/nix/var/nix/db" ]; then
+                mkdir -p "$temporary"
+                printf 'partial\n' > "$temporary/incomplete"
+                echo "nixtache-overlay-test: interruption during cross-filesystem copy" >&2
+                kill -KILL "$$"
+                sleep 1
+                exit 137
+              elif ! cp -a -- "$link" "$temporary"; then''
+        selectionWithFaultFunction
+    else if scenario == "migration-exdev-unlink" then
+      replaceChecked "cross-filesystem source unlink"
+        "remove_migrated_source() {\n  local link=$1"
+        ''
+          remove_migrated_source() {
+                local link=$1
+                if overlay_test_fault migration-exdev-unlink && [ "$link" = "/nix/var/nix/db" ]; then
+                  echo "nixtache-overlay-test: interruption before cross-filesystem source unlink" >&2
+                  kill -KILL "$$"
+                  sleep 1
+                  exit 137
+                fi''
+        selectionWithFaultFunction
     else if scenario == "activation-state" then
       replaceChecked "state activation"
         "activate_state_dir() {"
@@ -215,8 +245,8 @@ let
   injectedPrepare = pkgs.writeShellScript "nixtache-overlay-prepare-test-${scenario}" injectedPrepareText;
 
   shimModule = { lib, ... }: {
-    environment.etc."nixtache-overlay-test-fault" = lib.mkIf (scenario == "migration-mv") {
-      text = "migration-mv\n";
+    environment.etc."nixtache-overlay-test-fault" = lib.mkIf (builtins.elem scenario migrationFaultScenarios) {
+      text = "${scenario}\n";
     };
     systemd.services.nixtache-overlay-select = lib.mkIf selectionScenario {
       script = lib.mkForce (builtins.readFile injectedSelection);
@@ -230,7 +260,7 @@ let
     version = "1";
     legacyFixture = true;
     instrumented = true;
-    separateNixState = scenario == "migration-exdev";
+    separateNixState = builtins.elem scenario exdevScenarios;
   };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
   v2 = mkAppliance { version = "2"; };
@@ -394,6 +424,60 @@ pkgs.testers.runNixOSTest {
         appliance.succeed("test -e /run/nixtache-overlay/selected-chain-ready")
         print("PASS: real cross-filesystem migration retained coherent files, database and roots")
 
+    def run_migration_exdev_fault(point):
+        appliance.wait_until_succeeds(
+          "systemctl is-failed --quiet nixtache-overlay-select.service", timeout=1800
+        )
+        appliance.wait_until_succeeds("test -f /tmp/nixtache-legacy-tool-path", timeout=120)
+        message = (
+          "interruption during cross-filesystem copy"
+          if point == "copy" else
+          "interruption before cross-filesystem source unlink"
+        )
+        appliance.succeed(
+          "journalctl -u nixtache-overlay-select.service --no-pager | "
+          "grep -q " + q(message)
+        )
+        backup = OVERLAY_BASE + "/legacy-backup/host/state/db"
+        m_record = appliance.succeed(
+          "if grep -q '^M|/nix/var/nix/db|' /run/nixtache-overlay/activation.log; "
+          "then echo present; else echo missing; fi"
+        ).strip()
+        source_integrity = appliance.succeed(
+          "sqlite3 /nix/var/nix/db/db.sqlite 'PRAGMA integrity_check;'"
+        ).strip()
+        assert source_integrity == "ok", "fault injection damaged the only intact legacy database"
+        appliance.succeed(
+          "path=$(cat /tmp/nixtache-legacy-tool-path); "
+          "test \"$(readlink /nix/var/nix/gcroots/legacy-tool)\" = \"$path\""
+        )
+        appliance.succeed("test ! -e /run/nixtache-overlay/selected-chain-ready")
+        if point == "copy":
+            assert m_record == "missing", "an interrupted copy was journaled as a published migration"
+            appliance.succeed("test ! -e " + q(backup))
+            appliance.succeed(
+              "find " + q(OVERLAY_BASE + "/legacy-backup/host/state") +
+              " -maxdepth 1 -type d -name 'db.tmp.*' | grep -q ."
+            )
+        else:
+            assert m_record == "present", "published backup was not journaled before source cleanup"
+            appliance.succeed("test -f " + q(backup + "/db.sqlite"))
+            appliance.succeed("test -e " + q(backup + ".migration-ready"))
+            backup_integrity = appliance.succeed(
+              "sqlite3 " + q(backup + "/db.sqlite") + " 'PRAGMA integrity_check;'"
+            ).strip()
+            assert backup_integrity == "ok", "published backup was not a complete database copy"
+        appliance.succeed("touch /run/nixtache-overlay-test-disable")
+        appliance.succeed("systemctl restart nixtache-overlay-select.service", timeout=900)
+        appliance.succeed("systemctl start nixtache-overlay-ready.target", timeout=300)
+        appliance.wait_until_succeeds("nix --version", timeout=300)
+        assert_active_tool()
+        generation = selected_generation()
+        assert selection_state(generation) == "restored"
+        appliance.succeed("test -f " + q(backup + "/db.sqlite"))
+        appliance.succeed("test -e /run/nixtache-overlay/selected-chain-ready")
+        print("PASS: cross-filesystem " + point + " interruption preserved legacy state and retry completed the journaled migration")
+
     def run_activation_state():
         wait_v1()
         generation = selected_generation()
@@ -555,6 +639,10 @@ pkgs.testers.runNixOSTest {
         run_migration_mv()
     elif SCENARIO == "migration-exdev":
         run_migration_exdev()
+    elif SCENARIO == "migration-exdev-copy":
+        run_migration_exdev_fault("copy")
+    elif SCENARIO == "migration-exdev-unlink":
+        run_migration_exdev_fault("unlink")
     elif SCENARIO == "activation-state":
         run_activation_state()
     elif PUBLICATION_POINT is not None:

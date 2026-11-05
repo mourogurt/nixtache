@@ -43,23 +43,11 @@ let
     merge_scratch=$(mktemp -d "''${TMPDIR:-/tmp}/nixtache-overlay-materialize.XXXXXX")
     trap 'rm -rf "$merge_scratch"' EXIT
     mkdir -p "$stage/nodes" "$stage/layers" "$stage/host/lower-state" "$merge_scratch/root/nix/store"
-    declare -A logical_upper ephemeral
-    while IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton; do
-      [ -n "$physical_id" ] || continue
-      logical_upper[$logical_id]=$upper_dir
-    done < "$rows"
     : > "$stage/persistent-plan.rows"
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton <<< "$row"
-      if [ "$parent" != - ] && [ "''${ephemeral[$parent]:-0}" = 1 ]; then
-        ephemeral[$physical_id]=1
-      elif [ "$(findmnt -T "''${logical_upper[$logical_id]}" -n -o FSTYPE 2>/dev/null || echo unknown)" = tmpfs ]; then
-        ephemeral[$physical_id]=1
-      else
-        ephemeral[$physical_id]=0
-      fi
-      if [ "''${ephemeral[$physical_id]}" = 0 ]; then
+      IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton target_ephemeral <<< "$row"
+      if [ "$target_ephemeral" != 1 ]; then
         printf '%s\n' "$row" >> "$stage/persistent-plan.rows"
       fi
     done < "$rows"
@@ -145,7 +133,7 @@ let
       copy_state "$state" "$destination/state"
     }
 
-    while IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton; do
+    while IFS='|' read -r physical_id logical_id role parent operation disposition source_consumer source_frozen upper_dir state_dir singleton target_ephemeral; do
       [ -n "$physical_id" ] || continue
       if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
         destination="$stage/host"
