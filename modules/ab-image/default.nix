@@ -179,6 +179,8 @@ in
         Import this module ONLY on A/B targets — it pulls the image-based-appliance
         profile (nix.enable=false), which is wrong for live-rebuilt machines.
         Pair with services.nixtache.deploy-target.ab (runtime: polkit/gating).
+        Enabling disables import from derivation because content-addressed
+        derivations do not support IFD.
       '';
     };
 

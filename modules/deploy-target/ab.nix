@@ -46,7 +46,8 @@ in
         authorization to start the ab-image apply units. The consumer MUST
         separately enable `systemd.sysupdate` + `boot.loader.systemd-boot.bootCounting`
         (asserted below) and provide the image/repart/transfer config
-        (see `doc/user_guide/ota.md`).
+        (see `doc/user_guide/ota.md`). Enabling also disables import from
+        derivation because content-addressed derivations do not support IFD.
       '';
     };
 
