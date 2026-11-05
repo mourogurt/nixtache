@@ -552,6 +552,10 @@ let
         rebootPolicy = "window";
         rebootWindow = { inherit start end; };
       })).systemd.services.nixtache-auto-update-reboot.script;
+  flakePollScript = pkgs.writeText "auto-update-flake-poll"
+    (evalCfg (flakeMods { })).systemd.services.nixtache-auto-update.script;
+  flakeWindowScript = pkgs.writeText "auto-update-flake-window"
+    (evalCfg (flakeMods { rebootPolicy = "window"; })).systemd.services.nixtache-auto-update.script;
   normalWindowScript = windowRebootScript "auto-update-normal-window" "02:00" "05:00";
   wrappingWindowScript = windowRebootScript "auto-update-wrapping-window" "23:00" "02:00";
   overlayWindowScript = pkgs.writeText "auto-update-overlay-window"
@@ -719,6 +723,91 @@ let
     printf 'ok  stable source refresh publishes its pre-refresh snapshot and reboots\n' >> "$out"
   '';
 
+  failureHandlingBehaviorCheck = pkgs.runCommand "auto-update-failure-handling-behavior" {
+    inherit flakePollScript flakeWindowScript normalWindowScript;
+  } ''
+    : > "$out"
+    mkdir -p "$TMPDIR/bin" "$TMPDIR/build-state" "$TMPDIR/window-state" "$TMPDIR/reboot-state"
+    cat > "$TMPDIR/bin/nix" <<'STUB'
+    #!/bin/sh
+    if [ "$FAIL_BUILD" = 1 ]; then exit 1; fi
+    printf '%s\n' "$NEW_SYSTEM"
+    STUB
+    cat > "$TMPDIR/bin/readlink" <<'STUB'
+    #!/bin/sh
+    case "$2" in
+      /run/current-system) printf '%s\n' /nix/store/nixtache-test-old-system ;;
+      /run/booted-system/kernel) printf '%s\n' /nix/store/nixtache-test-booted/kernel ;;
+      /run/current-system/kernel) printf '%s\n' /nix/store/nixtache-test-current/kernel ;;
+      *) exit 1 ;;
+    esac
+    STUB
+    cat > "$TMPDIR/bin/systemctl" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+    STUB
+    cat > "$TMPDIR/bin/touch" <<'STUB'
+    #!/bin/sh
+    exit 1
+    STUB
+    cat > "$TMPDIR/bin/date" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' "$FAKE_NOW"
+    STUB
+    chmod +x "$TMPDIR/bin/nix" "$TMPDIR/bin/readlink" "$TMPDIR/bin/systemctl" "$TMPDIR/bin/touch" "$TMPDIR/bin/date"
+    sed "s|/var/lib/nixtache|$TMPDIR/build-state|g" \
+      "$flakePollScript" > "$TMPDIR/flake-poll"
+    sed "s|/var/lib/nixtache|$TMPDIR/window-state|g" \
+      "$flakeWindowScript" > "$TMPDIR/flake-window"
+    sed "s|/var/lib/nixtache|$TMPDIR/reboot-state|g" \
+      "$normalWindowScript" > "$TMPDIR/reboot-window"
+    export PATH="$TMPDIR/bin:${pkgs.coreutils}/bin:${pkgs.bash}/bin"
+    export NEW_SYSTEM=/nix/store/nixtache-test-new-system
+
+    export FAIL_BUILD=1
+    export SYSTEMCTL_LOG="$TMPDIR/build-failure-systemctl"
+    if bash "$TMPDIR/flake-poll"; then
+      echo "FAIL: failed flake build did not stop the update" >&2
+      exit 1
+    fi
+    [ ! -e "$TMPDIR/build-state/pending-system" ] \
+      && [ ! -e "$TMPDIR/build-state/pending-system.tmp" ] \
+      && [ ! -e "$SYSTEMCTL_LOG" ] || {
+        echo "FAIL: failed flake build armed or applied a system" >&2
+        exit 1
+      }
+    printf 'ok  failed flake build does not arm or apply\n' >> "$out"
+
+    export FAIL_BUILD=0
+    export SYSTEMCTL_LOG="$TMPDIR/marker-write-failure-systemctl"
+    if bash "$TMPDIR/flake-window"; then
+      echo "FAIL: deferred marker write failure was ignored" >&2
+      exit 1
+    fi
+    [ "$(< "$SYSTEMCTL_LOG")" = "start nixtache-apply.service" ] || {
+      echo "FAIL: deferred marker write failure caused an unexpected systemctl call" >&2
+      exit 1
+    }
+    printf 'ok  deferred marker write failure stops the update without reboot\n' >> "$out"
+
+    cat > "$TMPDIR/bin/rm" <<'STUB'
+    #!/bin/sh
+    exit 1
+    STUB
+    chmod +x "$TMPDIR/bin/rm"
+    ${pkgs.coreutils}/bin/touch "$TMPDIR/reboot-state/reboot-pending"
+    export SYSTEMCTL_LOG="$TMPDIR/marker-removal-failure-systemctl"
+    if FAKE_NOW=03:00 bash "$TMPDIR/reboot-window"; then
+      echo "FAIL: pending marker removal failure was ignored" >&2
+      exit 1
+    fi
+    [ ! -e "$SYSTEMCTL_LOG" ] && [ -f "$TMPDIR/reboot-state/reboot-pending" ] || {
+      echo "FAIL: pending marker removal failure permitted reboot" >&2
+      exit 1
+    }
+    printf 'ok  pending marker removal failure prevents reboot\n' >> "$out"
+  '';
+
   scenarios = [
     scenarioAu1
     scenarioAu2
@@ -768,7 +857,7 @@ let
 in
 pkgs.runCommand "auto-update-test"
   {
-    inherit report failMsg rebootWindowBehaviorCheck fingerprintBehaviorCheck;
+    inherit report failMsg rebootWindowBehaviorCheck fingerprintBehaviorCheck failureHandlingBehaviorCheck;
     passAsFile = [ "report" "failMsg" ];
   }
   ''
@@ -781,4 +870,6 @@ pkgs.runCommand "auto-update-test"
     cat "$rebootWindowBehaviorCheck" >> "$out"
     cat "$fingerprintBehaviorCheck"
     cat "$fingerprintBehaviorCheck" >> "$out"
+    cat "$failureHandlingBehaviorCheck"
+    cat "$failureHandlingBehaviorCheck" >> "$out"
   ''
