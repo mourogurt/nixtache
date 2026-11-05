@@ -68,12 +68,12 @@ lower-state, separate from the writable upper database:
 | moment | what happens |
 |---|---|
 | image build | the dump is the closure's registered validity records — content-true because the appliance evaluation is content-addressed ([`lower-store-db.md`](../technical_details/lower-store-db.md)) |
-| update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` (old slot's dump vacuumed with its UKI) |
-| first boot | the selected generation has no matching lower-state → the dump loads and its SHA-256 is recorded |
-| same-slot reboot | physical slot identity and dump checksum match → the existing lower-state and upper state are selected unchanged |
-| target preparation | the new dump loads into the target's lower-state; cloned stale records remain only in the target for verification and repair, never merged into the active upper DB |
+| update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` as an input to new target preparation (old slot's dump vacuumed with its UKI) |
+| first boot | a prepared persistent generation loads its own exact `lower-db` and records its SHA-256; an entirely ephemeral chain instead loads the running version's ESP dump |
+| same-slot reboot | physical slot identity and the generation-owned dump checksum match → the existing lower-state and upper state are selected unchanged |
+| target preparation | the ESP dump and topology descriptor are copied into the target generation; the dump loads into target lower-state, and cloned stale records remain only in the target for verification and repair, never merged into the active upper DB |
 | cutover with `upperOnUpdate = "wipe"` | the target has empty upper-owned state; the active slot's upper and DB were not cleared |
-| rollback | the previous slot's lower-state and upper state are selected together without an additive merge or another policy run |
+| rollback | the previous slot's own `lower-db`, topology descriptor, lower-state and upper state are selected together without an additive merge or another policy run |
 
 The image also ships the `nix` CLI — the loader runs on a nix-less
 appliance. This is what makes the runner container work on appliance hosts
@@ -113,13 +113,12 @@ preparation before cutover: `reconcile` rebases children onto the latest frozen
 parent runtime state, while `wipe` keeps target state clean and validates it
 against the latest lower. No live lower is refreshed beneath a running child.
 See [`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots)
-for the policy mechanics and current ephemeral-window restriction.
+for the policy mechanics and ephemeral source discovery.
 
 An entirely ephemeral upper chain returns a successful no-persistent-metaslot
-preparation result. Direct and immediate cutovers can therefore reboot without
-inventing persistent upper state; the new boot resets every ephemeral
-descendant and loads exactly its own lower dump. Windowed ephemeral auto-update
-has the limitation linked above.
+preparation result. Direct, immediate, deferred-window and manual cutovers can
+therefore reboot without inventing persistent upper state; the new boot resets
+every ephemeral descendant and loads exactly its own lower dump.
 
 Rollback is graph selection, not reverse reconciliation. Automatic boot
 counting and manual selection of an older prepared slot restore that slot's
@@ -297,7 +296,7 @@ write; the runner host cutover is idle-gated.
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
 | tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |
 | consecutive installations without reboot | each installation reruns preparation; the eventual boot selects the exact ready generation for the latest lower and checksum |
-| entirely ephemeral update | preparation succeeds without persistent upper state; immediate or manual reboot resets the chain and loads the new lower. The current window-mode restriction is in [`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots) |
+| entirely ephemeral update | preparation succeeds without persistent upper state; immediate, deferred-window or manual reboot resets the chain and loads the new lower. Window source discovery is covered in [`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots) |
 | timer-driven updates | `auto-update` with `method = "ab-image"` (or derived) pulls, prepares the upper chain and reboots per `rebootPolicy`; persistent window mode records the source generation and refreshes a changed target before the deferred reboot — see [`auto-update.md`](auto-update.md) |
 
 ### Post-rollback recovery

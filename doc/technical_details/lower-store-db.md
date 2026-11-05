@@ -33,9 +33,14 @@ a store:
   downloads everything into the upper layer (no delta installs).
 
 The image therefore ships the closure's validity records (path, narHash,
-narSize, deriver, references per store path) as a dump on the ESP. The
-boot-time loader imports them into the selected lower-state, or directly into
-`/nix/var/nix/db` without `overlay-nix`. On a nix-less appliance host the
+narSize, deriver, references per store path) as a dump on the ESP. With
+`overlay-nix`, the boot-time loader imports the selected persistent
+generation's exact `lower-db` into its lower-state. Without `overlay-nix`, or
+for an entirely ephemeral overlay chain with no selected generation, the
+loader instead uses the running version's ESP dump. The
+[`overlay-nix` guide](../user_guide/overlay-nix.md#upper-metaslots-and-generations)
+owns the generation-artifact and target-preparation contract. On a nix-less
+appliance host the
 runner container also disables its internal nix module, renders `nix.conf`
 with the preserved settings plus `ca-derivations`, and ships the CLI
 explicitly. Clone mode then enumerates a scratch copy of the real host DB.

@@ -99,7 +99,8 @@ The A/B image and overlay modules own different steps of an update:
   rebased generation.
 - An entirely ephemeral chain returns a successful no-persistent-metaslot
   result, then resets all descendants and loads exactly the new lower dump at
-  boot. The current deferred-window fingerprint restriction is documented in
+  boot. Immediate, deferred-window and manual cutovers use the same ephemeral
+  result; window source discovery is documented in
   [`auto-update.md`](../user_guide/auto-update.md#ab-upper-readiness-and-deferred-reboots).
 - Early boot selects a ready generation from the mounted lower's GPT
   `PARTUUID`, with descriptor, graph and lower-dump checksum validation. Upper

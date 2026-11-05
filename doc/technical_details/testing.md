@@ -21,6 +21,7 @@ not by `nix flake check`.
 | File | Covers | Wired as |
 |---|---|---|
 | `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — singleton compatibility, named sibling/nested declarations, logical store parents, frozen lower wiring, clone/native exclusions, invalid graphs and path collisions, store paths, multi-instance, optional SSH creds, sandboxing and deploy wiring | `checks.<system>.runner` |
+| `tests/runner-topology-operations.nix` | named production declaration operation traces — add/promote/reparent/remove/storage-reset, overlay→clone→overlay and native detours, reverse transitions, deterministic replay and independent graph-oracle comparison under wipe and reconcile | `checks.<system>.runner-topology-operations` |
 | `tests/deploy-target.nix` | the target side — apply unit, deploy user, polkit, health check, rollback wiring | `checks.<system>.deploy-target` |
 | `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify, store-tree imaging | `checks.<system>.ab-image` |
 | `tests/ab-contract.nix` | cross-module A/B contracts — provisioning, overlay cutover ordering and marker independence, runner store modes | `checks.<system>.ab-contract` |
@@ -32,8 +33,9 @@ not by `nix flake check`.
 | `tests/mkDocs.nix` | `lib/mkDocs.nix` — the `docStrictMode` flag × documentation-completeness matrix | `checks.<system>.mkDocs` |
 
 `tests/ab-fixture.nix`, `tests/ab-anywhere-install.nix`,
-`tests/ab-ota-vm-lib.nix` and `tests/overlay-tree-vm-lib.nix` are shared
-fixtures/helpers, not registered suites.
+`tests/ab-ota-vm-lib.nix`, `tests/overlay-tree-vm-lib.nix`,
+`tests/runner-topology-vm-lib.nix` and `tests/runner-topology-oracle.nix` are
+shared fixtures/helpers, not registered suites.
 
 ### Layout — KVM-only VM suites (`vmTests.x86_64-linux`)
 
@@ -66,13 +68,16 @@ without building, and `suite` overrides `subset`. Full inventory:
 - Rooted-tree storage oracles:
   `overlay-tree-{sibling,nested,composed}-{wipe,reconcile}-vm`,
   `overlay-tree-failure-{host,a,grand,b}-vm`, `overlay-tree-parent-root-vm`,
-  `overlay-tree-refs-vm`, `overlay-tree-rollback-vm`, and
-  `overlay-tree-ephemeral-{host,a}-vm`.
+  `overlay-tree-refs-vm`, `overlay-tree-refs-{a,grand,b}-vm`,
+  `overlay-tree-rollback-vm`, and `overlay-tree-ephemeral-{host,a}-vm`.
 - Topology operations: `overlay-topology-operations-reconcile-vm`,
   `overlay-topology-operations-wipe-vm`,
   `overlay-topology-operations-storage-reset-vm`,
   `overlay-topology-operations-descriptor-missing-vm`, and
   `overlay-topology-operations-descriptor-mismatch-vm`.
+- Production named-runner topology:
+  `runner-topology-{sibling,nested,composed}-vm` and
+  `runner-topology-operations-{reconcile,wipe}-vm`.
 - Runner and auto-update: `runner-store-mode-vm`,
   `runner-builder-isolation-vm`, `runner-store-swap-clone-vm`,
   `runner-store-swap-overlay-vm`, `runner-store-swap-overlay-ephemeral-vm`,
@@ -83,23 +88,21 @@ without building, and `suite` overrides `subset`. Full inventory:
 ### Runner production coverage and the operation matrix
 
 "Production" and "storage oracle" are different evidence levels. A test that
-uses the real runner options proves declaration-derived container wiring; a
+uses the real runner options checks declaration-derived container wiring; a
 fixture that supplies internal low-level nodes can still check storage repair,
 but says nothing by itself about consumer option handling.
 
 | Evidence level | Current suites and operations | Scope and limit |
 |---|---|---|
 | Production declarations, pure eval | `checks.runner` evaluates singleton and named runner containers, siblings, nesting, clone/native exclusions, unsafe or missing parents, cycles and component-wise path collisions. | Checks declaration-derived configuration without booting containers or applying an operation sequence. |
+| Production operation traces, pure eval | `checks.runner-topology-operations` evaluates named declarations through add/promote/reparent/remove/storage-reset and store-mode transitions, including overlay→clone→overlay, and compares forward, reverse and replayed graphs with an independent oracle under both policies. | Checks production declaration handling and operation derivation without booting containers or materializing a target. |
 | Operation algebra, pure eval | `checks.overlay-nix` compares first-child promotion, rebase, add/reparent/remove/storage-change plans, lineage and whole-graph fingerprints, and runs descriptor/planner differential cases. | Uses internal logical-node fixtures rather than named runner declarations. |
-| Production runner, KVM | `runner-store-swap-{clone,overlay,overlay-ephemeral}-vm` boots the real singleton runner module through slot changes; `runner-store-parent-metadata-freshness-vm` checks isolation followed by preparation, rebase and child restart. | Current KVM runner fixtures use the singleton declaration. They do not exercise named production sibling add/reparent/remove transitions end to end. |
-| Operation transitions, KVM storage fixture | `overlay-topology-operations-{reconcile,wipe}-vm` checks first-child promotion, sibling/depth additions, reparenting, removal and final graph/state dispositions. `storage-reset` checks empty replacement state; `descriptor-{missing,mismatch}` checks fail-closed preparation before publication. | Uses an internal low-level topology fixture and an independent expected-operation/graph oracle. It is not production named-runner coverage and uses fixed traces, not generated arbitrary histories. |
+| Production runner, KVM | `runner-store-swap-{clone,overlay,overlay-ephemeral}-vm` boots the singleton module through slot changes; `runner-store-parent-metadata-freshness-vm` checks isolation, rebase and child restart. `runner-topology-{sibling,nested,composed}-vm` boots named production topologies through reconciliation; `runner-topology-operations-{reconcile,wipe}-vm` applies add/reparent/remove/storage-reset and overlay→clone→overlay transitions, retry and rollback. | Uses fixed production declaration and operation traces, not generated arbitrary histories. |
+| Operation transitions, KVM storage fixture | `overlay-topology-operations-{reconcile,wipe}-vm` checks first-child promotion, sibling/depth additions, reparenting, removal and final graph/state dispositions. `storage-reset` checks empty replacement state; `descriptor-{missing,mismatch}` checks fail-closed preparation before publication. | Uses an internal low-level topology fixture and an independent expected-operation/graph oracle, separately from production named-runner coverage. |
 | Rooted-tree repair oracles | `overlay-tree-{sibling,nested,composed}-{wipe,reconcile}-vm` checks parent-first repair, sibling isolation, duplicated metadata and atomic readiness; failure, parent-root, `Refs`, rollback and ephemeral variants focus on specific storage invariants. | Synthetic rooted-layer fixtures isolate OverlayFS/Nix mechanics. Passing them is not evidence of runner declaration or container-mount support. |
 
-The current suites split declaration checks from operation and materialization
-checks. No current suite applies add/reparent/remove sequences through named
-production runner declarations: eval operation fixtures use internal nodes and
-KVM runner fixtures use the singleton. Do not present the combined matrix as
-production named-runner operation coverage.
+The KVM scenario descriptions in this document describe scope, not execution
+results.
 
 ### Formal verification: non-goal and future reference models
 
@@ -260,16 +263,19 @@ state and fresh-write assertions. Failure injection modifies test-owned copies
 of the generated preparation scripts, not the production module.
 `overlay-tree-rollback-vm` covers automatic and manual rollback with unchanged
 per-node generations and databases. `overlay-tree-parent-root-vm` rejects a
-child that impersonates parent-provided state through its own upper, and
-`overlay-tree-refs-vm` rejects or repairs corrupted reference metadata.
-`overlay-tree-ephemeral-{host,a}-vm` contains assertions for resetting the
-whole tree below the host, or only `a` plus its descendant, while retaining
-persistent siblings. The current materializer does not satisfy the
-persistent-copy exclusion for a split ephemeral parent, as documented in
-[`overlay-nix.md`](../user_guide/overlay-nix.md#ephemeral-chains-and-mixed-storage-limitation);
-the suite's presence in the matrix is not evidence that those assertions pass. The composed
-auto-update VM checks deferred-source refresh of window writes at the host,
-intermediate, leaf and sibling into the target.
+child that impersonates parent-provided state through its own upper. The `Refs`
+matrix corrupts reference metadata while retaining validity records and files,
+then checks rejection or repair at the host (`overlay-tree-refs-vm`),
+intermediate node (`overlay-tree-refs-a-vm`), leaf
+(`overlay-tree-refs-grand-vm`) and sibling (`overlay-tree-refs-b-vm`).
+`overlay-tree-ephemeral-{host,a}-vm` checks reset of the whole tree below the
+host, or only `a` plus its descendant, while retaining persistent siblings. It
+also checks that target generations contain no persistent upper or state copies
+for ephemeral runtime continuations, split frozen lowers or descendants, as
+specified in
+[`overlay-nix.md`](../user_guide/overlay-nix.md#ephemeral-chains-and-mixed-storage).
+The composed auto-update VM checks deferred-source refresh of window writes at
+the host, intermediate, leaf and sibling into the target.
 
 `ab-ota-rollback-vm` covers an upper-hosted critical service across failed boot
 health, automatic and manual rollback with the original upper generation/DB,
@@ -288,15 +294,25 @@ outside upper metaslots. `runner-store-parent-metadata-freshness-vm` first
 checks that parent runtime files and validity records stay absent from the
 running child, then prepares a new frozen lower and checks their coherent
 appearance after the child restarts; it does not weaken freshness into an
-implicit live metadata read. Canonical behavior:
+implicit live metadata read.
+
+`runner-topology-{sibling,nested,composed}-vm` boots named production runner
+declarations and checks parent/sibling write isolation, frozen-parent roots,
+nested resolution and readiness across reconciliation and restart.
+`runner-topology-operations-{reconcile,wipe}-vm` applies named production
+add/promote/reparent/remove/storage-reset sequences under both policies,
+including overlay→clone→overlay. It checks independent additive clone storage,
+empty replacement overlay state and exact graph/state restoration on rollback.
+Canonical behavior:
 [`runner`](../../openspec/specs/runner/spec.md).
 
 `auto-update-no-intermediate-reboot-vm` checks that v2 then v3 without a
 reboot publishes and selects the exact ready v3 generation.
-`auto-update-managed-tmpfs-window-vm` contains managed ephemeral-window
-assertions, but the current source-fingerprint implementation cannot complete
-that scenario. Its presence in the matrix is not a passing result. The
-restriction and workaround are documented in
+`auto-update-managed-tmpfs-window-vm` checks managed tmpfs source discovery,
+recording of the deferred reboot, reboot into the new lower, reset of ephemeral
+upper and Nix state, and loading of exactly the new lower dump without a
+persistent metaslot or persistent upper copies. The policy contract is
+documented in
 [`auto-update.md`](../user_guide/auto-update.md#ab-upper-readiness-and-deferred-reboots).
 
 ### Pure-eval suite and scenario shape
