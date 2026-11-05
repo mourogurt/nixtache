@@ -133,7 +133,7 @@ let
   # → shared apply oneshot. apply failure means the probe rolled the
   # profile back; propagate it so the run shows red.
   flakeScript = ''
-    set -uo pipefail
+    set -euo pipefail
     ${markerFn}
     ${optionalString (cfg.flake.sshPrivateKeyFile != null) ''
       export GIT_SSH_COMMAND="ssh -i ''${CREDENTIALS_DIRECTORY}/auto_update_ssh_key -o IdentitiesOnly=yes"
@@ -174,7 +174,7 @@ let
       fi
     '';
   abPollScript = ''
-    set -uo pipefail
+    set -euo pipefail
     ${markerFn}
     ${sourceFingerprint}
     t0=$(date '+%Y-%m-%d %H:%M:%S')
@@ -230,7 +230,7 @@ let
   # Gating host: activation + reboot are owned by nixtache-ab-apply
   # (idle-gate over the CI signal). The timer channel is a deliberate no-op.
   abGatingScript = ''
-    set -u
+    set -euo pipefail
     echo "nixtache-auto-update: ab.poll=false — ci-driven channel, nothing to do"
   '';
 
@@ -543,7 +543,7 @@ in
         path = with pkgs; [ systemd coreutils ] ++ optional (isAb && overlayEnabled) config.nix.package ++ optional (isAb && overlayEnabled) util-linux;
         serviceConfig.Type = "oneshot";
         script = ''
-          set -u
+          set -euo pipefail
           ${sourceFingerprint}
           [ -f "${rebootPendingFile}" ] || { echo "nixtache-auto-update-reboot: no pending reboot — nothing to do"; exit 0; }
           now=$(date +%H:%M)
