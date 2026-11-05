@@ -188,6 +188,12 @@ Operation-based tests start from a declared graph, apply add, reparent and remov
 
 The runner freshness scenario has two phases: a parent runtime write is absent from its running child, then a prepared rebase and child restart expose both the path and validity record from the new frozen lower. Other regression coverage includes parent-root tampering, corrupted reference metadata, both same-version slots, ephemeral managed OTA, repeated installation without reboot, migration move failures and cross-filesystem backup, activation/publication interruptions, concurrent preparation and bounded retention. The VM workflow inventory must exactly match the flake's VM outputs, and the full matrix must pass on the reviewed SHA.
 
+### D13 — AB/OTA disables import from derivation
+
+Content-addressed derivations do not support import from derivation (IFD). Enabling the AB/OTA image module or the receiving deploy-target AB mode therefore sets `allow-import-from-derivation = false` in the target system's Nix configuration. Image and update closures MUST be realized ahead of time; runtime evaluation MUST NOT depend on building a derivation and importing its output.
+
+The target setting cannot rewrite the Nix configuration of the machine performing the image evaluation. Build and deployment hosts handling the content-addressed appliance closure MUST also disable IFD through their own Nix configuration. Pure evaluation tests assert the target contract so a later default or module merge cannot silently re-enable it.
+
 ### Future formal verification — non-goal
 
 A future effort could build a pure reference state machine over logical/physical graphs, generations and readiness, then use Alloy for bounded graph-operation checks or PlusCal/TLA+ for crash, retry and publication interleavings. Property-based generators could compare operation histories against production NixOS evaluation and shrink failing traces before replaying them as KVM tests. A refinement mapping could relate evaluated graphs, systemd edges, journal markers, readiness metadata and store URLs to abstract states and actions.
