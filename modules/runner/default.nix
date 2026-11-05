@@ -240,7 +240,7 @@ in
         message = "services.nixtache.runner containerName values must be unique.";
       }
     ];
-    containers = mapAttrs (_: declaration: {
+    containers = mapAttrs' (_: declaration: nameValuePair declaration.containerName {
       autoStart = true;
       specialArgs = {
         inherit system_version system_features;
