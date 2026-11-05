@@ -26,23 +26,32 @@ let
     })
     state;
 
+  containerIds = state: builtins.filter
+    (id: state.${id}.enable && state.${id}.path != "/")
+    (builtins.attrNames state);
+
   runnerIds = state: builtins.filter
     (id: state.${id}.enable && state.${id}.path != "/" && state.${id}.mode == "overlay")
     (builtins.attrNames state);
 
-  pythonRunners = state: lib.genAttrs (runnerIds state) (id:
+  pythonContainers = state: lib.genAttrs (containerIds state) (id:
     let declaration = state.${id}; in
     {
-      inherit (declaration) parent path hostBackup containerName;
+      inherit (declaration) parent mode path hostBackup containerName;
       lowerRoot = "/run/nixtache-runner-lower/${id}";
       socket = "unix://${declaration.path}/nix/var/nix/daemon-socket/socket";
     });
+
+  pythonRunners = state:
+    let containers = pythonContainers state; in
+    lib.genAttrs (runnerIds state) (id: containers.${id});
 
   mkAppliance =
     { version
     , state
     , policy ? "reconcile"
     , brokenBoot ? false
+    , bootTries ? 2
     , lowerDependencies ? [ ]
     }:
     otaLib.mkAppliance {
@@ -83,7 +92,7 @@ let
               trusted-public-keys = lib.mkForce [ cachePub ];
             };
             system.extraDependencies = lowerDependencies;
-            services.nixtache.ab-image.ukiTries = lib.mkIf brokenBoot 2;
+            services.nixtache.ab-image.ukiTries = lib.mkIf brokenBoot bootTries;
             services.nixtache.deploy-target = {
               criticalUnits = [ "nixtache-runner-topology-canary.service" ];
               healthCheckTimeout = lib.mkIf brokenBoot 20;
@@ -216,6 +225,13 @@ let
     def runtime_state(node):
         return RUNNERS[node]["hostBackup"] + "/nix/var/nix"
 
+    def assert_clone_store(node, path):
+        appliance.succeed("test -f " + q(RUNNERS[node]["hostBackup"] + "/nix/store/" + basename(path)))
+        db = RUNNERS[node]["hostBackup"] + "/nix/var/nix/db/db.sqlite"
+        sql = "SELECT COUNT(*) FROM ValidPaths WHERE path = '" + path + "';"
+        count = appliance.succeed("sqlite3 " + q(db) + " " + q(sql)).strip()
+        assert count == "1", f"missing additive clone record for {path} in {db}: {count}"
+
     def assert_runtime_upper(node, path, expected=True):
         candidate = runtime_upper(node) + "/" + basename(path)
         if expected:
@@ -337,14 +353,27 @@ let
         for node, settings in RUNNERS.items():
             unit = "container@" + settings["containerName"] + ".service"
             appliance.wait_until_succeeds("systemctl is-active --quiet " + unit, timeout=600)
-            appliance.wait_until_succeeds(
-              "nixos-container run " + q(settings["containerName"]) +
-              " -- systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=600
-            )
+            if settings["mode"] == "clone":
+                appliance.wait_until_succeeds(
+                  "nixos-container run " + q(settings["containerName"]) +
+                  " -- systemctl is-active --quiet nix-daemon-storage.service", timeout=600
+                )
+                cfail(node, "systemctl is-active --quiet nix-daemon-overlay-mount.service")
+            else:
+                appliance.wait_until_succeeds(
+                  "nixos-container run " + q(settings["containerName"]) +
+                  " -- systemctl is-active --quiet nix-daemon-overlay-mount.service", timeout=600
+                )
             appliance.wait_until_succeeds(
               "nixos-container run " + q(settings["containerName"]) +
               " -- systemctl is-active --quiet nix-daemon-custom.service", timeout=600
             )
+            if settings["mode"] == "clone":
+                assert node not in EXPECTED_GRAPH["consumerNodeByLogical"]
+                for physical_id in (node, node + "-lower", node + "-runtime"):
+                    appliance.fail("test -e " + q(selected + "/nodes/" + physical_id) + " || test -L " + q(selected + "/nodes/" + physical_id))
+                appliance.fail("test -e " + q(selected + "/layers/" + node) + " || test -L " + q(selected + "/layers/" + node))
+                continue
             required = appliance.succeed("systemctl show " + unit + " -p Requires --value")
             assert "nixtache-overlay-ready.target" in required.split()
             options = crun(node, "findmnt -n -o OPTIONS " + q(settings["path"] + "/nix/store"))
@@ -353,7 +382,7 @@ let
             expected_upper = selected + "/nodes/" + EXPECTED_GRAPH["consumerNodeByLogical"][node] + "/upper"
             assert upper == expected_upper, f"{node} upper {upper} does not select {expected_upper}"
             appliance.succeed("test -f " + q(settings["lowerRoot"] + "/nix/var/nix/db/db.sqlite"))
-        print("OK: production containers, daemon lowers and one atomic readiness boundary are active")
+        print("OK: production containers, daemon storage and one atomic readiness boundary are active")
 
     def stage(version):
         deployer.succeed(
@@ -385,5 +414,5 @@ let
 in
 {
   inherit lib pkgs otaLib oracle cachePub mkAppliance deployerNode;
-  inherit markerPackages consumerPackages packagePaths pythonRunners pythonHelpers;
+  inherit markerPackages consumerPackages packagePaths pythonContainers pythonRunners pythonHelpers;
 }

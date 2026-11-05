@@ -50,7 +50,17 @@ let
       id = "removeRoot";
     }
   ];
-  targetState = lib.foldl' oracle.applyOperation sourceState operations;
+  operationState = lib.foldl' oracle.applyOperation sourceState operations;
+  cloneState = oracle.applyOperation operationState {
+    type = "mode";
+    id = "stable";
+    mode = "clone";
+  };
+  targetState = oracle.applyOperation cloneState {
+    type = "mode";
+    id = "stable";
+    mode = "overlay";
+  };
   sourceDirect = oracle.derive { state = sourceState; };
   sourceExpected = oracle.transition {
     inherit sourceState;
@@ -58,9 +68,15 @@ let
     previousPhysical = sourceDirect.physical.nodes;
     inherit policy;
   };
-  expected = oracle.transition {
-    inherit sourceState targetState policy;
+  cloneExpected = oracle.transition {
+    inherit sourceState policy;
+    targetState = cloneState;
     previousPhysical = sourceDirect.physical.nodes;
+  };
+  replacementExpected = oracle.transition {
+    sourceState = cloneState;
+    inherit targetState policy;
+    previousPhysical = cloneExpected.physical.nodes;
   };
   sourceIds = builtins.attrNames sourceState;
   consumerBundle = fixture.consumerPackages "runner-operation" ([ "host" ] ++ sourceIds);
@@ -72,12 +88,20 @@ let
   };
   v2 = fixture.mkAppliance {
     version = "2";
-    state = targetState;
+    state = cloneState;
     inherit policy;
     brokenBoot = true;
   };
+  v3 = fixture.mkAppliance {
+    version = "3";
+    state = targetState;
+    inherit policy;
+    brokenBoot = true;
+    bootTries = 1;
+  };
   v1Image = "${v1.config.system.build.image}/abtest_1.raw";
   v2Package = v2.config.system.build.sysupdate-package;
+  v3Package = v3.config.system.build.sysupdate-package;
 in
 assert lib.assertMsg (builtins.elem policy [ "reconcile" "wipe" ])
   "runner topology operation policy must be reconcile or wipe";
@@ -85,7 +109,7 @@ pkgs.testers.runNixOSTest {
   name = "runner-topology-operations-${policy}";
   globalTimeout = 10800;
 
-  nodes.deployer = fixture.deployerNode ([ v2Package ] ++ consumerBundle.allPackages);
+  nodes.deployer = fixture.deployerNode ([ v2Package v3Package ] ++ consumerBundle.allPackages);
 
   testScript = ''
     import json
@@ -93,14 +117,16 @@ pkgs.testers.runNixOSTest {
 
     POLICY = ${builtins.toJSON policy}
     SOURCE_RUNNERS = ${builtins.toJSON (fixture.pythonRunners sourceState)}
+    CLONE_RUNNERS = ${builtins.toJSON (fixture.pythonContainers cloneState)}
     TARGET_RUNNERS = ${builtins.toJSON (fixture.pythonRunners targetState)}
     RUNNERS = SOURCE_RUNNERS
     SOURCE_GRAPH = ${builtins.toJSON (oracle.projection sourceExpected)}
-    TARGET_GRAPH = ${builtins.toJSON (oracle.projection expected)}
+    CLONE_GRAPH = ${builtins.toJSON (oracle.projection cloneExpected)}
+    TARGET_GRAPH = ${builtins.toJSON (oracle.projection replacementExpected)}
     EXPECTED_GRAPH = SOURCE_GRAPH
     CONSUMERS = ${builtins.toJSON consumerBundle.consumerPaths}
     DEPENDENCIES = ${builtins.toJSON consumerBundle.dependencyPaths}
-    SYSUPDATE_PACKAGES = {"2": ${builtins.toJSON v2Package.outPath}}
+    SYSUPDATE_PACKAGES = {"2": ${builtins.toJSON v2Package.outPath}, "3": ${builtins.toJSON v3Package.outPath}}
 
     ${fixture.pythonHelpers}
 
@@ -144,6 +170,42 @@ pkgs.testers.runNixOSTest {
         )
         appliance.fail("systemctl is-active --quiet boot-complete.target")
 
+    def assert_operation_runtime():
+        if POLICY == "reconcile":
+            for node in RUNNERS:
+                if RUNNERS[node]["mode"] == "clone":
+                    continue
+                visible = set(ancestors(node))
+                if node not in ("reset", "addSibling", "addDeep", "stable"):
+                    visible.add(node)
+                for owner, path in CONSUMERS.items():
+                    if owner in visible:
+                        path_info(node, path)
+                        assert_merged(node, path)
+                        assert_merged(node, DEPENDENCIES[owner])
+                    else:
+                        path_absent(node, path)
+                for owner in visible - {node}:
+                    assert_runtime_upper(node, CONSUMERS[owner], expected=False)
+            print("OK: target runtime resolves retained consumers through the new parent lineage with no sibling leakage")
+        else:
+            for node in RUNNERS:
+                if RUNNERS[node]["mode"] == "clone":
+                    continue
+                for path in CONSUMERS.values():
+                    path_absent(node, path)
+                    assert_merged(node, path, expected=False)
+            print("OK: wiped target runtime contains no source consumer or upper-owned record")
+
+    def seed_clone_store():
+        realize("stable", CONSUMERS["stable"])
+        assert_merged("stable", CONSUMERS["stable"])
+        assert_merged("stable", DEPENDENCIES["stable"])
+        path_info("stable", CONSUMERS["stable"])
+        path_info("stable", DEPENDENCIES["stable"])
+        assert_clone_store("stable", CONSUMERS["stable"])
+        assert_clone_store("stable", DEPENDENCIES["stable"])
+
     deployer.start()
     deployer.wait_for_unit("nix-serve.service")
     deployer.wait_for_unit("nginx.service")
@@ -181,7 +243,7 @@ pkgs.testers.runNixOSTest {
         appliance.succeed("cp /tmp/runner-operation-descriptor.json " + q(descriptor))
         print("OK: interrupted descriptor availability blocked publication and preserved active state")
 
-    EXPECTED_GRAPH = TARGET_GRAPH
+    EXPECTED_GRAPH = CLONE_GRAPH
     v2_target = prepare("2", v2_slot)
     assert selected_generation() == v1_selected
     assert tree_checksum(v1_selected) == v1_checksum, "successful retry changed the active source graph"
@@ -194,17 +256,13 @@ pkgs.testers.runNixOSTest {
     assert plan["operations"]["reset"] == "storage-reset"
     assert plan["operations"]["removeChild"] == "remove"
     assert plan["operations"]["removeRoot"] == "remove"
-    assert plan["operations"]["stable"] == "unchanged"
-    print("OK: retry published the exact add/reparent/remove/storage operation oracle")
+    assert plan["operations"]["stable"] == "remove"
+    print("OK: retry published the exact add/reparent/remove/storage/mode operation oracle")
 
     if POLICY == "reconcile":
         for logical_id in ("host", "a", "b", "move", "moveLeaf"):
             frozen_id = EXPECTED_GRAPH["frozenLowerByLogical"][logical_id]
             assert_consumer(v2_target + "/nodes/" + frozen_id, logical_id, CONSUMERS[logical_id])
-        stable_dir = consumer_dir(v2_target, "stable")
-        assert_consumer(stable_dir, "stable", CONSUMERS["stable"])
-        appliance.succeed("test -f " + q(upper_marker(stable_dir, DEPENDENCIES["stable"])))
-        assert_db_record(stable_dir, DEPENDENCIES["stable"])
         for logical_id in ("reset", "addSibling", "addDeep"):
             assert_empty_node(consumer_dir(v2_target, logical_id))
             if logical_id == "reset":
@@ -223,12 +281,15 @@ pkgs.testers.runNixOSTest {
             assert_empty_node(node_dir(v2_target, physical_node["id"]))
         print("OK: wipe produced the same physical graph with completely clean target state")
 
+    for physical_id in ("stable", "stable-lower", "stable-runtime"):
+        appliance.fail("test -e " + q(v2_target + "/nodes/" + physical_id) + " || test -L " + q(v2_target + "/nodes/" + physical_id))
+    appliance.fail("test -e " + q(v2_target + "/layers/stable") + " || test -L " + q(v2_target + "/layers/stable"))
     for logical_id in ("removeRoot", "removeChild"):
         appliance.fail("test -e " + q(v2_target + "/layers/" + logical_id) + " || test -L " + q(v2_target + "/layers/" + logical_id))
     for physical_id in ("removeRoot", "removeRoot-lower", "removeRoot-runtime", "removeChild"):
         appliance.fail("test -e " + q(v2_target + "/nodes/" + physical_id) + " || test -L " + q(v2_target + "/nodes/" + physical_id))
 
-    RUNNERS = TARGET_RUNNERS
+    RUNNERS = CLONE_RUNNERS
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=3600)
     assert appliance.succeed("cat /etc/image-version").strip() == "2"
@@ -236,38 +297,58 @@ pkgs.testers.runNixOSTest {
     assert selected_generation() == v2_target
     assert_unblessed()
 
-    if POLICY == "reconcile":
-        for node in RUNNERS:
-            visible = set(ancestors(node))
-            if node not in ("reset", "addSibling", "addDeep"):
-                visible.add(node)
-            for owner, path in CONSUMERS.items():
-                if owner in visible:
-                    path_info(node, path)
-                    assert_merged(node, path)
-                    assert_merged(node, DEPENDENCIES[owner])
-                else:
-                    path_absent(node, path)
-            for owner in visible - {node}:
-                assert_runtime_upper(node, CONSUMERS[owner], expected=False)
-        print("OK: target runtime resolves retained consumers through the new parent lineage with no sibling leakage")
-    else:
-        for node in RUNNERS:
-            for path in CONSUMERS.values():
-                path_absent(node, path)
-                assert_merged(node, path, expected=False)
-        print("OK: wiped target runtime contains no source consumer or upper-owned record")
+    assert_operation_runtime()
+    seed_clone_store()
 
     v2_proof = build_proof("addDeep", "v2-only-" + POLICY)
     assert crun("addDeep", "cat " + q(merged_path("addDeep", v2_proof))).strip() == "v2-only-" + POLICY
+    clone_proof = build_proof("stable", "stable-clone-" + POLICY)
+    assert crun("stable", "cat " + q(merged_path("stable", clone_proof))).strip() == "stable-clone-" + POLICY
+    assert_clone_store("stable", clone_proof)
+    print("OK: clone mode has no stable metaslot and writes to its independent additive store")
 
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=3600)
     assert appliance.succeed("cat /etc/image-version").strip() == "2"
     wait_graph(blessed=False)
     path_info("addDeep", v2_proof)
+    path_info("stable", clone_proof)
+    assert_clone_store("stable", CONSUMERS["stable"])
+    assert_clone_store("stable", clone_proof)
     assert_unblessed()
-    print("OK: v2 graph and v2-only write persisted across its second unblessed boot")
+    print("OK: v2 graph and both overlay/clone writes persisted across its second unblessed boot")
+
+    v2_checksum = tree_checksum(v2_target)
+    v3_slot = stage("3")
+    EXPECTED_GRAPH = TARGET_GRAPH
+    v3_target = prepare("3", v3_slot)
+    assert selected_generation() == v2_target
+    assert tree_checksum(v2_target) == v2_checksum, "replacement preparation changed the active clone graph"
+    plan = assert_plan(v3_target)
+    assert plan["operations"]["stable"] == "add"
+    stable_dir = consumer_dir(v3_target, "stable")
+    assert_empty_node(stable_dir)
+    assert_consumer_absent(stable_dir, "stable", CONSUMERS["stable"])
+    assert_clone_store("stable", CONSUMERS["stable"])
+    assert_clone_store("stable", DEPENDENCIES["stable"])
+    assert_clone_store("stable", clone_proof)
+    print("OK: clone-to-overlay published an empty replacement node and preserved the additive clone store")
+
+    RUNNERS = TARGET_RUNNERS
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
+    assert appliance.succeed("cat /etc/image-version").strip() == "3"
+    wait_graph(blessed=False)
+    assert selected_generation() == v3_target
+    assert_unblessed()
+    assert_operation_runtime()
+    path_absent("stable", CONSUMERS["stable"])
+    path_absent("stable", clone_proof)
+    assert_runtime_upper("stable", CONSUMERS["stable"], expected=False)
+    assert_runtime_upper("stable", clone_proof, expected=False)
+    assert_clone_store("stable", CONSUMERS["stable"])
+    assert_clone_store("stable", clone_proof)
+    print("OK: replacement overlay is clean at runtime while the additive clone remains intact")
 
     RUNNERS = SOURCE_RUNNERS
     EXPECTED_GRAPH = SOURCE_GRAPH
@@ -280,6 +361,9 @@ pkgs.testers.runNixOSTest {
     assert_source_working()
     for node in RUNNERS:
         path_absent(node, v2_proof)
+        path_absent(node, clone_proof)
+    assert_clone_store("stable", CONSUMERS["stable"])
+    assert_clone_store("stable", clone_proof)
     appliance.succeed(
       "test -f " + q(v2_target + "/nodes/addDeep/upper/" + basename(v2_proof))
     )
@@ -288,6 +372,6 @@ pkgs.testers.runNixOSTest {
     )
     for marker in ("nixtache-overlay: repairing ", "nixtache-overlay: prepared ", "nixtache-overlay: checking "):
         assert marker not in log, f"rollback ran reverse preparation: {log}"
-    print("PASS: ${policy} operation OTA converged after retry and rollback restored the exact previous graph")
+    print("PASS: ${policy} operation and clone-mode OTA converged after retry and rollback restored the exact previous graph")
   '';
 }

@@ -215,6 +215,7 @@ let
             };
             step = {
               name = "${trace.name}: ${builtins.elemAt operationLabels index}";
+              inherit state topology actual expected;
               checks = {
                 validDeclarations = builtins.all (assertion: assertion.assertion) host.config.assertions;
                 declarationGraphMatchesOracle = declarationProjection topology
@@ -235,20 +236,57 @@ let
             };
           in
           [ step ] ++ walk (index + 1) actual expected;
-      steps = walk 0 null null;
-      checkpointTopology = topologyOf (builtins.elemAt hosts trace.checkpoint);
+      history = walk 0 null null;
+      steps = map (step: { inherit (step) name checks; }) history;
+      finalStep = lib.last history;
+      reverseAt = index:
+        let
+          targetStep = builtins.elemAt history index;
+        in
+        {
+          inherit targetStep;
+          actual = finalStep.actual.transition {
+            targetLogical = targetStep.topology.nodes;
+            policy = "reconcile";
+          };
+          expected = oracle.transition {
+            sourceState = finalStep.state;
+            targetState = targetStep.state;
+            previousPhysical = finalStep.expected.physical.nodes;
+            policy = "reconcile";
+          };
+        };
+      initialReverse = reverseAt 0;
+      checkpointReverse = reverseAt trace.checkpoint;
+      reverseMatchesOracle = reverse: oracle.projection reverse.actual == oracle.projection reverse.expected;
+      reverseMatchesHistory = reverse:
+        { inherit (reverse.actual) nodes order; }
+        == { inherit (reverse.targetStep.topology.descriptor) nodes order; };
+      reversePreservesUntouched = reverse: reverse.actual.lineageByPhysical.untouched
+        == finalStep.actual.lineageByPhysical.untouched;
       replayedCheckpoint = topologyOf (mkHost (builtins.elemAt models trace.checkpoint));
       replayedInitial = topologyOf (mkHost trace.initial);
     in
     {
       inherit steps;
-      rollback = {
-        name = "${trace.name}: rollback checkpoints retain graph identity";
+      replay = {
+        name = "${trace.name}: declaration replay is deterministic";
         checks = {
-          initialGraphIdentical = declarationProjection replayedInitial
-            == declarationProjection (topologyOf (builtins.head hosts));
-          intermediateGraphIdentical = declarationProjection replayedCheckpoint
-            == declarationProjection checkpointTopology;
+          initialDeclarationReplayDeterministic = declarationProjection replayedInitial
+            == declarationProjection (builtins.head history).actual;
+          intermediateDeclarationReplayDeterministic = declarationProjection replayedCheckpoint
+            == declarationProjection (builtins.elemAt history trace.checkpoint).topology;
+        };
+      };
+      rollback = {
+        name = "${trace.name}: reverse transitions match the oracle and retained logical history";
+        checks = {
+          initialReverseMatchesOracle = reverseMatchesOracle initialReverse;
+          initialReverseLogicalGraphMatchesHistory = reverseMatchesHistory initialReverse;
+          initialReversePreservesUntouchedLineage = reversePreservesUntouched initialReverse;
+          intermediateReverseMatchesOracle = reverseMatchesOracle checkpointReverse;
+          intermediateReverseLogicalGraphMatchesHistory = reverseMatchesHistory checkpointReverse;
+          intermediateReversePreservesUntouchedLineage = reversePreservesUntouched checkpointReverse;
         };
       };
     };
@@ -291,6 +329,7 @@ let
   };
 
   scenarios = lib.concatMap (trace: trace.steps) evaluatedTraces
+    ++ map (trace: trace.replay) evaluatedTraces
     ++ map (trace: trace.rollback) evaluatedTraces
     ++ [ invalidScenario ];
 
