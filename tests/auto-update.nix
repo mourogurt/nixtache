@@ -237,6 +237,8 @@ let
         abPath = lib.hasInfix "systemctl start systemd-sysupdate-update.service" script;
         noBuild = !(lib.hasInfix "nix build" script);
         journalDetect = lib.hasInfix "journalctl -u systemd-sysupdate" script;
+        journalGrepDrainsInput = lib.hasInfix ''| grep "Successfully installed" >/dev/null'' script
+          && !(lib.hasInfix ''| grep -q "Successfully installed"'' script);
         pollsToCompletion = before
           "while systemctl is-active --quiet systemd-sysupdate-update.service; do sleep 2; done"
           "journalctl -u systemd-sysupdate-update.service"
