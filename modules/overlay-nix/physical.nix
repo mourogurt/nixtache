@@ -1,6 +1,14 @@
 { lib }:
 
 rec {
+  duplicatePhysicalIds = physicalNodes:
+    let
+      counts = lib.foldl' (result: node: result // {
+        ${node.id} = (result.${node.id} or 0) + 1;
+      }) { } physicalNodes;
+    in
+    lib.attrNames (lib.filterAttrs (_: count: count > 1) counts);
+
   derive =
     { logicalNodes
     , previousPhysical ? [ ]
@@ -59,7 +67,12 @@ rec {
           (runtimeNode node node.id (physicalParent node))
         ];
       physicalNodes = builtins.concatLists (map nodesFor sortedLogical);
-      physicalById = lib.listToAttrs (map (node: lib.nameValuePair node.id node) physicalNodes);
+      duplicateIds = duplicatePhysicalIds physicalNodes;
+      physicalById =
+        if duplicateIds != [ ] then
+          throw "derived physical node identities must be unique; collisions: ${lib.concatStringsSep ", " duplicateIds}"
+        else
+          lib.listToAttrs (map (node: lib.nameValuePair node.id node) physicalNodes);
       consumerNodeByLogical = lib.listToAttrs (map (node:
         lib.nameValuePair node.id (if isSplit node.id then "${node.id}-runtime" else node.id)
       ) sortedLogical);

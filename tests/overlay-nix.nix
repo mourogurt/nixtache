@@ -457,6 +457,83 @@ let
     ${pkgs.python3}/bin/python3 ${./overlay-nix-transition-test.py}
     touch "$out"
   '';
+  physicalIdDescriptor = name: layers: pkgs.writeText "overlay-${name}-physical-id.json" (builtins.toJSON {
+    schema = "nixtache.overlay-topology/v1";
+    imageId = "nixtache";
+    imageVersion = "1";
+    lowerDbSha256 = descriptorLowerSha;
+    logicalTopology = logicalDescriptorFor ([
+      (builtins.head ((cfgOf hostDefault)._topology.nodes))
+    ] ++ map (node: { lowerRoot = ""; } // node) layers);
+  });
+  lowerCollisionDescriptor = physicalIdDescriptor "lower-collision" [
+    (layer "b" null)
+    (layer "c" "b")
+    (layer "b-lower" null)
+  ];
+  runtimeCollisionDescriptor = physicalIdDescriptor "runtime-collision" [
+    (layer "b" null)
+    (layer "c" "b")
+    (layer "b-runtime" null)
+  ];
+  physicalIdPrefixDescriptor = physicalIdDescriptor "prefix-only" [
+    (layer "b" null)
+    (layer "c" "b")
+    (layer "b-lower-extra" null)
+    (layer "b-runtime-extra" null)
+  ];
+  physicalIdUnsplitDescriptor = physicalIdDescriptor "unsplit" [
+    (layer "b" null)
+    (layer "b-lower" null)
+    (layer "b-runtime" null)
+  ];
+  plannerPhysicalIdCheck = pkgs.runCommand "overlay-physical-id-test" {
+    inherit planner descriptorLowerSha lowerCollisionDescriptor runtimeCollisionDescriptor;
+    inherit physicalIdPrefixDescriptor physicalIdUnsplitDescriptor;
+  } ''
+    set -euo pipefail
+    run_plan() {
+      local descriptor=$1
+      local directory=$2
+      mkdir -p "$directory"
+      "$planner" plan \
+        --target-descriptor "$descriptor" \
+        --image-id nixtache \
+        --image-version 1 \
+        --lower-sha256 "$descriptorLowerSha" \
+        --policy reconcile \
+        --initial \
+        --output-json "$directory/plan.json" \
+        --output-rows "$directory/plan.rows" \
+        --output-metadata "$directory/plan.metadata"
+    }
+    expect_collision() {
+      local name=$1
+      local physical_id=$2
+      local descriptor=$3
+      if run_plan "$descriptor" "$name" >"$name.log" 2>&1; then
+        echo "physical ID collision unexpectedly passed: $name" >&2
+        exit 1
+      fi
+      if ! grep -F "derived physical node identities must be unique" "$name.log" \
+        || ! grep -F "$physical_id" "$name.log"; then
+        cat "$name.log" >&2
+        exit 1
+      fi
+      test ! -e "$name/plan.json"
+    }
+    expect_collision lower b-lower "$lowerCollisionDescriptor"
+    expect_collision runtime b-runtime "$runtimeCollisionDescriptor"
+    run_plan "$physicalIdPrefixDescriptor" prefix-only
+    run_plan "$physicalIdUnsplitDescriptor" unsplit
+    test -s prefix-only/plan.json
+    test -s unsplit/plan.json
+    touch "$out"
+  '';
+  scenarioPhysicalIdPlannerValidation = {
+    name = "planner rejects physical ID collisions before writing plans and accepts noncolliding names";
+    checks.rejected = lib.isDerivation plannerPhysicalIdCheck;
+  };
   scenarioTransitionOperations = {
     name = "source-to-target transitions preserve eligible branches and classify topology operations";
     checks = {
@@ -619,6 +696,37 @@ let
     name = "duplicate overlay node identities are rejected";
     checks.rejected = !(tryLayers [ (layer "a" null) (layer "a" null) ]).success;
   };
+  scenarioPhysicalIdCollisionsRejected = {
+    name = "logical IDs colliding with frozen lowers or runtime continuations are rejected";
+    checks = {
+      frozenLower = !(tryLayers [
+        (layer "b" null)
+        (layer "c" "b")
+        (layer "b-lower" null)
+      ]).success;
+      runtimeContinuation = !(tryLayers [
+        (layer "b" null)
+        (layer "c" "b")
+        (layer "b-runtime" null)
+      ]).success;
+    };
+  };
+  scenarioPhysicalIdBoundariesAllowed = {
+    name = "physical ID validation preserves prefix-only and unsplit logical names";
+    checks = {
+      prefixOnly = (tryLayers [
+        (layer "b" null)
+        (layer "c" "b")
+        (layer "b-lower-extra" null)
+        (layer "b-runtime-extra" null)
+      ]).success;
+      unsplitExactNames = (tryLayers [
+        (layer "b" null)
+        (layer "b-lower" null)
+        (layer "b-runtime" null)
+      ]).success;
+    };
+  };
   scenarioMissingParentRejected = {
     name = "an overlay with a missing parent is rejected";
     checks.rejected = !(tryLayers [ (layer "a" "missing") ]).success;
@@ -720,10 +828,13 @@ let
     scenarioGenerationRebase
     scenarioRemovalWithoutCollapse
     scenarioReparentLineage
+    scenarioPhysicalIdPlannerValidation
     scenarioTransitionOperations
     scenarioRuntimeFrozenLowers
     scenarioRetainedRuntimePlan
     scenarioDuplicateRejected
+    scenarioPhysicalIdCollisionsRejected
+    scenarioPhysicalIdBoundariesAllowed
     scenarioMissingParentRejected
     scenarioCycleRejected
     scenarioPathTraversalIdsRejected
@@ -748,7 +859,7 @@ in
 pkgs.runCommand "overlay-nix-module-test"
   {
     inherit report failMsg;
-    deps = [ descriptorValidationCheck plannerTransitionCheck ];
+    deps = [ descriptorValidationCheck plannerTransitionCheck plannerPhysicalIdCheck ];
     passAsFile = [ "report" "failMsg" ];
   }
   ''

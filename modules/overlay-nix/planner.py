@@ -211,6 +211,15 @@ def derive(logical_nodes, previous_physical=None):
             physical_nodes.append(runtime_node(node, f"{node['id']}-runtime", f"{node['id']}-lower"))
         else:
             physical_nodes.append(runtime_node(node, node["id"], physical_parent(node)))
+    seen_physical_ids = set()
+    duplicate_physical_ids = set()
+    for node in physical_nodes:
+        if node["id"] in seen_physical_ids:
+            duplicate_physical_ids.add(node["id"])
+        seen_physical_ids.add(node["id"])
+    require(not duplicate_physical_ids,
+            "derived physical node identities must be unique; collisions: "
+            + ", ".join(sorted(map(str, duplicate_physical_ids))))
     physical_by_id = {node["id"]: node for node in physical_nodes}
     consumer = {
         node["id"]: f"{node['id']}-runtime" if is_split(node["id"]) else node["id"]
