@@ -22,9 +22,13 @@
           (_: prev: {
             tzdata = prev.tzdata.overrideAttrs (_: { doCheck = false; });
             gcc-unwrapped = prev.gcc-unwrapped.overrideAttrs (old: {
-              preFixup = (old.preFixup or "") + ''
+              postInstall = ''
                 eval "$(declare -f moveToOutput | sed 's/mv /cp -a /g')"
-              '';
+              '' + old.postInstall;
+              preFixupLibGccPhase = builtins.replaceStrings
+                [ "mv    $lib/lib/libgcc_s.so" ]
+                [ "cp -a $lib/lib/libgcc_s.so" ]
+                old.preFixupLibGccPhase;
             });
             haskellPackages = prev.haskellPackages.override (old: {
               overrides = lib.composeExtensions (old.overrides or (_: _: { })) (_: hsPrev: {
