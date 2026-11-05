@@ -125,7 +125,9 @@ let
   auScript = cfg: (auSvc cfg).script or "";
   auTmr = cfg: cfg.systemd.timers."nixtache-auto-update" or { };
   auRebootScript = cfg: cfg.systemd.services.nixtache-auto-update-reboot.script or "";
-  posOf = pat: s: lib.stringLength (builtins.head (lib.split pat s));
+  posOf = pat: s: lib.stringLength (builtins.head (lib.splitString pat s));
+  before = first: second: s:
+    lib.hasInfix first s && lib.hasInfix second s && posOf first s < posOf second s;
 
   # =========================================================================
   # sec. 1 wiring (AU-1...AU-14)
@@ -232,9 +234,22 @@ let
     (cfg:
       let script = auScript cfg; in
       {
-        abPath = lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" script;
+        abPath = lib.hasInfix "systemctl start systemd-sysupdate-update.service" script;
         noBuild = !(lib.hasInfix "nix build" script);
         journalDetect = lib.hasInfix "journalctl -u systemd-sysupdate" script;
+        pollsToCompletion = before
+          "while systemctl is-active --quiet systemd-sysupdate-update.service; do sleep 2; done"
+          "journalctl -u systemd-sysupdate-update.service"
+          script;
+        pollsBeforeFailureCheck = before
+          "while systemctl is-active --quiet systemd-sysupdate-update.service; do sleep 2; done"
+          "systemctl is-failed --quiet systemd-sysupdate-update.service"
+          script;
+        failureCheckBeforeJournal = before
+          "systemctl is-failed --quiet systemd-sysupdate-update.service"
+          "journalctl -u systemd-sysupdate-update.service"
+          script;
+        noStartWait = !(lib.hasInfix "systemctl start --wait" script);
       });
 
   scenarioAu9Systemd261 = contract "AU-9/systemd 261: A/B poll waits on the pre-rename sysupdate unit"
@@ -247,8 +262,12 @@ let
       }
     ])
     (cfg: {
-      legacyUnit = lib.hasInfix "systemctl start --wait systemd-sysupdate.service" (auScript cfg);
-      noRenamedUnit = !(lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" (auScript cfg));
+      legacyUnit = lib.hasInfix "systemctl start systemd-sysupdate.service" (auScript cfg);
+      noRenamedUnit = !(lib.hasInfix "systemctl start systemd-sysupdate-update.service" (auScript cfg));
+      legacyPollsToCompletion = before
+        "while systemctl is-active --quiet systemd-sysupdate.service; do sleep 2; done"
+        "journalctl -u systemd-sysupdate-update.service"
+        (auScript cfg);
     });
 
   scenarioAu10 = contract "AU-10: method auto → ab-image (via ab-image.enable, second indicator)"
@@ -345,10 +364,42 @@ let
       {
         recordsSourceFingerprint = lib.hasInfix "/var/lib/nixtache/reboot-pending-overlay.tmp" script;
         hashesWholeGeneration = lib.hasInfix ''nix --extra-experimental-features nix-command hash path "$generation"'' script;
+        invalidatesOlderMarkersBeforePreparation = before
+          ''rm -f "/var/lib/nixtache/reboot-pending" "/var/lib/nixtache/reboot-pending-overlay" "/var/lib/nixtache/reboot-pending-overlay.tmp"''
+          "systemctl start nixtache-overlay-prepare.service"
+          script;
+        snapshotsBeforePreparation = before
+          ''fingerprint_source > "/var/lib/nixtache/reboot-pending-overlay.tmp"''
+          "systemctl start nixtache-overlay-prepare.service"
+          script;
+        publishesSnapshotAfterPreparation = before
+          "systemctl start nixtache-overlay-prepare.service"
+          ''mv "/var/lib/nixtache/reboot-pending-overlay.tmp" "/var/lib/nixtache/reboot-pending-overlay"''
+          script;
+        rearmsAfterSnapshotPublication = before
+          ''mv "/var/lib/nixtache/reboot-pending-overlay.tmp" "/var/lib/nixtache/reboot-pending-overlay"''
+          ''touch "/var/lib/nixtache/reboot-pending"''
+          script;
         comparesSourceFingerprint = lib.hasInfix ''if [ "$recorded" != "$current" ]; then'' rebootScript;
-        refreshBeforeReboot =
-          (posOf "systemctl restart nixtache-overlay-prepare.service" rebootScript)
-            < (posOf "systemctl reboot" rebootScript);
+        refreshSnapshotsBeforePreparation = before
+          ''> "/var/lib/nixtache/reboot-pending-overlay.tmp"''
+          "systemctl restart nixtache-overlay-prepare.service"
+          rebootScript;
+        noPostRefreshFingerprint = !(lib.hasInfix "fingerprint_source >" rebootScript);
+        refreshChecksSourceAfterPreparation = before
+          "systemctl restart nixtache-overlay-prepare.service"
+          ''refreshed=$(fingerprint_source)''
+          rebootScript;
+        refreshPublishesVerifiedSnapshot = before
+          ''refreshed=$(fingerprint_source)''
+          ''mv "/var/lib/nixtache/reboot-pending-overlay.tmp" "/var/lib/nixtache/reboot-pending-overlay"''
+          rebootScript;
+        changedDuringRefreshStaysPending = lib.hasInfix ''if [ "$refreshed" != "$current" ]; then'' rebootScript
+          && lib.hasInfix "active upper changed during upper refresh — staying pending" rebootScript;
+        refreshBeforeReboot = before
+          "systemctl restart nixtache-overlay-prepare.service"
+          "systemctl reboot"
+          rebootScript;
         failureStaysPending = lib.hasInfix "upper refresh failed — staying pending" rebootScript;
       });
 
@@ -382,8 +433,8 @@ let
         # no-op branch altogether (a comment/echo-only mention is tolerated by
         # the spec but not distinguishable here).
         pollDerivedFalse = lib.hasInfix "ci-driven" script
-          && !(lib.hasInfix "systemctl start --wait" script);
-        explicitPollTrue = lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" scriptPoll;
+          && !(lib.hasInfix "systemctl start systemd-sysupdate" script);
+        explicitPollTrue = lib.hasInfix "systemctl start systemd-sysupdate-update.service" scriptPoll;
       });
 
   # =========================================================================
@@ -455,7 +506,7 @@ let
     (abMods { } ++ [ { systemd.sysupdate.transfers."10-nix-store".Transfer.Reboot = "yes"; } ])
     (cfg: {
       hostEvals = true;
-      abPathActive = lib.hasInfix "systemctl start --wait systemd-sysupdate-update.service" (auScript cfg);
+      abPathActive = lib.hasInfix "systemctl start systemd-sysupdate-update.service" (auScript cfg);
     });
 
   scenarioAu22 = assertContract "AU-22/A8: explicit method=ab-image with no ab indicators → eval refuses"
@@ -503,6 +554,11 @@ let
       })).systemd.services.nixtache-auto-update-reboot.script;
   normalWindowScript = windowRebootScript "auto-update-normal-window" "02:00" "05:00";
   wrappingWindowScript = windowRebootScript "auto-update-wrapping-window" "23:00" "02:00";
+  overlayWindowScript = pkgs.writeText "auto-update-overlay-window"
+    (evalCfg (overlayAbMods {
+      rebootPolicy = "window";
+      rebootWindow = { start = "02:00"; end = "05:00"; };
+    })).systemd.services.nixtache-auto-update-reboot.script;
 
   rebootWindowBehaviorCheck = pkgs.runCommand "auto-update-window-behavior" {
     inherit normalWindowScript wrappingWindowScript;
@@ -573,6 +629,96 @@ let
     run_case "$TMPDIR/wrapping-window" 12:00 wait wrapping-daytime
   '';
 
+  fingerprintBehaviorCheck = pkgs.runCommand "auto-update-fingerprint-behavior" {
+    inherit overlayWindowScript;
+  } ''
+    : > "$out"
+    mkdir -p "$TMPDIR/bin" "$TMPDIR/state" "$TMPDIR/runtime" "$TMPDIR/boot"
+    cat > "$TMPDIR/bin/date" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' "$FAKE_NOW"
+    STUB
+    cat > "$TMPDIR/bin/findmnt" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' tmpfs
+    STUB
+    cat > "$TMPDIR/bin/systemctl" <<'STUB'
+    #!/bin/sh
+    if [ "$1" = cat ]; then exit 0; fi
+    printf '%s\n' "$*" >> "$REBOOT_LOG"
+    if [ "$1" = restart ] && [ -n "$REWRITE_ON_REFRESH" ]; then
+      printf '%s\n' "$REWRITE_ON_REFRESH" > "$LOWER_DB"
+    fi
+    STUB
+    chmod +x "$TMPDIR/bin/date" "$TMPDIR/bin/findmnt" "$TMPDIR/bin/systemctl"
+    sed -e "s|/var/lib/nixtache|$TMPDIR/state|g" \
+      -e "s|/run/nixtache-overlay|$TMPDIR/runtime|g" \
+      -e "s|/boot/EFI/nixtache|$TMPDIR/boot|g" \
+      -e "s|/etc/image-version|$TMPDIR/image-version|g" \
+      "$overlayWindowScript" > "$TMPDIR/overlay-window"
+    printf '1\n' > "$TMPDIR/runtime/selected-slot"
+    printf '2\n' > "$TMPDIR/image-version"
+    printf 'lower-db\n' > "$TMPDIR/boot/nixtache_2.lower-db"
+    export PATH="$TMPDIR/bin:${pkgs.coreutils}/bin:${pkgs.bash}/bin"
+    export REBOOT_LOG="$TMPDIR/reboots"
+    export LOWER_DB="$TMPDIR/boot/nixtache_2.lower-db"
+    export REWRITE_ON_REFRESH=
+    {
+      printf '1 ephemeral\n'
+      sha256sum "$LOWER_DB" | cut -d ' ' -f 1
+    } > "$TMPDIR/state/reboot-pending-overlay"
+    touch "$TMPDIR/state/reboot-pending"
+    FAKE_NOW=03:00 bash "$TMPDIR/overlay-window"
+    [ "$(< "$REBOOT_LOG")" = reboot ]
+    [ ! -e "$TMPDIR/state/reboot-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending-overlay" ]
+    printf 'ok  tmpfs fingerprint succeeds with coreutils only\n' >> "$out"
+
+    rm -f "$REBOOT_LOG"
+    touch "$TMPDIR/state/reboot-pending"
+    printf 'stale\n' > "$TMPDIR/state/reboot-pending-overlay"
+    cat > "$TMPDIR/bin/sha256sum" <<'STUB'
+    #!/bin/sh
+    exit 1
+    STUB
+    chmod +x "$TMPDIR/bin/sha256sum"
+    if FAKE_NOW=03:00 bash "$TMPDIR/overlay-window"; then
+      echo "FAIL: tmpfs hash failure was ignored" >&2
+      exit 1
+    fi
+    [ ! -e "$REBOOT_LOG" ]
+    [ -f "$TMPDIR/state/reboot-pending" ]
+    [ -f "$TMPDIR/state/reboot-pending-overlay" ]
+    printf 'ok  tmpfs hash failure stays pending without reboot\n' >> "$out"
+
+    rm -f "$TMPDIR/bin/sha256sum" "$REBOOT_LOG"
+    original_sha=$(sha256sum "$LOWER_DB" | cut -d ' ' -f 1)
+    printf 'stale\n' > "$TMPDIR/state/reboot-pending-overlay"
+    if REWRITE_ON_REFRESH=rewritten-lower-db FAKE_NOW=03:00 bash "$TMPDIR/overlay-window"; then
+      echo "FAIL: same-version source rewrite during refresh was ignored" >&2
+      exit 1
+    fi
+    rewritten_sha=$(sha256sum "$LOWER_DB" | cut -d ' ' -f 1)
+    [ "$rewritten_sha" != "$original_sha" ]
+    [ "$(< "$REBOOT_LOG")" = "restart nixtache-overlay-prepare.service" ]
+    [ -f "$TMPDIR/state/reboot-pending" ]
+    [ "$(< "$TMPDIR/state/reboot-pending-overlay")" = stale ]
+    [ ! -e "$TMPDIR/state/reboot-pending-overlay.tmp" ]
+    printf 'ok  same-version source rewrite during refresh stays pending without reboot\n' >> "$out"
+
+    rm -f "$REBOOT_LOG"
+    if ! REWRITE_ON_REFRESH= FAKE_NOW=03:00 bash "$TMPDIR/overlay-window"; then
+      echo "FAIL: stable source refresh did not complete" >&2
+      exit 1
+    fi
+    expected_log=$(printf 'restart nixtache-overlay-prepare.service\nreboot')
+    [ "$(< "$REBOOT_LOG")" = "$expected_log" ]
+    [ ! -e "$TMPDIR/state/reboot-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending-overlay" ]
+    [ ! -e "$TMPDIR/state/reboot-pending-overlay.tmp" ]
+    printf 'ok  stable source refresh publishes its pre-refresh snapshot and reboots\n' >> "$out"
+  '';
+
   scenarios = [
     scenarioAu1
     scenarioAu2
@@ -622,7 +768,7 @@ let
 in
 pkgs.runCommand "auto-update-test"
   {
-    inherit report failMsg rebootWindowBehaviorCheck;
+    inherit report failMsg rebootWindowBehaviorCheck fingerprintBehaviorCheck;
     passAsFile = [ "report" "failMsg" ];
   }
   ''
@@ -633,4 +779,6 @@ pkgs.runCommand "auto-update-test"
     printf '\n' >> "$out"
     cat "$rebootWindowBehaviorCheck"
     cat "$rebootWindowBehaviorCheck" >> "$out"
+    cat "$fingerprintBehaviorCheck"
+    cat "$fingerprintBehaviorCheck" >> "$out"
   ''
