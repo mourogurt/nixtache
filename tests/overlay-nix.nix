@@ -261,6 +261,28 @@ let
       echo "a writer that failed to stop was incorrectly resumed" >&2
       exit 1
     fi
+    : > "$events"
+    systemctl() {
+      local action=$1 unit=''${2:-}
+      printf '%s %s\n' "$action" "$unit" >> "$events"
+      if [ "$action" = start ] && [ "$unit" = nix-daemon.service ]; then return 1; fi
+      return 0
+    }
+    set +e
+    (
+      set -euo pipefail
+      stopped_units=nix-daemon.service
+      source ./resume.sh
+      trap 'resume_writers || true' EXIT
+      resume_writers
+    )
+    resume_status=$?
+    set -e
+    if [ "$resume_status" = 0 ]; then
+      echo "writer restart failure was ignored" >&2
+      exit 1
+    fi
+    [ "$(grep -c '^start nix-daemon.service$' "$events")" = 2 ]
     touch "$out"
   '';
   scenarioReconcile = {
@@ -910,6 +932,12 @@ let
         && lib.hasInfix ''[ "$source_ephemeral" != 1 ] && [ -n "$source_slot" ]'' prepareScript;
       materializerUsesTargetRows = !(lib.hasInfix "findmnt -T" materializerSource)
         && lib.hasInfix "target_ephemeral" materializerSource;
+      ephemeralSourceNeverAdoptsPersistentCurrent = lib.hasInfix
+        ''if [ "$source_ephemeral" = 0 ] && [ -n "$current_before" ]'' prepareScript;
+      recoverySkipsIncompleteMetadata = lib.hasInfix
+        ''source_slot=$(metadata_value "$candidate/metadata" source_slot || true)'' prepareScript
+        && lib.hasInfix
+          ''source_generation=$(metadata_value "$candidate/metadata" source_generation || true)'' prepareScript;
       plannerAndMaterializerCoverBothDirections = lib.isDerivation plannerTransitionCheck;
     };
   };
