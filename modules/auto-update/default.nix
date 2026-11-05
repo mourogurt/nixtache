@@ -193,7 +193,7 @@ let
     # journalctl -u does not resolve unit aliases: the stock update unit
     # records under its canonical name systemd-sysupdate-update.service, a
     # local override under the alias name — query both.
-    if journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --since "$t0" --no-pager | grep -q "Successfully installed"; then
+    if journalctl -u systemd-sysupdate-update.service -u systemd-sysupdate.service --since "$t0" --no-pager | grep "Successfully installed" >/dev/null; then
       installed=1
       marker "new image installed"
     else
