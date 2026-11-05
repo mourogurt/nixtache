@@ -218,16 +218,19 @@ let
     stopped_units=""
     probe=""
     resume_writers() {
-      local unit
+      local unit failed=0
       if [ -n "$stopped_units" ]; then
-        for unit in $stopped_units; do systemctl start "$unit" || true; done
-        stopped_units=""
+        for unit in $stopped_units; do
+          if ! systemctl start "$unit"; then failed=1; fi
+        done
+        if [ "$failed" = 0 ]; then stopped_units=""; fi
       fi
+      return "$failed"
     }
     rollback_stage() {
       local status=$?
       trap - EXIT TERM INT HUP
-      resume_writers
+      resume_writers || true
       if [ -n "$probe" ] && [ -d "$probe" ]; then
         rm -rf "$probe" || true
       fi
@@ -286,7 +289,7 @@ let
       exec {prepare_lock_fd}> "$slot_dir/.prepare.lock"
       flock -x "$prepare_lock_fd"
       current_before=$(readlink -f "$slot_dir/current" 2>/dev/null || true)
-      if [ -n "$current_before" ] && [ -f "$current_before/plan.json" ] \
+      if [ "$source_ephemeral" = 0 ] && [ -n "$current_before" ] && [ -f "$current_before/plan.json" ] \
         && [ -f "$current_before/lower-db" ] && [ -f "$current_before/overlay-topology.json" ] \
         && [ "$(metadata_value "$current_before/metadata" state)" = ready ] \
         && [ "$(metadata_value "$current_before/metadata" slot)" = "$target_slot" ] \
@@ -537,8 +540,8 @@ let
       printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
       printf '%s\n' "$generation" > "${runtimeState}/prepared-generation"
       printf '%s\n' "$source_slot:$source_generation" > "${runtimeState}/prepared-source"
-      trap - EXIT
       resume_writers
+      trap - EXIT
     }
 
     if [ "$mode" = "--installed" ]; then
@@ -564,8 +567,8 @@ let
       slot_dir="${slotsDir}/$target_slot"
       while read -r candidate; do
         [ -n "$candidate" ] || continue
-        source_slot=$(metadata_value "$candidate/metadata" source_slot)
-        source_generation=$(metadata_value "$candidate/metadata" source_generation)
+        source_slot=$(metadata_value "$candidate/metadata" source_slot || true)
+        source_generation=$(metadata_value "$candidate/metadata" source_generation || true)
         source_dir=""
         if [ -n "$source_slot" ] && [ "$source_generation" = ephemeral ]; then
           break
