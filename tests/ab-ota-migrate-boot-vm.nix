@@ -219,7 +219,7 @@ pkgs.testers.runNixOSTest {
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
       "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
       "cd /var/lib/nixtache/ab-stage/abtest && "
-      "sha256sum *.raw *.efi *.lower-db *.overlay-topology.json > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS && "
+      "sha256sum *.raw *.efi *.lower-db > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS && "
       "export GNUPGHOME=$(mktemp -d) && "
       "${pkgs.gnupg}/bin/gpg --batch --import ${fixture.testSignKey}/priv.asc 2>/dev/null && "
       "${pkgs.gnupg}/bin/gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS"
