@@ -417,8 +417,8 @@ let
     BOOT_DIR="${recoveryBootDir}"
     LOWER_DB_DIR="/boot/EFI/nixtache"
 
-    if [ "$#" -ne 1 ]; then
-      echo "usage: nixtache-ab-recover <failed-version>" >&2
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+      echo "usage: nixtache-ab-recover <failed-version> [failed-partuuid]" >&2
       exit 2
     fi
     FAILED_VERSION="$1"
@@ -433,9 +433,21 @@ let
       echo "nixtache-ab-recover: IMAGE_VERSION is missing from /etc/os-release" >&2
       exit 1
     fi
+    SAME_VERSION=0
     if [ "$FAILED_VERSION" = "$RUNNING_VERSION" ]; then
-      echo "nixtache-ab-recover: refusing to remove running version $RUNNING_VERSION" >&2
-      exit 1
+      SAME_VERSION=1
+      if [ "$SLOT_TYPE" != "partition" ]; then
+        echo "nixtache-ab-recover: same-version recovery requires partition-backed slots" >&2
+        exit 1
+      fi
+      if [ "$#" -ne 2 ]; then
+        echo "nixtache-ab-recover: same-version recovery requires the failed slot PARTUUID" >&2
+        exit 1
+      fi
+    fi
+    if [ "$#" -eq 2 ] && [ "$SLOT_TYPE" != "partition" ]; then
+      echo "nixtache-ab-recover: failed PARTUUID is only valid for partition-backed slots" >&2
+      exit 2
     fi
     if systemctl is-active --quiet systemd-sysupdate-update.service || systemctl is-active --quiet systemd-sysupdate.service; then
       echo "nixtache-ab-recover: sysupdate is active; wait for it to finish before recovery" >&2
@@ -446,11 +458,20 @@ let
       awk 'NF { n++ } END { print n+0 }' <<< "$1"
     }
 
+    normalize_partuuid() {
+      local partuuid="''${1,,}"
+      if [[ ! "$partuuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        return 1
+      fi
+      printf '%s\n' "$partuuid"
+    }
+
     UKI_MATCHES=""
-    if [ -d "$BOOT_DIR" ]; then
+    UKI_COUNT=0
+    if [ "$SAME_VERSION" -eq 0 ] && [ -d "$BOOT_DIR" ]; then
       UKI_MATCHES=$(find "$BOOT_DIR" -maxdepth 1 -type f -name "''${IMAGE_ID}_''${FAILED_VERSION}+*.efi" -print)
+      UKI_COUNT=$(count_lines "$UKI_MATCHES")
     fi
-    UKI_COUNT=$(count_lines "$UKI_MATCHES")
     if [ "$UKI_COUNT" -gt 1 ]; then
       echo "nixtache-ab-recover: refusing ambiguous deletion; multiple UKIs match version $FAILED_VERSION" >&2
       exit 1
@@ -459,6 +480,10 @@ let
     TOPOLOGY_DESCRIPTOR="$LOWER_DB_DIR/''${IMAGE_ID}_''${FAILED_VERSION}.overlay-topology.json"
 
     remove_artifacts() {
+      if [ "$SAME_VERSION" -eq 1 ]; then
+        echo "nixtache-ab-recover: preserving UKI, lower-db and topology artifacts shared by running version $RUNNING_VERSION"
+        return 0
+      fi
       if [ "$UKI_COUNT" -eq 1 ]; then
         rm -f -- "$UKI_MATCHES"
       fi
@@ -482,45 +507,113 @@ let
         DISKS+=("$DISK_B")
       fi
 
-      slot_partition_matches() {
-        local label="nix-store_$1" disk
+      partition_partuuid() {
+        lsblk -no PARTUUID "$1" 2>/dev/null | awk 'NF { print tolower($1); exit }'
+      }
+
+      discover_running_partuuid() {
+        local selected candidates
+        if [ -e /run/nixtache-overlay/selected-slot ]; then
+          if [ ! -r /run/nixtache-overlay/selected-slot ]; then
+            echo "nixtache-ab-recover: running slot PARTUUID is recorded but unreadable" >&2
+            return 1
+          fi
+          selected=$(awk 'NF { print tolower($1) }' /run/nixtache-overlay/selected-slot)
+          if [ "$(count_lines "$selected")" -ne 1 ]; then
+            echo "nixtache-ab-recover: running slot PARTUUID record is ambiguous" >&2
+            return 1
+          fi
+          normalize_partuuid "$selected" || {
+            echo "nixtache-ab-recover: running slot PARTUUID record is invalid" >&2
+            return 1
+          }
+          return 0
+        fi
+        candidates=$(findmnt -rn -o PARTUUID --target /nix/store 2>/dev/null | awk 'NF { print tolower($1) }' | sort -u || true)
+        if [ "$(count_lines "$candidates")" -ne 1 ]; then
+          echo "nixtache-ab-recover: cannot establish one running slot PARTUUID from /nix/store" >&2
+          return 1
+        fi
+        normalize_partuuid "$candidates" || {
+          echo "nixtache-ab-recover: mounted running slot has an invalid PARTUUID" >&2
+          return 1
+        }
+      }
+
+      slot_partuuid_matches() {
+        local wanted="$1" disk
         for disk in "''${DISKS[@]}"; do
-          lsblk -rpn -o NAME,PARTLABEL "$disk" 2>/dev/null \
-            | awk -v disk="$disk" -v label="$label" '$2 == label { print $1, disk }'
+          lsblk -rpn -o NAME,PARTUUID "$disk" 2>/dev/null \
+            | awk -v disk="$disk" -v wanted="$wanted" 'tolower($2) == wanted { print $1, disk, tolower($2) }' || true
         done
       }
 
-      RUNNING_MATCHES=$(slot_partition_matches "$RUNNING_VERSION")
-      FAILED_MATCHES=$(slot_partition_matches "$FAILED_VERSION")
+      slot_partition_matches() {
+        local label="nix-store_$1" disk
+        for disk in "''${DISKS[@]}"; do
+          lsblk -rpn -o NAME,PARTUUID,PARTLABEL "$disk" 2>/dev/null \
+            | awk -v disk="$disk" -v label="$label" '$3 == label { print $1, disk, tolower($2) }' || true
+        done
+      }
+
+      RUNNING_PARTUUID=$(discover_running_partuuid) || exit 1
+      RUNNING_MATCHES=$(slot_partuuid_matches "$RUNNING_PARTUUID")
       if [ "$(count_lines "$RUNNING_MATCHES")" -ne 1 ]; then
-        echo "nixtache-ab-recover: expected exactly one running slot for $RUNNING_VERSION; refusing to continue" >&2
-        exit 1
-      fi
-      if [ "$(count_lines "$FAILED_MATCHES")" -ne 1 ]; then
-        echo "nixtache-ab-recover: expected exactly one failed slot for $FAILED_VERSION; refusing ambiguous deletion" >&2
+        echo "nixtache-ab-recover: expected exactly one running slot with PARTUUID $RUNNING_PARTUUID; refusing to continue" >&2
         exit 1
       fi
       RUNNING_NODE=$(awk 'NR == 1 { print $1 }' <<< "$RUNNING_MATCHES")
+      if [ "$(lsblk -no PARTLABEL "$RUNNING_NODE")" != "nix-store_$RUNNING_VERSION" ]; then
+        echo "nixtache-ab-recover: running PARTUUID does not identify a slot for version $RUNNING_VERSION" >&2
+        exit 1
+      fi
+
+      if [ "$#" -eq 2 ]; then
+        FAILED_PARTUUID=$(normalize_partuuid "$2") || {
+          echo "nixtache-ab-recover: invalid failed PARTUUID '$2'" >&2
+          exit 2
+        }
+      else
+        FAILED_MATCHES=$(slot_partition_matches "$FAILED_VERSION")
+        if [ "$(count_lines "$FAILED_MATCHES")" -ne 1 ]; then
+          echo "nixtache-ab-recover: expected exactly one failed slot for $FAILED_VERSION; refusing ambiguous deletion" >&2
+          exit 1
+        fi
+        FAILED_PARTUUID=$(awk 'NR == 1 { print $3 }' <<< "$FAILED_MATCHES")
+        FAILED_PARTUUID=$(normalize_partuuid "$FAILED_PARTUUID") || {
+          echo "nixtache-ab-recover: failed slot has no valid PARTUUID; refusing to continue" >&2
+          exit 1
+        }
+      fi
+      FAILED_MATCHES=$(slot_partuuid_matches "$FAILED_PARTUUID")
+      if [ "$(count_lines "$FAILED_MATCHES")" -ne 1 ]; then
+        echo "nixtache-ab-recover: expected exactly one failed slot with PARTUUID $FAILED_PARTUUID; refusing ambiguous deletion" >&2
+        exit 1
+      fi
       FAILED_NODE=$(awk 'NR == 1 { print $1 }' <<< "$FAILED_MATCHES")
       FAILED_DISK=$(awk 'NR == 1 { print $2 }' <<< "$FAILED_MATCHES")
       FAILED_PART=$(lsblk -no PARTN "$FAILED_NODE")
-      if [ -z "$FAILED_PART" ] || [ "$FAILED_NODE" = "$RUNNING_NODE" ]; then
+      if [ -z "$FAILED_PART" ] || [ "$FAILED_PARTUUID" = "$RUNNING_PARTUUID" ] || [ "$FAILED_NODE" = "$RUNNING_NODE" ]; then
         echo "nixtache-ab-recover: failed and running slots are not distinct; refusing to continue" >&2
+        exit 1
+      fi
+      if [ "$(lsblk -no PARTLABEL "$FAILED_NODE")" != "nix-store_$FAILED_VERSION" ]; then
+        echo "nixtache-ab-recover: failed PARTUUID does not identify a slot for version $FAILED_VERSION" >&2
         exit 1
       fi
 
       sgdisk --change-name="$FAILED_PART":_empty "$FAILED_DISK" || exit 1
       udevadm settle 2>/dev/null || true
-      if [ "$(lsblk -no PARTLABEL "$FAILED_NODE")" != "_empty" ]; then
+      if [ "$(lsblk -no PARTLABEL "$FAILED_NODE")" != "_empty" ] || [ "$(partition_partuuid "$FAILED_NODE")" != "$FAILED_PARTUUID" ]; then
         echo "nixtache-ab-recover: failed to mark $FAILED_NODE empty" >&2
         exit 1
       fi
-      if [ "$(lsblk -no PARTLABEL "$RUNNING_NODE")" != "nix-store_$RUNNING_VERSION" ]; then
+      if [ "$(lsblk -no PARTLABEL "$RUNNING_NODE")" != "nix-store_$RUNNING_VERSION" ] || [ "$(partition_partuuid "$RUNNING_NODE")" != "$RUNNING_PARTUUID" ]; then
         echo "nixtache-ab-recover: running slot changed unexpectedly; aborting artifact cleanup" >&2
         exit 1
       fi
       remove_artifacts
-      echo "nixtache-ab-recover: removed $FAILED_VERSION; running slot $RUNNING_NODE preserved and inactive slot is empty"
+      echo "nixtache-ab-recover: removed failed slot $FAILED_PARTUUID at version $FAILED_VERSION; running slot $RUNNING_PARTUUID preserved and inactive slot is empty"
       exit 0
     fi
 

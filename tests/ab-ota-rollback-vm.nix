@@ -387,5 +387,24 @@ pkgs.testers.runNixOSTest {
     appliance.succeed(f"test -d {v1_selected}/host/upper/${baseNameOf p4Path}")
     appliance.succeed(P2 + "/bin/tool")
     print("PASS: forced source/target boots selected distinct same-version generations and DBs")
+
+    shared_uki_sha = appliance.succeed("sha256sum /boot/EFI/Linux/abtest_1.efi | awk '{print $1}'").strip()
+    shared_lower_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.lower-db | awk '{print $1}'").strip()
+    shared_topology_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.overlay-topology.json | awk '{print $1}'").strip()
+    running_same_version_hash = appliance.succeed(f"sha256sum {target_device}")
+    appliance.fail("nixtache-ab-recover 1")
+    appliance.fail(f"nixtache-ab-recover 1 {target_slot}")
+    appliance.succeed(
+      f"sgdisk -c {source_number}:nix-store_1 /dev/vda && "
+      "partprobe /dev/vda && udevadm settle"
+    )
+    appliance.succeed(f"nixtache-ab-recover 1 {v1_slot}")
+    appliance.succeed(f"test \"$(lsblk -nrno PARTLABEL {active_device})\" = _empty")
+    appliance.succeed(f"test \"$(lsblk -nrno PARTLABEL {target_device})\" = nix-store_1")
+    assert appliance.succeed(f"sha256sum {target_device}") == running_same_version_hash
+    assert appliance.succeed("sha256sum /boot/EFI/Linux/abtest_1.efi | awk '{print $1}'").strip() == shared_uki_sha
+    assert appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.lower-db | awk '{print $1}'").strip() == shared_lower_sha
+    assert appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_1.overlay-topology.json | awk '{print $1}'").strip() == shared_topology_sha
+    print("SAME-VERSION RECOVERY OK: explicit failed PARTUUID emptied only the inactive slot and preserved shared artifacts")
   '';
 }
