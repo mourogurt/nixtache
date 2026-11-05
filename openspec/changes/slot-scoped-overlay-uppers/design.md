@@ -79,7 +79,7 @@ Alternative considered: live read-only binds of the parent's current upper state
 
 ### D4 — Topology changes are generation operations
 
-The target NixOS configuration emits a topology descriptor derived from its runner declarations. The completed lower installation carries that descriptor with its other target metadata. Preparation running on the source system MUST read the target descriptor rather than assuming that the source graph is also the target graph. A missing, ambiguous or inconsistent descriptor blocks preparation and reboot.
+The target NixOS configuration emits a topology descriptor derived from its runner declarations, including each logical node's declared ephemeral storage state. The completed lower installation carries that descriptor with its other target metadata. Preparation running on the source system MUST read the target descriptor rather than assuming that the source graph or mount table is also the target graph. Ephemeral descendants are filtered from persistent copies according to the target declaration, which also handles tmpfs-to-persistent and persistent-to-tmpfs transitions. A missing, ambiguous or inconsistent descriptor blocks preparation and reboot.
 
 Preparation compares source and target logical graphs and applies the operations below. Their structural result is identical under both policies. State retention describes `reconcile`; `wipe` derives the same final graph with empty writable uppers/state. Neither policy mutates the active source.
 
@@ -102,6 +102,8 @@ upper-slots/<partuuid>/
   current -> generations/<generation>
   generations/<generation>/
     metadata                  # slot, lower, policy, graph, lineage, source, state
+    lower-db                  # exact lower records for this generation
+    overlay-topology.json     # exact target declaration for this generation
     host/
       lower-state/            # read-only records from this slot's dump
     nodes/
@@ -112,7 +114,7 @@ upper-slots/<partuuid>/
         frozen-lower/         # files and metadata when used as a child lower
 ```
 
-The host lower database and every writable upper database have different roles. A frozen parent lower carries its files and all metadata needed by children. A child upper database may duplicate ancestor records so its upper-object closures satisfy the local-store schema; preparation refreshes and validates those records instead of stripping them or treating them as a shared writable database.
+The host lower database and every writable upper database have different roles. A frozen parent lower carries its files and all metadata needed by children. A child upper database may duplicate ancestor records so its upper-object closures satisfy the local-store schema; preparation refreshes and validates those records instead of stripping them or treating them as a shared writable database. Each published generation owns the exact lower dump and topology descriptor from which it was prepared, so a same-version installation in another slot cannot replace its identity.
 
 Stable runtime paths are selection points managed before consumers start. Early boot binds or symlinks upper/work paths, persistent upper-owned state and host `/nix/var/nix` subsets to one selected generation. Work directories are recreated, never cloned. Daemon sockets and logs remain outside the persistent upper-owned subset.
 
@@ -145,9 +147,9 @@ No-op and rejected updates do not invoke preparation. An entirely ephemeral chai
 
 An early selection unit runs after required filesystems and before the lower-DB loader, overlays, Nix daemons and runner containers:
 
-- resolve the booted lower's `PARTUUID`;
-- select a prepared generation whose lower and final graph metadata match the running configuration;
-- if a newly installed candidate is unready, attempt target-only recovery under the D6 lock using the preserved source metaslot;
+- resolve and record the booted lower's `PARTUUID` before any ephemeral early exit, preserving a read-only physical-lower bind for later installed-target discovery;
+- select a prepared generation whose lower and final graph metadata match the running configuration, validating against that generation's own dump and descriptor rather than mutable version-named ESP files;
+- if a newly installed candidate is unready, attempt target-only recovery under the D6 lock using the preserved source metaslot and the target's ESP artifacts;
 - if recovery fails, leave upper consumers and boot completion blocked on readiness;
 - if an established prepared slot is selected, mount it without wipe, clone or reconcile.
 
