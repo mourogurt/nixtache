@@ -962,7 +962,9 @@ self.nixosModules.runner
     , mode ? "overlay"
     , path ? "/srv/${name}"
     , hostBackup ? "/var/lib/runners/${name}"
+    , containerName ? name
     }: {
+      inherit containerName;
       store = {
         inherit parent mode path hostBackup;
       };
@@ -992,7 +994,7 @@ self.nixosModules.runner
         alpha = (namedContainer { name = "alpha"; }) // {
           instances.default = { uuid = dummyUuid; tokenFile = dummySecret; };
         };
-        beta = namedContainer { name = "beta"; parent = "alpha"; };
+        beta = namedContainer { name = "beta"; parent = "alpha"; containerName = "beta-unit"; };
         additive = namedContainer { name = "additive"; mode = "clone"; };
       };
     };
@@ -1006,8 +1008,9 @@ self.nixosModules.runner
     name = "named runner containers derive internal sibling, nested and clone-free topology";
     checks = {
       containersCreated = hostNamed.config.containers ? alpha
-        && hostNamed.config.containers ? beta
-        && hostNamed.config.containers ? additive;
+        && hostNamed.config.containers ? beta-unit
+        && hostNamed.config.containers ? additive
+        && !(hostNamed.config.containers ? beta);
       singletonNotDuplicated = !(hostNamed.config.containers ? runner);
       perContainerInstances = hostNamed.config.containers.alpha.config.services.forgejo-runner.instances.default.settings.server.connections.default.uuid == dummyUuid;
       topologyNodes = namedNodeIds == [ "alpha" "beta" "host" ];
@@ -1024,10 +1027,10 @@ self.nixosModules.runner
 
   namedExecOf = name: hostNamed.config.containers.${name}.config.systemd.services
     ."nix-daemon-custom".serviceConfig.ExecStart or "";
-  namedFrozenLowerBinds = containerName: lowerRoot:
+  namedFrozenLowerBinds = logicalId: containerName: lowerRoot:
     let
       binds = hostNamed.config.containers.${containerName}.bindMounts;
-      parentRoot = "/run/nixtache-overlay/parents/${containerName}";
+      parentRoot = "/run/nixtache-overlay/parents/${logicalId}";
       stateBinds = lib.all (name:
         let bind = binds."host-nix-lower-${name}"; in
         bind.hostPath == "${parentRoot}/nix/var/nix/${name}"
@@ -1049,22 +1052,22 @@ self.nixosModules.runner
         (namedExecOf "alpha");
       betaLowerUrl = lib.hasInfix
         "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower/beta%%26read-only%%3Dtrue"
-        (namedExecOf "beta");
+        (namedExecOf "beta-unit");
       alphaFrozenBinds = namedFrozenLowerBinds
-        "alpha" "/run/nixtache-runner-lower/alpha";
+        "alpha" "alpha" "/run/nixtache-runner-lower/alpha";
       betaFrozenBinds = namedFrozenLowerBinds
-        "beta" "/run/nixtache-runner-lower/beta";
+        "beta" "beta-unit" "/run/nixtache-runner-lower/beta";
       ownConsumerUppers = lib.hasInfix "upper-layer=/srv/alpha/overlay/upper" (namedExecOf "alpha")
-        && lib.hasInfix "upper-layer=/srv/beta/overlay/upper" (namedExecOf "beta");
+        && lib.hasInfix "upper-layer=/srv/beta/overlay/upper" (namedExecOf "beta-unit");
       noSnapshotOrContinuation = lib.all (exec:
         !(lib.hasInfix "lower-store=local-overlay" exec)
         && !(lib.hasInfix "nixtache-runner-parent-state" exec)
         && !(lib.hasInfix "-runtime" exec)
-      ) [ (namedExecOf "alpha") (namedExecOf "beta") ];
+      ) [ (namedExecOf "alpha") (namedExecOf "beta-unit") ];
       containerOrdering = lib.all (name:
         lib.elem "nixtache-overlay-ready.target"
           hostNamed.config.systemd.services."container@${name}".requires
-      ) [ "alpha" "beta" ];
+      ) [ "alpha" "beta-unit" ];
     };
   };
 
@@ -1295,7 +1298,7 @@ self.nixosModules.runner
   overlayMountExecCascade = (servicesOf hostCascadeOverlay)."nix-daemon-overlay-mount".serviceConfig.ExecStart;
   overlayMountExecNamedAlpha = hostNamed.config.containers.alpha.config.systemd.services
     ."nix-daemon-overlay-mount".serviceConfig.ExecStart;
-  overlayMountExecNamedBeta = hostNamed.config.containers.beta.config.systemd.services
+  overlayMountExecNamedBeta = hostNamed.config.containers.beta-unit.config.systemd.services
     ."nix-daemon-overlay-mount".serviceConfig.ExecStart;
   overlaySandboxScriptAppliance = lib.elemAt
     (lib.splitString " " (execOverlayOf hostApplianceOverlaySandbox)) 2;

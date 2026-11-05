@@ -145,9 +145,9 @@ in
           }))
       enabledDeclarations;
 
-    containers = mapAttrs
-      (logicalId: declaration:
-        let
+    containers = mapAttrs'
+      (logicalId: declaration: nameValuePair declaration.containerName
+        (let
           store = declaration.store;
 
           # Enabled runner instances — each `forgejo-runner-<name>` service gets the
@@ -494,7 +494,7 @@ in
             wantedBy = [ "sockets.target" ];
           };
           };
-        })
+        }))
       enabledDeclarations;
   };
 }
