@@ -180,6 +180,11 @@ The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`; othe
 - **WHEN** an installed update is prepared while any node in a chain has a tmpfs upper
 - **THEN** preparation succeeds without creating persistent upper or upper-state copies for that ephemeral chain, while persistent sibling branches retain their independent prepared state
 
+#### Scenario: Storage-mode transitions follow the target declaration
+
+- **WHEN** a target declaration changes a node or ancestor between tmpfs and persistent storage
+- **THEN** preparation uses the target descriptor rather than the source mount table, publishes materialized state for a persistent target, excludes all ephemeral descendants for a tmpfs target, and never reuses a stale generation for the new storage identity
+
 ### Requirement: Upper-tree preparation is parent-first and atomic
 
 A target metaslot MAY contain sibling or nested `local-overlay` uppers. Preparation MUST validate the graph and verify every node parent-before-child in a private target view. Each child MUST consume its prepared parent's frozen lower files and metadata, never its mutable runtime continuation. Every node's roots, profiles and cross-layer closure metadata MUST validate before the complete tree becomes ready.

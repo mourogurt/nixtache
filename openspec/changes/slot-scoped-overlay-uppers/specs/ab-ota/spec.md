@@ -50,6 +50,11 @@ During target preparation, the new slot's dump MUST merge additively into target
 - **WHEN** the previous slot and its prepared metaslot boot again
 - **THEN** its existing lower-state and upper validity records are selected together without an additive merge from the slot being left
 
+#### Scenario: Same-version slots retain distinct generation artifacts
+
+- **WHEN** two physical slots contain the same image version with different lower dumps or topology descriptors
+- **THEN** each prepared generation selects its own generation-owned dump and descriptor, and installing or booting the other slot neither overwrites that identity nor triggers reverse preparation
+
 ## ADDED Requirements
 
 ### Requirement: Rollback restores the previous upper metaslot
