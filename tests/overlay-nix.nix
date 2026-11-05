@@ -990,7 +990,8 @@ let
   alphaFrozenUnit = "nixtache-overlay-frozen-alpha-lower.service";
   selectsPlanParent = nodeId:
     lib.hasInfix "parent_physical=$(plan_consumer_parent ${nodeId})" frozenSelection
-    && lib.hasInfix "activate_path \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" frozenSelection;
+    && lib.hasInfix "activate_lower_root \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" frozenSelection
+    && !(lib.hasInfix "activate_path \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" frozenSelection);
   scenarioRuntimeFrozenLowers = {
     name = "runtime consumers use selected frozen parents with dedicated state and plan ordering";
     checks = {

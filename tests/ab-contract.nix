@@ -472,10 +472,12 @@ let
       script = prepareScriptOf cfg;
       verifyScript = builtins.readFile (builtins.head (lib.splitString "\n"
         (builtins.elemAt (lib.splitString "unshare -m --propagation private " script) 1)));
+      materializerScript = builtins.readFile (builtins.head (lib.splitString "\n"
+        (builtins.elemAt (lib.splitString "materializer=" script) 1)));
     in {
       clonesSourceGeneration = lib.hasInfix "source_dir/host" script;
       recordsSourceGeneration = lib.hasInfix "source_generation=$source_generation" script;
-      separatesLowerState = lib.hasInfix "$stage/host/lower-state" script;
+      separatesLowerState = lib.hasInfix "$stage/host/lower-state" materializerScript;
       verifiesInPrivateNamespace = lib.hasInfix "unshare -m --propagation private" script;
       verifiesHostBeforeMetadata = lib.hasInfix "repair_store \"$host_url\" \"$stage/host/state\" \"$host_root\"" verifyScript;
       unreadyUntilVerified = lib.hasInfix "state=unready" script
