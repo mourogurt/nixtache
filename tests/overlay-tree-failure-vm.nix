@@ -21,11 +21,18 @@ let
     ++ lib.optional (failureNode == "host") "refs"
   else faultScenarios;
 
+  refsPhysicalNode = if builtins.elem failureNode [ "host" "a" ]
+    then "${failureNode}-lower"
+    else failureNode;
+
   shimModule = { config, lib, pkgs, ... }:
     let
       outerPath = builtins.head (lib.splitString " "
         (fixture.mkAppliance { version = "1"; }).config.systemd.services.nixtache-overlay-prepare.script);
       outerText = builtins.readFile outerPath;
+      materializerPath = builtins.head (lib.splitString "\n"
+        (builtins.elemAt (lib.splitString "materializer=" outerText) 1));
+      materializerText = builtins.readFile materializerPath;
       innerPath = builtins.head (lib.splitString "\n"
         (builtins.elemAt (lib.splitString "unshare -m --propagation private " outerText) 1));
       innerText = builtins.readFile innerPath;
@@ -45,7 +52,7 @@ let
         }
         test_check_store() {
           local node=$1
-          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = parent-root ] && [ "$node" = a ]; then
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = parent-root ] && [ "$node" = a-lower ]; then
             echo "nixtache-overlay: checking $node" >&2
             return 0
           fi
@@ -55,7 +62,7 @@ let
         corrupt_refs() {
           local node=$1 store_url=$2 layer_stage=$3 merged=$4
           local root db
-          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ "$node" = "''${NIXTACHE_TEST_FAILURE_NODE:-}" ]; then
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ "$node" = "''${NIXTACHE_TEST_REFS_NODE:-}" ]; then
             root=$(cat /run/nixtache-overlay-test-refs-root)
             db="$layer_stage/state/db/db.sqlite"
             nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-expected
@@ -68,7 +75,7 @@ let
         }
         audit_refs() {
           local node=$1 store_url=$2 root
-          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ -e /run/nixtache-overlay-test-refs-armed ] && [ "$node" = "''${NIXTACHE_TEST_FAILURE_NODE:-}" ]; then
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ -e /run/nixtache-overlay-test-refs-armed ] && [ "$node" = "''${NIXTACHE_TEST_REFS_NODE:-}" ]; then
             root=$(cat /run/nixtache-overlay-test-refs-root)
             if ! nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-actual; then
               touch /run/nixtache-overlay-test-refs-incomplete
@@ -79,19 +86,29 @@ let
         }
         tamper_parent_root() {
           local node=$1 dependency parent_path child_path
-          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = parent-root ] && [ "$node" = a ]; then
+          if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = parent-root ] && [ "$node" = a-lower ]; then
             dependency=$(cat /run/nixtache-overlay-test-parent-root-path)
-            parent_path="$stage/layers/a/upper/$(basename "$dependency")"
-            child_path="$stage/layers/grand/upper/$(basename "$dependency")"
+            parent_path="$stage/nodes/a-lower/upper/$(basename "$dependency")"
+            child_path="$stage/nodes/grand/upper/$(basename "$dependency")"
             [ -f "$parent_path" ]
             [ ! -e "$child_path" ]
             cp -a "$parent_path" "$child_path"
             rm -f "$parent_path"
             touch /run/nixtache-overlay-test-parent-root-armed
-            echo "nixtache-overlay-test: moved a upper-only valid path into grand upper after a final validation" >&2
+            echo "nixtache-overlay-test: moved a-lower upper-only valid path into grand upper after a final validation" >&2
           fi
         }
       '';
+      injectedMaterializer = pkgs.writeShellScript "nixtache-overlay-materialize-failure-${failureNode}"
+        (builtins.replaceStrings [
+          "set -euo pipefail\n"
+          "copy_whole() {\n      local source=$1 destination=$2\n"
+          "merge_whole() {\n      local source=$1 destination=$2\n"
+        ] [
+          "set -euo pipefail\n${failureFunction}"
+          "copy_whole() {\n      local source=$1 destination=$2\n      fail_at \"$logical_id\" clone\n"
+          "merge_whole() {\n      local source=$1 destination=$2\n      fail_at \"$logical_id\" clone\n"
+        ] materializerText);
       injectedInner = pkgs.writeShellScript "nixtache-overlay-verify-namespace-failure-${failureNode}"
         (builtins.replaceStrings [
           "set -euo pipefail\n"
@@ -105,26 +122,25 @@ let
           "fail_at host seed\nnix-store --option experimental-features \"ca-derivations\" --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
           "fail_at host repair\nrepair_store \"$host_url\" \"$stage/host/state\" \"$host_root\""
           "fail_at \"$(basename \"$node_stage\")\" repair\nrepair_store \"$node_url\" \"$node_stage/state\" \"$node_root\""
-          "fail_at host final\ncorrupt_refs host \"$host_url\" \"$stage/host\" \"$host_root\"\ncheck_store \"$host_url\" \"$host_root\"\naudit_refs host \"$host_url\""
-          "fail_at \"$(basename \"$node_stage\")\" final\ncorrupt_refs \"$(basename \"$node_stage\")\" \"$node_url\" \"$node_stage\" \"$node_root\"\ntest_check_store \"$(basename \"$node_stage\")\" \"$node_url\" \"$node_root\"\naudit_refs \"$(basename \"$node_stage\")\" \"$node_url\"\ntamper_parent_root \"$(basename \"$node_stage\")\""
+          "fail_at host final\ncorrupt_refs host-runtime \"$host_url\" \"$stage/host\" \"$host_root\"\ncheck_store \"$host_url\" \"$host_root\"\naudit_refs host-runtime \"$host_url\""
+          "fail_at \"$(basename \"$node_stage\")\" final\ncorrupt_refs \"$physical_id\" \"$node_url\" \"$node_stage\" \"$node_root\"\ntest_check_store \"$physical_id\" \"$node_url\" \"$node_root\"\naudit_refs \"$physical_id\" \"$node_url\"\ntamper_parent_root \"$physical_id\""
         ] innerText);
       injectedOuter = pkgs.writeShellScript "nixtache-overlay-prepare-failure-${failureNode}"
         (builtins.replaceStrings [
-          "set -euo pipefail\n"
-          "copy_layer \"$source_dir/host\" \"$stage/host\""
-          "copy_layer \"$source_path\""
+          "materializer=${materializerPath}"
           "unshare -m --propagation private ${innerPath}"
         ] [
-          "set -euo pipefail\n${failureFunction}"
-          "fail_at host clone\ncopy_layer \"$source_dir/host\" \"$stage/host\""
-          "fail_at \"$(basename \"$source_path\")\" clone\ncopy_layer \"$source_path\""
+          "materializer=${injectedMaterializer}"
           "unshare -m --propagation private ${injectedInner}"
         ] outerText);
     in
     {
       systemd.services.nixtache-overlay-prepare = {
         script = lib.mkForce "${injectedOuter} --installed";
-        serviceConfig.Environment = [ "NIXTACHE_TEST_FAILURE_NODE=${failureNode}" ];
+        serviceConfig.Environment = [
+          "NIXTACHE_TEST_FAILURE_NODE=${failureNode}"
+          "NIXTACHE_TEST_REFS_NODE=${refsPhysicalNode}"
+        ];
       };
     };
 
@@ -177,6 +193,7 @@ pkgs.testers.runNixOSTest {
     import shlex
 
     FAILURE_NODE = ${builtins.toJSON failureNode}
+    REFS_NODE = ${builtins.toJSON refsPhysicalNode}
     FAULT_SCENARIOS = ${builtins.toJSON scenarios}
     NODE_IDS = ${builtins.toJSON fixture.nodeIds}
     ROOTS = ${builtins.toJSON fixture.roots}
@@ -432,14 +449,14 @@ pkgs.testers.runNixOSTest {
         status, output = appliance.execute("systemctl start nixtache-overlay-prepare.service", timeout=900)
         log = cache_log(cursor)
         appliance.succeed("test -e /run/nixtache-overlay-test-parent-root-armed")
-        assert "nixtache-overlay-test: moved a upper-only valid path into grand upper after a final validation" in log
+        assert "nixtache-overlay-test: moved a-lower upper-only valid path into grand upper after a final validation" in log
         if status == 0:
             target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
             target = target_root + "/generations/" + target_generation
             appliance.succeed("grep -q '^state=ready$' " + q(target + "/metadata"))
             raise AssertionError("grand validation accepted a parent path visible only through grand's own upper; the prepared generation used the wrong parent root")
         record_unready(active_before)
-        assert "nixtache-overlay: checking a" in log
+        assert "nixtache-overlay: checking a-lower" in log
         assert "nixtache-overlay: checking grand" in log
         print("OK: parent-root tamper at a/grand boundary stayed unready and preserved the active tree")
 
@@ -453,7 +470,7 @@ pkgs.testers.runNixOSTest {
         status, output = appliance.execute("systemctl start nixtache-overlay-prepare.service", timeout=900)
         log = cache_log(cursor)
         appliance.succeed("test -e /run/nixtache-overlay-test-refs-armed")
-        assert "nixtache-overlay-test: corrupted Refs at " + FAILURE_NODE + " while retaining ValidPaths and files" in log
+        assert "nixtache-overlay-test: corrupted Refs at " + REFS_NODE + " while retaining ValidPaths and files" in log
         if status == 0:
             target_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
             target = target_root + "/generations/" + target_generation
@@ -466,7 +483,7 @@ pkgs.testers.runNixOSTest {
             print("OK: final validation repaired corrupted Refs before marking the generation ready")
         else:
             record_unready(active_before)
-            assert "nixtache-overlay: checking " + FAILURE_NODE in log
+            assert "nixtache-overlay: checking " + REFS_NODE in log
             print("OK: corrupted Refs kept the generation unready and preserved the active tree")
 
     def complete_preparation(version):

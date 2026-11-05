@@ -197,6 +197,9 @@
         overlay-tree-failure-b-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "b"; };
         overlay-tree-parent-root-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "grand"; faultScenarios = [ "parent-root" ]; };
         overlay-tree-refs-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "host"; faultScenarios = [ "refs" ]; };
+        overlay-tree-refs-a-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "a"; faultScenarios = [ "refs" ]; };
+        overlay-tree-refs-grand-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "grand"; faultScenarios = [ "refs" ]; };
+        overlay-tree-refs-b-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; failureNode = "b"; faultScenarios = [ "refs" ]; };
         overlay-tree-rollback-vm = import ./tests/overlay-tree-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; };
         overlay-tree-ephemeral-host-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; ephemeralNode = "host"; };
         overlay-tree-ephemeral-a-vm = import ./tests/overlay-tree-ephemeral-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; ephemeralNode = "a"; };
