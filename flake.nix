@@ -183,13 +183,16 @@
         overlay-topology-operations-storage-reset-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "storage-reset"; };
         overlay-topology-operations-descriptor-missing-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "descriptor-missing"; };
         overlay-topology-operations-descriptor-mismatch-vm = import ./tests/overlay-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "descriptor-mismatch"; };
+        overlay-tree-refs-a-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "a"; faultScenarios = [ "refs" ]; };
+        overlay-tree-refs-grand-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "grand"; faultScenarios = [ "refs" ]; };
+        overlay-tree-refs-b-vm = import ./tests/overlay-tree-failure-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; failureNode = "b"; faultScenarios = [ "refs" ]; };
         runner-store-mode-vm = import ./tests/runner-store-mode-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
         runner-builder-isolation-vm = import ./tests/runner-builder-isolation-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };
-        runner-topology-sibling-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "sibling"; };
-        runner-topology-nested-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "nested"; };
-        runner-topology-composed-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; topology = "composed"; };
-        runner-topology-operations-reconcile-vm = import ./tests/runner-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; policy = "reconcile"; };
-        runner-topology-operations-wipe-vm = import ./tests/runner-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = caPkgs; policy = "wipe"; };
+        runner-topology-sibling-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; topology = "sibling"; };
+        runner-topology-nested-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; topology = "nested"; };
+        runner-topology-composed-vm = import ./tests/runner-topology-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; topology = "composed"; };
+        runner-topology-operations-reconcile-vm = import ./tests/runner-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; policy = "reconcile"; };
+        runner-topology-operations-wipe-vm = import ./tests/runner-topology-operations-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; policy = "wipe"; };
         # ab-runner-compat-vm: runner clone/build on an appliance-style
         # container (no system nix-daemon) + the non-appliance mode.
         ab-runner-compat-vm = import ./tests/ab-runner-compat-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; };

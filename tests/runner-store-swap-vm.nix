@@ -38,6 +38,7 @@ let
   inherit (otaLib) fixture pkgs lib;
 
   cascade = storeMode == "overlay";
+  hostOverlayEnabled = cascade || storeMode == "clone";
   helloBasename = baseNameOf pkgs.hello.outPath;
   parentFresh = pkgs.runCommand "runner-parent-metadata-fresh" { } ''
     printf 'runner parent metadata freshness\n' > $out
@@ -74,7 +75,7 @@ let
             enableSandbox = false;
             additionalCapabilities = lib.optional cascade "CAP_SYS_ADMIN";
           };
-          services.nixtache.overlay-nix = lib.mkIf cascade ({
+          services.nixtache.overlay-nix = lib.mkIf hostOverlayEnabled ({
             enable = true;
             upperOnUpdate = "reconcile";
           } // lib.optionalAttrs ephemeral {
@@ -224,6 +225,7 @@ pkgs.testers.runNixOSTest {
     import shlex
 
     CASCADE = ${if cascade then "True" else "False"}
+    HOST_OVERLAY = ${if hostOverlayEnabled then "True" else "False"}
     EPHEMERAL = ${if ephemeral then "True" else "False"}
 
     def create_runner_machine(**kwargs):
@@ -241,6 +243,12 @@ pkgs.testers.runNixOSTest {
         return appliance.fail(
             "nixos-container run runner -- /bin/sh -c " + shlex.quote(inner)
         )
+
+    def assert_clone_excluded(generation):
+        if not CASCADE:
+            appliance.fail(f"test -e {generation}/layers/runner || test -L {generation}/layers/runner")
+            appliance.succeed(f"test -d {generation}/nodes")
+            appliance.fail(f"find {generation}/nodes -mindepth 1 -maxdepth 1 -name 'runner*' -print -quit | grep -q .")
 
     # Build a trivial derivation through the relocated store's custom daemon
     # socket (in-container). Returns the last output line (the out path).
@@ -337,20 +345,22 @@ pkgs.testers.runNixOSTest {
         raise
     print(f"OK: pre-swap build through the relocated store: {proof_v1}")
 
-    if CASCADE and not EPHEMERAL:
+    if HOST_OVERLAY and not EPHEMERAL:
         v1_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
         v1_current = appliance.succeed(
           f"readlink -f /var/lib/nix-overlay/upper-slots/{v1_slot}/current"
         ).strip()
-        v1_runner_upper = f"{v1_current}/layers/runner/upper"
-        v1_db_path = f"{v1_current}/layers/runner/state/db/db.sqlite"
-        proof_v1_name = proof_v1.rsplit("/", 1)[-1]
-        v1_proof_hash = appliance.succeed(
-          f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
-        ).strip()
-        v1_db_hash = appliance.succeed(
-          f"sha256sum {v1_db_path} | awk '{{print $1}}'"
-        ).strip()
+        assert_clone_excluded(v1_current)
+        if CASCADE:
+            v1_runner_upper = f"{v1_current}/layers/runner/upper"
+            v1_db_path = f"{v1_current}/layers/runner/state/db/db.sqlite"
+            proof_v1_name = proof_v1.rsplit("/", 1)[-1]
+            v1_proof_hash = appliance.succeed(
+              f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
+            ).strip()
+            v1_db_hash = appliance.succeed(
+              f"sha256sum {v1_db_path} | awk '{{print $1}}'"
+            ).strip()
   '' + (if ephemeral then ''
     proof_v1_name = proof_v1.rsplit("/", 1)[-1]
     appliance.succeed("test -f /srv/bincache/overlay/upper/" + proof_v1_name)
@@ -401,20 +411,21 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds("test -f /boot/EFI/Linux/abtest_2+*.efi", timeout=300)
     print("OK: signed v2 staged and written to slot B + ESP")
 
-    if CASCADE:
+    if HOST_OVERLAY:
         appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=3600)
         v2_slot = appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip()
         v2_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
         v2_target = f"/var/lib/nix-overlay/upper-slots/{v2_slot}/generations/{v2_generation}"
         appliance.succeed(f"grep -q '^state=ready$' {v2_target}/metadata")
-        appliance.succeed(f"test -f {v2_target}/layers/runner/upper/{proof_v1_name}")
-        assert appliance.succeed(
-          f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
-        ).strip() == v1_proof_hash
-        assert appliance.succeed(
-          f"sha256sum {v1_db_path} | awk '{{print $1}}'"
-        ).strip() == v1_db_hash
-        print("OK: parent-first reconcile cloned the runner upper without mutating the active source")
+        if CASCADE:
+            appliance.succeed(f"test -f {v2_target}/layers/runner/upper/{proof_v1_name}")
+            assert appliance.succeed(
+              f"sha256sum {v1_runner_upper}/{proof_v1_name} | awk '{{print $1}}'"
+            ).strip() == v1_proof_hash
+            assert appliance.succeed(
+              f"sha256sum {v1_db_path} | awk '{{print $1}}'"
+            ).strip() == v1_db_hash
+            print("OK: parent-first reconcile cloned the runner upper without mutating the active source")
 
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=3600)
@@ -422,6 +433,12 @@ pkgs.testers.runNixOSTest {
     appliance.wait_until_succeeds(
       "systemctl is-active --quiet container@runner.service", timeout=600
     )
+    if HOST_OVERLAY:
+        assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == v2_slot
+        assert appliance.succeed(
+          f"readlink -f /var/lib/nix-overlay/upper-slots/{v2_slot}/current"
+        ).strip() == v2_target
+        assert_clone_excluded(v2_target)
     print("OK: v2 booted; runner container up post-swap")
   '' + (
     if storeMode == "clone" then ''

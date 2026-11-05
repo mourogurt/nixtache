@@ -128,6 +128,9 @@ jobs:
           - overlay-tree-failure-b-vm
           - overlay-tree-parent-root-vm
           - overlay-tree-refs-vm
+          - overlay-tree-refs-a-vm
+          - overlay-tree-refs-grand-vm
+          - overlay-tree-refs-b-vm
           - overlay-tree-rollback-vm
           - overlay-tree-ephemeral-host-vm
           - overlay-tree-ephemeral-a-vm
