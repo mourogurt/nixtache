@@ -70,6 +70,7 @@ let
     (map (node: { inherit (node) id parent; }) sortedTopology));
   physicalLib = import ./physical.nix { inherit lib; };
   physicalTopology = physicalLib.derive { logicalNodes = sortedTopology; };
+  duplicatePhysicalIds = physicalLib.duplicatePhysicalIds physicalTopology.physical.nodes;
   parentRoot = logicalId: "${runtimeState}/parents/${logicalId}";
   physicalHostRoot = "${runtimeState}/physical-host";
   frozenRoot = physicalId: "${runtimeState}/frozen/${physicalId}";
@@ -134,6 +135,10 @@ in
       {
         assertion = builtins.length topologyIds == builtins.length (lists.unique topologyIds);
         message = "services.nixtache.overlay-nix: duplicate node identity in the upper topology.";
+      }
+      {
+        assertion = duplicatePhysicalIds == [ ];
+        message = "services.nixtache.overlay-nix: derived physical node identities must be unique; collisions: ${concatStringsSep ", " duplicatePhysicalIds}. Logical IDs must not reuse generated '-lower' or '-runtime' identities.";
       }
       {
         assertion = builtins.all (node:
