@@ -54,10 +54,10 @@ Composite actions: `ssh-setup`, `lfs-fetch`, `sandbox-probe`,
   (`.default` = `optionsMarkdown`) — this flake's own option reference,
   generated from all nixtache modules via `nixosOptionsDoc`. CI builds Markdown
   and JSON into the `nixtache-options` artifact; HTML is a separate package.
-- `checks.<system>` — pure-eval test suites (`runner`, `deploy-target`,
-  `ab-image`, `ab-contract`, `overlay-nix`, `mkDocs`, `ab-existing`,
-  `auto-update`, `ab-deploy-drift`, `ci-workflow-drift`); built by every
-  `nix flake check`.
+- `checks.<system>` — pure-eval test suites (`runner`,
+  `runner-topology-operations`, `deploy-target`, `ab-image`, `ab-contract`,
+  `overlay-nix`, `mkDocs`, `ab-existing`, `auto-update`, `ab-deploy-drift`,
+  `ci-workflow-drift`); built by every `nix flake check`.
 - `vmTests.x86_64-linux` — KVM-only VM suites; **not** run by
   `nix flake check` — they run in CI via
   [`vmtests.yml`](.forgejo/workflows/vmtests.yml) on a KVM-capable runner.

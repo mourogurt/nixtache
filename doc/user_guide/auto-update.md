@@ -83,16 +83,17 @@ rollback. The lifecycle details are owned by
 
 An entirely tmpfs upper chain needs no persistent metaslot: preparation returns
 an ephemeral success result and the next boot resets the chain and loads the
-new lower dump. Immediate (`if-needed`) and manual (`never` followed by an
-operator reboot) cutovers use that result directly.
+new lower dump. Immediate (`if-needed`), deferred (`window`) and manual
+(`never` followed by an operator reboot) cutovers all use that result.
 
-**Current window-mode limitation:** an ephemeral chain has no selected
-persistent slot or source generation to fingerprint. After installing the
-lower, the windowed poll cannot record its deferred-reboot source fingerprint,
-so it exits unsuccessfully without scheduling the reboot. The deferred reboot
-service has the same fingerprint requirement. Use `if-needed` for an automated
-ephemeral cutover, or `never` and reboot manually after checking the installed
-slot; do not interpret a failed windowed poll as a failed lower installation.
+For window mode, the ephemeral source fingerprint combines the booted slot
+identity recorded by overlay selection with the active lower dump's checksum,
+so the poll can record a deferred reboot without a persistent source
+generation. The deferred service uses the same slot and lower-dump discovery
+before rebooting inside the window. The new boot then resets every ephemeral
+upper and upper-owned state and loads exactly the new lower dump. Selection
+details are owned by
+[`overlay-nix.md`](overlay-nix.md#readiness-interruption-recovery-and-retention).
 
 ## Migrating from `system.autoUpgrade`
 

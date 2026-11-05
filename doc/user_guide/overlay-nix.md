@@ -54,7 +54,8 @@ paths, a prepared upper generation has this shape:
   current -> generations/<generation>
   generations/<generation>/
     metadata                       # slot, lower, descriptor, graph and readiness
-    overlay-topology.json          # target declaration descriptor
+    lower-db                       # exact target lower-dump copy
+    overlay-topology.json          # exact target declaration descriptor
     plan.json                      # derived physical graph and operations
     host/{upper,work,state,lower-state}
     nodes/<physical-node>/{upper,work,state}
@@ -69,6 +70,14 @@ work directories share one filesystem. `lower-state` contains the physical
 slot's read-only dump records; each `state` contains upper-owned databases,
 roots, profiles and temproots. Their roles are detailed in
 [`lower-store-db.md`](../technical_details/lower-store-db.md).
+
+Preparation copies the target's lower dump and topology descriptor into each
+persistent generation. Their checksums are part of readiness, and established
+boots and rollback use those generation-owned `lower-db` and
+`overlay-topology.json` files. The ESP copies are inputs to new target
+preparation, not substitutes for the artifacts belonging to an already
+prepared generation. An entirely ephemeral chain has no persistent generation;
+its lower-dump loading is described below.
 
 A plain reboot selects the booted slot's current generation without a policy
 run. Manual or automatic rollback likewise selects the older slot's preserved
@@ -137,11 +146,12 @@ systemctl start nixtache-overlay-prepare.service
 
 Every overlay-enabled image carries a target topology descriptor beside its
 lower dump on the ESP. The signed descriptor records the schema, image
-identity and version, lower-dump SHA-256 and target logical declarations.
-Preparation validates it before staging, derives the physical graph from that
-target descriptor rather than assuming the source and target graphs match,
-and binds its checksum into readiness. A missing, malformed or inconsistent
-descriptor blocks preparation and reboot.
+identity and version, lower-dump SHA-256 and target logical declarations,
+including each node's declared ephemerality from its managed upper filesystem
+and logical ancestors. Preparation validates it before staging, derives the
+physical graph from that target descriptor rather than assuming the source and
+target graphs match, and binds its checksum into readiness. A missing,
+malformed or inconsistent descriptor blocks preparation and reboot.
 
 Source and target declarations are compared as operations:
 
@@ -211,20 +221,21 @@ rewrite with a changed dump also invalidates an earlier generation even though
 its version string is unchanged. No-op or rejected updates do not invoke
 preparation.
 
-At boot, `nixtache-overlay-select.service` resolves the mounted lower's
-`PARTUUID` and selects a ready generation whose lower, descriptor and graph
-match the running image. An unprepared or rewritten lower triggers target-only
-recovery before the lower loader, overlays, Nix daemons and runner consumers
-start. Failed recovery leaves the chain unready and blocks
-`boot-complete.target`, allowing boot counting to return to the preserved
-previous slot.
+At boot, `nixtache-overlay-select.service` resolves and records the mounted
+lower's `PARTUUID` before either selecting a persistent generation or leaving
+the tmpfs reset path. Persistent selection chooses a ready generation whose
+lower, descriptor and graph match the running image. An unprepared or rewritten
+lower triggers target-only recovery before the lower loader, overlays, Nix
+daemons and runner consumers start. Failed recovery leaves the chain unready
+and blocks `boot-complete.target`, allowing boot counting to return to the
+preserved previous slot.
 
 There is no carry-over `"none"` policy value: it fails evaluation with the enum
 naming the two valid values. An unset option uses `"wipe"`; to retain ad-hoc
 installs across updates, choose `"reconcile"` with a suitably retained
 substituter.
 
-## Ephemeral chains and mixed-storage limitation
+## Ephemeral chains and mixed storage
 
 With a tmpfs host upper, selection resets the upper, work directory,
 lower-state and upper-owned Nix state on **every** boot. Every descendant
@@ -232,20 +243,21 @@ overlay and its state resets as well, so no child retains records for files
 lost from an ancestor upper. The loader then imports exactly the selected
 slot's lower dump. Installed-target preparation validates the target descriptor
 and returns a successful `ephemeral` result without creating a persistent
-metaslot, allowing direct updates and immediate reboot policies to proceed.
+metaslot, allowing direct updates and every reboot policy to proceed.
 
 For a mixed persistent tree, runtime selection computes ephemerality down the
 logical parent chain and resets every descendant of a tmpfs node while leaving
-persistent siblings selected unchanged. Target materialization filters tmpfs
-runtime nodes and children of physical nodes already marked ephemeral.
-**Current limitation:** when that tmpfs logical node has children, its split
-frozen-lower node is not itself marked ephemeral by this filter. Its frozen
-representation and persistent descendants can therefore still receive target
-copies even though the next boot resets their runtime state. Do not rely on a
-mixed ephemeral/persistent tree when persistent-copy exclusion is a hard
-requirement; an entirely ephemeral host chain uses the no-metaslot path above.
-The deferred-window restriction for an entirely ephemeral chain is documented
-in [`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots).
+persistent siblings selected unchanged. Target preparation uses the
+descriptor's declared ephemerality and propagates it through the physical
+graph. This marks both the frozen lower and runtime continuation produced by a
+split, plus every physical descendant. All marked nodes are excluded from the
+generation's persistent materialization and repair plan, so no persistent
+upper or state copies are made for an ephemeral branch, including its split
+frozen representation. Persistent siblings retain their own prepared files,
+roots and databases.
+
+Deferred-window mechanics for an entirely ephemeral chain are documented in
+[`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots).
 
 ## Transactional legacy migration
 
