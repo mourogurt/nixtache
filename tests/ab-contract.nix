@@ -245,6 +245,30 @@ let
         cfg.environment.systemPackages;
     });
 
+  recoverySource = builtins.readFile ../modules/deploy-target/ab-provision.nix;
+  scenarioRecoverySameVersion = {
+    name = "post-rollback recovery: same-version slots use physical identities and preserve shared artifacts";
+    checks = {
+      acceptsFailedPartuuid = lib.hasInfix
+        "nixtache-ab-recover <failed-version> [failed-partuuid]" recoverySource;
+      requiresSameVersionPartuuid = lib.hasInfix
+        "same-version recovery requires the failed slot PARTUUID" recoverySource;
+      discoversRunningPartuuid = lib.hasInfix
+        "RUNNING_PARTUUID=$(discover_running_partuuid)" recoverySource
+        && lib.hasInfix "findmnt -rn -o PARTUUID --target /nix/store" recoverySource;
+      resolvesFailedPartuuid = lib.hasInfix
+        "FAILED_MATCHES=$(slot_partuuid_matches \"$FAILED_PARTUUID\")" recoverySource;
+      sharedArtifactsPreserved = lib.hasInfix
+        "preserving UKI, lower-db and topology artifacts shared by running version" recoverySource;
+      distinctVersionCleanupRetained = lib.hasInfix
+        "rm -f -- \"$LOWER_DB\" \"$TOPOLOGY_DESCRIPTOR\"" recoverySource
+        && lib.hasInfix "rm -f -- \"$UKI_MATCHES\"" recoverySource;
+      ambiguousPhysicalIdentitiesRefused = lib.hasInfix
+        "expected exactly one running slot with PARTUUID" recoverySource
+        && lib.hasInfix "expected exactly one failed slot with PARTUUID" recoverySource;
+    };
+  };
+
   scenarioPartAssertAutoInitRegularFile = assertContract
     "ab.partitions assert: autoInit=true + type=regular-file → eval refuses (A3)"
     [ self.nixosModules.deploy-target (abPartCfg {
@@ -538,6 +562,7 @@ let
     scenarioPartAssertPercentage
     scenarioPartAbsoluteCoImport
     scenarioRecoveryCommand
+    scenarioRecoverySameVersion
     scenarioPartAssertAutoInitRegularFile
     scenarioPartAssertBadStorage
     scenarioPartSourceUrl
