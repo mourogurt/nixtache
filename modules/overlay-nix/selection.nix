@@ -161,7 +161,7 @@ let
     else
       parent_root="${runtimeState}/frozen/$parent_physical"
     fi
-    activate_path "$parent_root" ${parentRoot node.id} ${runtimeBackup}/parents/${node.id}
+    activate_lower_root "$parent_root" ${parentRoot node.id}
     ${optionalString (node ? containerName) ''
       activate_frozen_state "$parent_root/nix/var/nix" ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
     ''}
@@ -278,6 +278,22 @@ let
       for name in ${concatStringsSep " " stateNames}; do
         activate_state_dir "$source/$name" "$target/$name" "$backup/$name"
         mount -o remount,ro,bind "$target/$name"
+      done
+    }
+
+    activate_lower_root() {
+      local source=$1 destination=$2 name
+      mkdir -p "$destination/nix/store" "$destination/nix/var/nix"
+      if ! mountpoint -q "$destination/nix/store"; then
+        mount --bind "$source/nix/store" "$destination/nix/store"
+      fi
+      mount -o remount,ro,bind "$destination/nix/store"
+      for name in ${concatStringsSep " " stateNames}; do
+        mkdir -p "$destination/nix/var/nix/$name"
+        if ! mountpoint -q "$destination/nix/var/nix/$name"; then
+          mount --bind "$source/nix/var/nix/$name" "$destination/nix/var/nix/$name"
+        fi
+        mount -o remount,ro,bind "$destination/nix/var/nix/$name"
       done
     }
 
