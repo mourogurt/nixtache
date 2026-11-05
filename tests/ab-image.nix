@@ -80,6 +80,7 @@ let
       rootNoWeight = !(pf.root.repartConfig ? Weight);
       verifyNo = (transfers hostFixed)."10-nix-store".Transfer.Verify == "no";
       verifyNoBoot = (transfers hostFixed)."20-boot-image".Transfer.Verify == "no";
+      ifdDisabled = hostFixed.config.nix.settings.allow-import-from-derivation == false;
     };
   };
 
@@ -281,6 +282,7 @@ let
         && lib.hasInfix "\"nodes\"" overlayDescriptorJson;
       plainImageOmitsDescriptor = !(builtins.hasAttr "/EFI/nixtache/h_1.overlay-topology.json" espContents)
         && !((transfers hostFixed) ? "17-overlay-topology");
+      ifdDisabled = hostOverlayFixed.config.nix.settings.allow-import-from-derivation == false;
     };
   };
 

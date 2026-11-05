@@ -88,6 +88,15 @@ evaluates/builds the image needs the `ca-derivations` experimental feature
 in its SYSTEM nix.conf — see the daemon quirk in
 [`lower-store-db.md`](../technical_details/lower-store-db.md).
 
+Content-addressed derivations do not support import from derivation (IFD).
+Enabling the AB/OTA image or receiving deploy-target AB mode therefore sets
+`allow-import-from-derivation = false` in the target Nix configuration. Image
+and update closures must be realized ahead of time, not imported from a
+derivation built during evaluation. Build and deployment hosts must disable
+IFD in their own Nix configuration too; the target module cannot change the
+builder's configuration. See
+[`lower-store-db.md`](../technical_details/lower-store-db.md#enabling-ca-and-disabling-ifd).
+
 ## Lower installation, upper readiness and rollback
 
 A completed sysupdate installation and a ready upper chain are separate

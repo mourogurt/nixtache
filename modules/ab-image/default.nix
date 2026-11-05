@@ -430,6 +430,7 @@ in
 
     system.image.id = cfg.imageId;
     system.image.version = cfg.imageVersion;
+    nix.settings.allow-import-from-derivation = false;
 
     # UKI boot model (the appliance profile enables bootspec/UKI); no grub.
     boot.loader.grub.enable = false;

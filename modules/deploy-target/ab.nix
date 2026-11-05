@@ -117,6 +117,7 @@ in
   };
 
   config = mkIf (cfg.enable && ab.enable) {
+    nix.settings.allow-import-from-derivation = false;
     assertions = [
       {
         assertion = config.systemd.sysupdate.enable or false;

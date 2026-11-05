@@ -162,7 +162,7 @@ the independent symlink constraint:
    preserves a symlink path in a real build) and the `overlay-nix-vm`
    suite (a symlink path ships, `nix path-info` resolves it).
 
-### Enabling CA (the two knobs, and a daemon quirk)
+### Enabling CA and disabling IFD
 
 - The evaluation-side knob is the nixpkgs config:
   `config.contentAddressedByDefault = true` on the import (the
@@ -178,6 +178,15 @@ the independent symlink constraint:
   `nix.settings` (both pinned by tests); dev machines and bare CI runners
   need it in their system configuration. Legacy `nix-instantiate` never
   opens a store connection and is unaffected.
+- Content-addressed derivations do not support import from derivation (IFD).
+  `services.nixtache.ab-image` and the receiving
+  `services.nixtache.deploy-target.ab` mode set
+  `nix.settings.allow-import-from-derivation = false` on every enabled target,
+  so image and update closures must be realized ahead of time. Build and
+  deployment hosts need the same setting in their own Nix configuration: the
+  appliance module cannot rewrite the evaluator's configuration. IFD-based
+  expressions are outside the AB/OTA evaluation contract rather than a fallback
+  for missing prebuilt outputs.
 
 One `nix-serve` cache can serve input-addressed and content-addressed paths
 side by side: their store paths differ, so no conversion is needed. CA paths

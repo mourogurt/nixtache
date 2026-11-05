@@ -115,6 +115,7 @@ let
       # The module owns ALL of systemd.sysupdate: enables it and derives the
       # UKI transfer (default bootTarget="auto" → ESP /EFI/Linux via $BOOT).
       sysupdateEnabled = cfg.systemd.sysupdate.enable == true;
+      ifdDisabled = cfg.nix.settings.allow-import-from-derivation == false;
       bootImageAuto =
         (cfg.systemd.sysupdate.transfers."20-boot-image".Target.PathRelativeTo or null) == "boot"
         && (cfg.systemd.sysupdate.transfers."20-boot-image".Target.Path or null) == "/EFI/Linux";
@@ -219,6 +220,7 @@ let
         && cfg.services.nixtache.ab-image.storeSize == "512M";
       imageSlotsMatch = cfg.image.repart.partitions.nix-store.repartConfig.SizeMinBytes == "512M"
         && cfg.image.repart.partitions.empty.repartConfig.SizeMinBytes == "512M";
+      ifdDisabled = cfg.nix.settings.allow-import-from-derivation == false;
     });
 
   recoveryModules = [
