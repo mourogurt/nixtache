@@ -106,7 +106,10 @@ def create_source(source_root, case, compatibility_aliases=True):
     (source_root / "metadata").write_text(
         f"state=ready\ntopology={order}\ntopology_sha256={case['source']['fingerprint']}\n"
     )
+    physical_by_id = {node["id"]: node for node in case["sourcePhysical"]}
     for node in case["sourcePhysical"]:
+        if node.get("ephemeral", False):
+            continue
         directory = consumer_path(source_root, node["logicalId"], node["id"])
         (directory / "work").mkdir(parents=True, exist_ok=True)
         for state_name in ("db", "gcroots", "profiles", "temproots"):
@@ -115,6 +118,8 @@ def create_source(source_root, case, compatibility_aliases=True):
             marker_upper(directory, f"frozen-{node['logicalId']}")
             marker_state(directory, f"frozen-root-{node['logicalId']}")
     for logical_id, physical_id in case["sourceConsumer"].items():
+        if physical_by_id[physical_id].get("ephemeral", False):
+            continue
         directory = consumer_path(source_root, logical_id, physical_id)
         marker_upper(directory, f"consumer-{logical_id}")
         marker_state(directory, f"consumer-root-{logical_id}")
@@ -150,7 +155,14 @@ def assert_marker(directory, name, expected):
 
 
 def assert_runtime_layout(stage, result):
+    physical_by_id = {node["id"]: node for node in result["physical"]["nodes"]}
     for logical_id, physical_id in result["consumerNodeByLogical"].items():
+        if physical_by_id[physical_id].get("ephemeral", False):
+            if logical_id == "host":
+                assert not os.path.lexists(stage / "nodes" / physical_id)
+            else:
+                assert not os.path.lexists(stage / "layers" / logical_id)
+            continue
         if logical_id == "host":
             assert (stage / "nodes" / physical_id).is_symlink()
             assert (stage / "nodes" / physical_id).resolve() == (stage / "host").resolve()
@@ -180,6 +192,21 @@ def assert_runtime_layout(stage, result):
 
 def assert_materialized(stage, source_root, case, result, policy):
     assert_runtime_layout(stage, result)
+    rows = [line.split("|") for line in (stage / "plan.rows").read_text().splitlines() if line]
+    row_by_id = {row[0]: row for row in rows}
+    for node in result["physical"]["nodes"]:
+        row = row_by_id[node["id"]]
+        assert len(row) == 12
+        assert row[11] == ("1" if node.get("ephemeral", False) else "0")
+    persistent_rows = [
+        line.split("|")
+        for line in (stage / "persistent-plan.rows").read_text().splitlines()
+        if line
+    ]
+    expected_persistent = [
+        node["id"] for node in result["physical"]["nodes"] if not node.get("ephemeral", False)
+    ]
+    assert [row[0] for row in persistent_rows] == expected_persistent
     source_frozen = {
         node["logicalId"]: node["id"]
         for node in case["sourcePhysical"]
@@ -187,6 +214,10 @@ def assert_materialized(stage, source_root, case, result, policy):
     }
     for node in result["physical"]["nodes"]:
         logical_id = node["logicalId"]
+        if node.get("ephemeral", False):
+            physical_directory = stage / "nodes" / node["id"]
+            assert not os.path.lexists(physical_directory), f"ephemeral physical node materialized: {physical_directory}"
+            continue
         directory = consumer_path(stage, logical_id, node["id"])
         operation = result["operations"][logical_id]
         reset = policy == "wipe" or operation in ("add", "storage-reset")
@@ -254,6 +285,8 @@ def execute_case(root, name, case):
     assert tree_digest(source_root) == source_digest, f"{name}: active source changed during materialization"
     if case["policy"] == "wipe":
         for node in result["physical"]["nodes"]:
+            if node.get("ephemeral", False):
+                continue
             directory = consumer_path(stage, node["logicalId"], node["id"])
             assert not any((directory / "upper").iterdir()), f"wipe retained upper content in {node['id']}"
             roots = directory / "state" / "gcroots"
@@ -370,6 +403,20 @@ def execute_descriptor_failures(root, case):
     different = work / "different.json"
     write_json(different, target)
     plan(source_root, different, work / "different")
+    legacy = json.loads(json.dumps(target))
+    for node in legacy["logicalTopology"]["nodes"]:
+        node.pop("ephemeral", None)
+    legacy_path = work / "legacy-descriptor.json"
+    write_json(legacy_path, legacy)
+    plan(source_root, legacy_path, work / "legacy-descriptor")
+    invalid_mode = json.loads(json.dumps(target))
+    invalid_mode["logicalTopology"]["nodes"][0]["ephemeral"] = "tmpfs"
+    invalid_mode_path = work / "invalid-mode.json"
+    write_json(invalid_mode_path, invalid_mode)
+    result = run([
+        PLANNER, "validate", "--image-id", "nixtache", str(invalid_mode_path), "2", "b" * 64
+    ], expected=False)
+    assert "ephemeral" in result.stderr
     malformed = target.copy()
     malformed["logicalTopology"] = dict(target["logicalTopology"])
     malformed["logicalTopology"]["fingerprint"] = "0" * 64
@@ -394,7 +441,7 @@ def main():
             execute_case(root, name, case)
         execute_legacy(root, bundle["cases"]["add-first-child"])
         execute_singleton(root)
-        execute_descriptor_failures(root, bundle["cases"]["add-first-child"])
+        execute_descriptor_failures(root, bundle["cases"]["persistent-to-ephemeral"])
     print("PASS: descriptor-driven physical transitions")
 
 

@@ -66,10 +66,33 @@ let
   unsafeManagedPaths = filter (entry:
     !hasPrefix "/" entry.path || builtins.elem ".." (splitString "/" entry.path)
   ) pathEntries;
+  fileSystemForPath = path:
+    builtins.foldl' (best: fileSystem:
+      if pathIsPrefix fileSystem.mountPoint path
+        && (best == null || builtins.length (pathComponents fileSystem.mountPoint)
+          > builtins.length (pathComponents best.mountPoint))
+      then fileSystem
+      else best
+    ) null (builtins.attrValues config.fileSystems);
+  pathIsEphemeral = path:
+    let fileSystem = fileSystemForPath path; in
+    fileSystem != null && (fileSystem.fsType or "") == "tmpfs";
+  ephemeralById = builtins.foldl' (result: node:
+    let
+      parent = if node.id == "host" then null else if node.parent == null then "host" else node.parent;
+      inherited = parent != null && (result.${parent} or false);
+    in
+    result // {
+      ${node.id} = inherited || pathIsEphemeral node.upperDir;
+    }
+  ) { } sortedTopology;
+  declaredTopology = map (node: node // {
+    ephemeral = ephemeralById.${node.id};
+  }) sortedTopology;
   topologyFingerprint = builtins.hashString "sha256" (builtins.toJSON
     (map (node: { inherit (node) id parent; }) sortedTopology));
   physicalLib = import ./physical.nix { inherit lib; };
-  physicalTopology = physicalLib.derive { logicalNodes = sortedTopology; };
+  physicalTopology = physicalLib.derive { logicalNodes = declaredTopology; };
   duplicatePhysicalIds = physicalLib.duplicatePhysicalIds physicalTopology.physical.nodes;
   parentRoot = logicalId: "${runtimeState}/parents/${logicalId}";
   physicalHostRoot = "${runtimeState}/physical-host";
@@ -95,12 +118,14 @@ let
     fingerprint = topologyFingerprint;
     order = sortedNodeIds;
     nodes = map (node: {
-        inherit (node) id parent upperDir workDir stateDir lowerRoot;
-      } // optionalAttrs (node ? containerName) {
-        inherit (node) containerName;
-      } // optionalAttrs (node ? isSingleton) {
-        inherit (node) isSingleton;
-      }) sortedTopology;
+      inherit (node) id parent upperDir workDir stateDir lowerRoot;
+    } // optionalAttrs node.ephemeral {
+      inherit (node) ephemeral;
+    } // optionalAttrs (node ? containerName) {
+      inherit (node) containerName;
+    } // optionalAttrs (node ? isSingleton) {
+      inherit (node) isSingleton;
+    }) declaredTopology;
   };
 in
 {
@@ -113,11 +138,11 @@ in
       descriptor = logicalDescriptor;
       inherit frozenParentByLogical frozenMounts frozenMountByPhysical parentRoot physicalHostRoot frozenRoot;
       rebase = args: physicalLib.derive ({
-        logicalNodes = sortedTopology;
+        logicalNodes = declaredTopology;
         previousPhysical = physicalTopology.physical.nodes;
       } // args);
       transition = args: physicalLib.transition ({
-        sourceLogical = sortedTopology;
+        sourceLogical = declaredTopology;
         previousPhysical = physicalTopology.physical.nodes;
       } // args);
     };

@@ -66,7 +66,18 @@ rec {
         ] else [
           (runtimeNode node node.id (physicalParent node))
         ];
-      physicalNodes = builtins.concatLists (map nodesFor sortedLogical);
+      basePhysicalNodes = builtins.concatLists (map nodesFor sortedLogical);
+      ephemeralByPhysical = builtins.foldl' (result: node:
+        result // {
+          ${node.id} = (logicalById.${node.logicalId}.ephemeral or false)
+            || (node.parent != null && (result.${node.parent} or false));
+        }
+      ) { } basePhysicalNodes;
+      physicalNodes = map (node:
+        node // lib.optionalAttrs ephemeralByPhysical.${node.id} {
+          ephemeral = true;
+        }
+      ) basePhysicalNodes;
       duplicateIds = duplicatePhysicalIds physicalNodes;
       physicalById =
         if duplicateIds != [ ] then
@@ -89,11 +100,15 @@ rec {
           } else null;
           viewFingerprint = node.viewFingerprint or null;
           rebasedFrom = node.rebasedFrom or null;
+        } // lib.optionalAttrs (node.ephemeral or false) {
+          ephemeral = true;
         };
       lineageByPhysical = lib.mapAttrs (id: _: lineageFor id) physicalById;
       generationFingerprint = builtins.hashString "sha256" (builtins.toJSON {
         logical = map (node: {
           inherit (node) id parent upperDir workDir stateDir;
+        } // lib.optionalAttrs (node.ephemeral or false) {
+          ephemeral = true;
         }) sortedLogical;
         physical = lineageByPhysical;
       });
@@ -131,7 +146,8 @@ rec {
         else if !(sourceById ? ${id}) then
           "add"
         else if sourceById.${id}.upperDir != targetById.${id}.upperDir
-          || sourceById.${id}.stateDir != targetById.${id}.stateDir then
+          || sourceById.${id}.stateDir != targetById.${id}.stateDir
+          || (sourceById.${id}.ephemeral or false) != (targetById.${id}.ephemeral or false) then
           "storage-reset"
         else if sourceById.${id}.parent != targetById.${id}.parent then
           "reparent"

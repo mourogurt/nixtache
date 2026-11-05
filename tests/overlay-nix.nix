@@ -57,6 +57,141 @@ let
   prepareCommand = svcDefault.nixtache-overlay-prepare.script;
   prepareScript = builtins.readFile (builtins.head (lib.splitString " " prepareCommand));
 
+  migration = import ../modules/overlay-nix/migration.nix { inherit pkgs; };
+  migrationCheck = pkgs.runCommand "overlay-nix-migration-test" { } ''
+    set -euo pipefail
+    ${migration.rollbackActivationSnippet}
+    ${migration.activatePathSnippet}
+
+    fail_copy=0
+    corrupt_copy=0
+    force_exdev=0
+    cp() {
+      local destination
+      for destination; do :; done
+      if [ "$fail_copy" = 1 ]; then
+        mkdir -p "$destination"
+        printf 'partial\n' > "$destination/partial"
+        return 1
+      fi
+      if [ "$corrupt_copy" = 1 ]; then
+        command cp "$@" || return 1
+        rm -f -- "$destination/keep"
+        return 0
+      fi
+      command cp "$@"
+    }
+    stat() {
+      local path
+      if [ "$force_exdev" = 1 ]; then
+        for path; do :; done
+        case "$path" in
+          */backup-parent) printf '2\n'; return 0 ;;
+          */link) printf '1\n'; return 0 ;;
+        esac
+      fi
+      command stat "$@"
+    }
+    new_case() {
+      case_dir="$PWD/$1"
+      source="$case_dir/source"
+      link="$case_dir/link"
+      backup="$case_dir/backup-parent/legacy"
+      activation_log="$case_dir/activation.log"
+      mkdir -p "$source" "$link" "$(dirname "$backup")"
+      printf 'selected\n' > "$source/selected"
+      printf 'legacy\n' > "$link/keep"
+      ln -s keep "$link/root"
+      : > "$activation_log"
+    }
+
+    new_case same-filesystem
+    activate_path "$source" "$link" "$backup"
+    test "$(readlink "$link")" = "$source"
+    test "$(cat "$backup/keep")" = legacy
+    grep -Fx "M|$link|$backup" "$activation_log"
+    test ! -e "$backup.migration-ready"
+
+    new_case copy-interruption
+    force_exdev=1
+    fail_copy=1
+    if activate_path "$source" "$link" "$backup"; then
+      echo "interrupted copy unexpectedly activated the selected path" >&2
+      exit 1
+    fi
+    fail_copy=0
+    test "$(cat "$link/keep")" = legacy
+    test ! -e "$backup"
+    if grep -q '^M|' "$activation_log"; then
+      echo "interrupted copy was journaled as migrated" >&2
+      exit 1
+    fi
+    activate_path "$source" "$link" "$backup"
+    test "$(readlink "$link")" = "$source"
+    test "$(cat "$backup/keep")" = legacy
+    test "$(readlink "$backup/root")" = keep
+    test -e "$backup.migration-ready"
+
+    new_case copy-verification
+    corrupt_copy=1
+    if activate_path "$source" "$link" "$backup"; then
+      echo "incomplete temporary copy was published as a verified backup" >&2
+      exit 1
+    fi
+    corrupt_copy=0
+    test "$(cat "$link/keep")" = legacy
+    test ! -e "$backup"
+    if grep -q '^M|' "$activation_log"; then
+      echo "unverified temporary copy was journaled as migrated" >&2
+      exit 1
+    fi
+
+    new_case incomplete-backup
+    mkdir -p "$backup"
+    printf 'incomplete\n' > "$backup/partial"
+    if activate_path "$source" "$link" "$backup"; then
+      echo "incomplete existing backup displaced the legacy source" >&2
+      exit 1
+    fi
+    test "$(cat "$link/keep")" = legacy
+    test ! -L "$link"
+    if grep -q '^M|' "$activation_log"; then
+      echo "incomplete existing backup was journaled as migrated" >&2
+      exit 1
+    fi
+
+    new_case unlink-interruption
+    cleanup_definition=$(declare -f remove_migrated_source)
+    remove_migrated_source() { return 1; }
+    if activate_path "$source" "$link" "$backup"; then
+      echo "interrupted source cleanup unexpectedly activated the selected path" >&2
+      exit 1
+    fi
+    eval "$cleanup_definition"
+    test "$(cat "$link/keep")" = legacy
+    test "$(cat "$backup/keep")" = legacy
+    test -e "$backup.migration-ready"
+    grep -Fx "M|$link|$backup" "$activation_log"
+    : > "$activation_log"
+    activate_path "$source" "$link" "$backup"
+    test "$(readlink "$link")" = "$source"
+    test "$(cat "$backup/keep")" = legacy
+    grep -Fx "M|$link|$backup" "$activation_log"
+
+    touch "$out"
+  '';
+
+  scenarioMigration = {
+    name = "cross-filesystem migration publishes verified backups before journaling and source cleanup";
+    checks = {
+      transactionalRecovery = lib.isDerivation migrationCheck;
+      sameFilesystemMoveRetained = lib.hasInfix ''if ! mv "$link" "$backup"; then'' selectScript;
+      copyFaultAnchorRetained = lib.hasInfix ''if ! cp -a -- "$link" "$temporary"; then'' selectScript;
+      unlinkFaultAnchorRetained = lib.hasInfix "remove_migrated_source() {\n  local link=$1" selectScript;
+      stateSourceNotDeletedBeforeVerification = !(lib.hasInfix ''if [ -d "$link" ] && [ ! -L "$link" ] && [ -e "$backup" ]; then'' selectScript);
+    };
+  };
+
   scenarioDefault = {
     name = "persistent uppers use physical-slot metaslots and stable selection paths";
     checks = {
@@ -403,8 +538,48 @@ let
     targetLogical = addedChild.nodes;
     policy = "wipe";
   };
+  storageModeLayers = [
+    ((layer "b" null) // {
+      upperDir = "/tmp/nix-overlay-b/upper";
+      workDir = "/tmp/nix-overlay-b/work";
+    })
+    (layer "c" "b")
+    (layer "e" null)
+  ];
+  mkStorageModeHost = ephemeral: mkHost {
+    services.nixtache.overlay-nix = {
+      _layers = storageModeLayers;
+      upperOnUpdate = "reconcile";
+    };
+    fileSystems = {
+      "/" = {
+        device = "/dev/sda";
+        fsType = "ext4";
+      };
+    } // lib.optionalAttrs ephemeral {
+      "/tmp/nix-overlay-b" = {
+        device = "tmpfs";
+        fsType = "tmpfs";
+      };
+    };
+  };
+  storageModeSourceTopology = (cfgOf (mkStorageModeHost false))._topology;
+  storageModeEphemeralTopology = (cfgOf (mkStorageModeHost true))._topology;
+  persistentToEphemeral = storageModeSourceTopology.transition {
+    targetLogical = storageModeEphemeralTopology.descriptor.nodes;
+    policy = "reconcile";
+  };
+  ephemeralToPersistent = storageModeEphemeralTopology.transition {
+    targetLogical = storageModeSourceTopology.descriptor.nodes;
+    policy = "reconcile";
+  };
+  storageModeTargetById = lib.listToAttrs (map
+    (node: lib.nameValuePair node.id node)
+    storageModeEphemeralTopology.descriptor.nodes);
   descriptorNode = node: {
     inherit (node) id parent upperDir workDir stateDir lowerRoot;
+  } // lib.optionalAttrs (node ? ephemeral) {
+    inherit (node) ephemeral;
   } // lib.optionalAttrs (node ? containerName) {
     inherit (node) containerName;
   } // lib.optionalAttrs (node ? isSingleton) {
@@ -424,8 +599,8 @@ let
     inherit (transition) operations dispositions;
   };
   plannerCase = source: target: policy: {
-    source = logicalDescriptorFor source.nodes;
-    target = logicalDescriptorFor target.nodes;
+    source = source.descriptor or (logicalDescriptorFor source.nodes);
+    target = target.descriptor or (logicalDescriptorFor target.nodes);
     sourcePhysical = source.physical.nodes;
     sourceConsumer = source.consumerNodeByLogical;
     sourceExpected = graphProjection source;
@@ -439,6 +614,8 @@ let
       reparent = plannerCase addedChild movedBranch "reconcile";
       remove = plannerCase movedBranch removedBranch "reconcile";
       storage-reset = plannerCase operationSource changedStorage "reconcile";
+      persistent-to-ephemeral = plannerCase storageModeSourceTopology persistentToEphemeral "reconcile";
+      ephemeral-to-persistent = plannerCase storageModeEphemeralTopology ephemeralToPersistent "reconcile";
       wipe = plannerCase operationSource wipedChild "wipe";
     };
   });
@@ -534,6 +711,36 @@ let
     name = "planner rejects physical ID collisions before writing plans and accepts noncolliding names";
     checks.rejected = lib.isDerivation plannerPhysicalIdCheck;
   };
+  scenarioStorageModeTransitions = {
+    name = "target-declared tmpfs modes reset and filter exactly their physical subtrees in both transition directions";
+    checks = {
+      sourceModesSerialized = builtins.all
+        (node: !(node.ephemeral or false))
+        storageModeSourceTopology.descriptor.nodes;
+      ancestorTmpfsAndLogicalDescendantsSerialized = !(storageModeTargetById.host.ephemeral or false)
+        && (storageModeTargetById.b.ephemeral or false)
+        && (storageModeTargetById.c.ephemeral or false)
+        && !(storageModeTargetById.e.ephemeral or false);
+      physicalDescendantsInheritTargetMode =
+        (persistentToEphemeral.physical.byId."b-lower".ephemeral or false)
+        && (persistentToEphemeral.physical.byId."b-runtime".ephemeral or false)
+        && (persistentToEphemeral.physical.byId.c.ephemeral or false)
+        && !(persistentToEphemeral.physical.byId.e ? ephemeral);
+      persistentToEphemeralOperations = persistentToEphemeral.operations.b == "storage-reset"
+        && persistentToEphemeral.operations.c == "storage-reset"
+        && persistentToEphemeral.operations.e == "unchanged";
+      ephemeralToPersistentOperations = ephemeralToPersistent.operations.b == "storage-reset"
+        && ephemeralToPersistent.operations.c == "storage-reset"
+        && ephemeralToPersistent.operations.e == "unchanged";
+      fingerprintsReflectBothDirections =
+        persistentToEphemeral.generationFingerprint != storageModeSourceTopology.generationFingerprint
+        && ephemeralToPersistent.generationFingerprint != storageModeEphemeralTopology.generationFingerprint;
+      materializerUsesTargetRows = !(lib.hasInfix "findmnt -T" materializerSource)
+        && lib.hasInfix "target_ephemeral" materializerSource;
+      plannerAndMaterializerCoverBothDirections = lib.isDerivation plannerTransitionCheck;
+    };
+  };
+
   scenarioTransitionOperations = {
     name = "source-to-target transitions preserve eligible branches and classify topology operations";
     checks = {
@@ -630,7 +837,8 @@ let
         && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/beta/nix/var/nix'' frozenSelection;
       frozenMetadataReadOnlyWithoutCopies =
         lib.hasInfix ''mount -o remount,ro,bind "$target/$name"'' frozenSelection
-        && !(lib.hasInfix "cp -a" frozenSelection);
+        && !(lib.hasInfix ''cp -a "$source'' frozenSelection)
+        && !(lib.hasInfix ''cp -a -- "$source'' frozenSelection);
       noRuntimeContinuationLower =
         !(lib.hasInfix ''activate_frozen_state "$consumer_generation/state"'' frozenSelection)
         && !(lib.hasInfix "lower_root=/nix/store" frozenPlanService.script)
@@ -815,6 +1023,7 @@ let
   };
 
   scenarios = [
+    scenarioMigration
     scenarioDefault
     scenarioReconcile
     scenarioWipe
@@ -829,6 +1038,7 @@ let
     scenarioRemovalWithoutCollapse
     scenarioReparentLineage
     scenarioPhysicalIdPlannerValidation
+    scenarioStorageModeTransitions
     scenarioTransitionOperations
     scenarioRuntimeFrozenLowers
     scenarioRetainedRuntimePlan
@@ -859,7 +1069,7 @@ in
 pkgs.runCommand "overlay-nix-module-test"
   {
     inherit report failMsg;
-    deps = [ descriptorValidationCheck plannerTransitionCheck plannerPhysicalIdCheck ];
+    deps = [ descriptorValidationCheck plannerTransitionCheck plannerPhysicalIdCheck migrationCheck ];
     passAsFile = [ "report" "failMsg" ];
   }
   ''

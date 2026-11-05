@@ -69,6 +69,8 @@ def validate_node(node, location):
         require(isinstance(node["containerName"], str), f"{location}.containerName must be a string")
     if "isSingleton" in node:
         require(isinstance(node["isSingleton"], bool), f"{location}.isSingleton must be a boolean")
+    if "ephemeral" in node:
+        require(isinstance(node["ephemeral"], bool), f"{location}.ephemeral must be a boolean")
 
 
 def validate_logical(logical):
@@ -221,6 +223,13 @@ def derive(logical_nodes, previous_physical=None):
             "derived physical node identities must be unique; collisions: "
             + ", ".join(sorted(map(str, duplicate_physical_ids))))
     physical_by_id = {node["id"]: node for node in physical_nodes}
+    for node in physical_nodes:
+        parent = node["parent"]
+        ephemeral = bool(logical_by_id[node["logicalId"]].get("ephemeral", False)) or (
+            parent is not None and physical_by_id[parent].get("ephemeral", False)
+        )
+        if ephemeral:
+            node["ephemeral"] = True
     consumer = {
         node["id"]: f"{node['id']}-runtime" if is_split(node["id"]) else node["id"]
         for node in sorted_logical
@@ -229,7 +238,7 @@ def derive(logical_nodes, previous_physical=None):
 
     def lineage(node_id):
         node = physical_by_id[node_id]
-        return {
+        result = {
             "logicalId": node["logicalId"],
             "role": node["role"],
             "parent": lineage(node["parent"]) if node["parent"] is not None else None,
@@ -241,6 +250,9 @@ def derive(logical_nodes, previous_physical=None):
             "viewFingerprint": node.get("viewFingerprint"),
             "rebasedFrom": node.get("rebasedFrom"),
         }
+        if node.get("ephemeral", False):
+            result["ephemeral"] = True
+        return result
 
     lineage_by_physical = {node_id: lineage(node_id) for node_id in physical_by_id}
     graph_fingerprint = fingerprint({
@@ -251,6 +263,7 @@ def derive(logical_nodes, previous_physical=None):
                 "upperDir": node["upperDir"],
                 "workDir": node["workDir"],
                 "stateDir": node["stateDir"],
+                **({"ephemeral": True} if node.get("ephemeral", False) else {}),
             }
             for node in sorted_logical
         ],
@@ -396,7 +409,9 @@ def transition(source_logical, previous_physical, target_logical, policy):
         elif node_id not in source_by_id:
             operation = "add"
         elif (source_by_id[node_id]["upperDir"] != target_by_id[node_id]["upperDir"]
-              or source_by_id[node_id]["stateDir"] != target_by_id[node_id]["stateDir"]):
+              or source_by_id[node_id]["stateDir"] != target_by_id[node_id]["stateDir"]
+              or source_by_id[node_id].get("ephemeral", False)
+              != target_by_id[node_id].get("ephemeral", False)):
             operation = "storage-reset"
         elif source_by_id[node_id].get("parent") != target_by_id[node_id].get("parent"):
             operation = "reparent"
@@ -482,6 +497,7 @@ def make_plan(args):
             logical["upperDir"],
             logical["stateDir"],
             "1" if logical.get("isSingleton", False) else "0",
+            "1" if node.get("ephemeral", False) else "0",
         ]
         rows.append("|".join("-" if value is None else value for value in values) + "\n")
     write_text(args.output_rows, "".join(rows))
