@@ -21,14 +21,11 @@
         overlays = [
           (_: prev: {
             tzdata = prev.tzdata.overrideAttrs (_: { doCheck = false; });
-            gcc-unwrapped = prev.gcc-unwrapped.overrideAttrs (old: {
-              postInstall = ''
-                eval "$(declare -f moveToOutput | sed 's/mv /cp -a /g')"
-              '' + old.postInstall;
-              preFixupLibGccPhase = builtins.replaceStrings
-                [ "mv    $lib/lib/libgcc_s.so" ]
-                [ "cp -a $lib/lib/libgcc_s.so" ]
-                old.preFixupLibGccPhase;
+            gcc-unwrapped = prev.gcc-unwrapped.overrideAttrs (_: {
+              # GCC moves libraries between outputs during fixup, and downstream
+              # bootstrap packages require those moves to leave no compiler-output
+              # references. CA resolution breaks that multi-output sequence.
+              __contentAddressed = false;
             });
             haskellPackages = prev.haskellPackages.override (old: {
               overrides = lib.composeExtensions (old.overrides or (_: _: { })) (_: hsPrev: {
