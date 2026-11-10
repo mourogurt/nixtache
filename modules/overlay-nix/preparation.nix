@@ -443,13 +443,17 @@ let
           done < "$rows"
           return 1
         }
+        physical_mount_dir() {
+          printf '%s\n' "$scratch/mounted-uppers/$1"
+        }
         store_url() {
-          local own=$1 current=$2 parent logical role current_stage current_root state lower
+          local own=$1 current=$2 parent logical role current_stage current_root mount_upper state lower
           parent=$(physical_parent "$current")
           logical=$(physical_logical "$current")
           role=$(physical_role "$current")
           current_stage=$(physical_stage "$current" "$logical" "$role")
           current_root=$(physical_root "$current")
+          mount_upper="$(physical_mount_dir "$current")/upper"
           if [ "$own" = "$current" ]; then
             state="$current_stage/state"
           else
@@ -460,19 +464,47 @@ let
           else
             lower=$(uri_encode "$(store_url "$own" "$parent")")
           fi
-          printf '%s\n' "local-overlay://?root=$current_root&state=$state&lower-store=$lower&upper-layer=$current_stage/upper&ignore-gc-delete-failure=true&check-mount=false"
+          printf '%s\n' "local-overlay://?root=$current_root&state=$state&lower-store=$lower&upper-layer=$mount_upper&ignore-gc-delete-failure=true&check-mount=false"
+        }
+        physical_lower_layers() {
+          local ancestor=$1 logical role ancestor_stage alias layers=""
+          while [ "$ancestor" != - ]; do
+            logical=$(physical_logical "$ancestor")
+            role=$(physical_role "$ancestor")
+            ancestor_stage=$(physical_stage "$ancestor" "$logical" "$role")
+            alias="$scratch/l/$ancestor"
+            mkdir -p "$alias"
+            if ! mountpoint -q "$alias"; then
+              mount --bind "$ancestor_stage/upper" "$alias"
+            fi
+            mount -o remount,ro,bind "$alias"
+            layers="''${layers:+''${layers}:}$alias"
+            ancestor=$(physical_parent "$ancestor")
+          done
+          printf '%s\n' "''${layers:+''${layers}:}$lower_store"
         }
         mount_physical() {
-          local physical_id=$1 logical_id=$2 role=$3 parent=$4 node_stage node_root parent_root
+          local physical_id=$1 logical_id=$2 role=$3 parent=$4 node_stage node_root mount_dir lower_layers
           node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
           node_root=$(physical_root "$physical_id")
-          mkdir -p "$node_root/nix/store"
-          if [ "$parent" = - ]; then
-            parent_root="$lower_store"
-          else
-            parent_root="$(physical_root "$parent")/nix/store"
+          mount_dir=$(physical_mount_dir "$physical_id")
+          lower_layers=$(physical_lower_layers "$parent")
+          mkdir -p "$node_root/nix/store" "$mount_dir/work"
+          if [ ! -d "$mount_dir/upper" ]; then
+            mkdir -p "$mount_dir/upper"
+            cp -a "$node_stage/upper/." "$mount_dir/upper/"
           fi
-          mount -t overlay overlay -o lowerdir="$parent_root",upperdir="$node_stage/upper",workdir="$node_stage/work" "$node_root/nix/store"
+          # Private mount uppers avoid upper/lower sharing; independent short
+          # aliases avoid nested stacking and new-mount-API option length limits.
+          mount -t overlay overlay -o lowerdir="$lower_layers",upperdir="$mount_dir/upper",workdir="$mount_dir/work" "$node_root/nix/store"
+        }
+        publish_mount_upper() {
+          local physical_id=$1 logical_id=$2 role=$3 node_stage mount_dir
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          mount_dir=$(physical_mount_dir "$physical_id")
+          rm -rf "$node_stage/upper"
+          mkdir -p "$node_stage/upper"
+          cp -a "$mount_dir/upper/." "$node_stage/upper/"
         }
         unmount_all() {
           local physical_id rest node_root
@@ -500,6 +532,7 @@ let
           else
             repair_store "$node_url" "$node_stage/state" "$node_root"
           fi
+          publish_mount_upper "$physical_id" "$logical_id" "$role"
           mkdir -p "$scratch/lower-states/$physical_id"
           cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"
           echo "nixtache-overlay: prepared $physical_id"
