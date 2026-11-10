@@ -114,15 +114,46 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     import shlex
+    from typing import TypedDict
+
+    class RunnerSettings(TypedDict):
+        parent: str | None
+        mode: str
+        path: str
+        hostBackup: str
+        containerName: str
+        lowerRoot: str
+        socket: str
+
+    class ExpectedPhysicalNode(TypedDict):
+        id: str
+        logicalId: str
+        role: str
+        parent: str | None
+
+    class ExpectedPhysicalGraph(TypedDict):
+        nodes: list[ExpectedPhysicalNode]
+        order: list[str]
+
+    class ExpectedGraph(TypedDict):
+        nodes: list[dict[str, object]]
+        order: list[str]
+        physical: ExpectedPhysicalGraph
+        consumerNodeByLogical: dict[str, str]
+        frozenLowerByLogical: dict[str, str]
+        lineageByPhysical: dict[str, dict[str, object]]
+        generationFingerprint: str
+        operations: dict[str, str]
+        dispositions: dict[str, str]
 
     POLICY = ${builtins.toJSON policy}
-    SOURCE_RUNNERS = ${builtins.toJSON (fixture.pythonRunners sourceState)}
-    CLONE_RUNNERS = ${builtins.toJSON (fixture.pythonContainers cloneState)}
-    TARGET_RUNNERS = ${builtins.toJSON (fixture.pythonRunners targetState)}
+    SOURCE_RUNNERS: dict[str, RunnerSettings] = json.loads(${builtins.toJSON (builtins.toJSON (fixture.pythonRunners sourceState))})
+    CLONE_RUNNERS: dict[str, RunnerSettings] = json.loads(${builtins.toJSON (builtins.toJSON (fixture.pythonContainers cloneState))})
+    TARGET_RUNNERS: dict[str, RunnerSettings] = json.loads(${builtins.toJSON (builtins.toJSON (fixture.pythonRunners targetState))})
     RUNNERS = SOURCE_RUNNERS
-    SOURCE_GRAPH = ${builtins.toJSON (oracle.projection sourceExpected)}
-    CLONE_GRAPH = ${builtins.toJSON (oracle.projection cloneExpected)}
-    TARGET_GRAPH = ${builtins.toJSON (oracle.projection replacementExpected)}
+    SOURCE_GRAPH: ExpectedGraph = json.loads(${builtins.toJSON (builtins.toJSON (oracle.projection sourceExpected))})
+    CLONE_GRAPH: ExpectedGraph = json.loads(${builtins.toJSON (builtins.toJSON (oracle.projection cloneExpected))})
+    TARGET_GRAPH: ExpectedGraph = json.loads(${builtins.toJSON (builtins.toJSON (oracle.projection replacementExpected))})
     EXPECTED_GRAPH = SOURCE_GRAPH
     CONSUMERS = ${builtins.toJSON consumerBundle.consumerPaths}
     DEPENDENCIES = ${builtins.toJSON consumerBundle.dependencyPaths}

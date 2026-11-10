@@ -126,6 +126,13 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     import shlex
+    from typing import TypedDict
+
+    class ExpectedPhysicalNode(TypedDict):
+        id: str
+        logicalId: str
+        role: str
+        parent: str | None
 
     SCENARIO = ${builtins.toJSON scenario}
     POLICY = ${builtins.toJSON policy}
@@ -152,7 +159,7 @@ pkgs.testers.runNixOSTest {
       "d": "empty",
       "e": "empty" if POLICY == "wipe" else "clone-and-repair",
     }
-    EXPECTED_PHYSICAL = [
+    EXPECTED_PHYSICAL: list[ExpectedPhysicalNode] = [
       {"id": "host-lower", "logicalId": "host", "role": "frozen-lower", "parent": None},
       {"id": "host-runtime", "logicalId": "host", "role": "runtime", "parent": "host-lower"},
       {"id": "b-lower", "logicalId": "b", "role": "frozen-lower", "parent": "host-lower"},
