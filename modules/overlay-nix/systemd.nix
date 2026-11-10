@@ -170,6 +170,16 @@ in
             }
           fi
           mountpoint -q ${physicalHostRoot}/nix/store
+          frozen_parent() {
+            local wanted=$1 row_id logical_id role row_parent rest
+            while IFS='|' read -r row_id logical_id role row_parent rest; do
+              if [ "$row_id" = "$wanted" ]; then
+                printf '%s\n' "$row_parent"
+                return 0
+              fi
+            done < "$rows"
+            return 1
+          }
           while IFS='|' read -r physical_id logical_id role parent rest; do
             [ -n "$physical_id" ] || continue
             [ "$role" = frozen-lower ] || continue
@@ -216,7 +226,16 @@ in
               lower_root="${runtimeState}/frozen/$parent/nix/store"
             fi
             mountpoint -q "$lower_root"
-            mount -t overlay overlay -o lowerdir="$upper_dir":"$lower_root",upperdir="$private_upper",workdir="$work_dir" "$store_dir"
+            lower_layers="$upper_dir"
+            ancestor="$parent"
+            while [ "$ancestor" != - ]; do
+              ancestor_upper="${runtimeState}/frozen/$ancestor/upper"
+              lower_layers="$lower_layers:$ancestor_upper"
+              ancestor=$(frozen_parent "$ancestor")
+            done
+            lower_layers="$lower_layers:${physicalHostRoot}/nix/store"
+            # Independent lower layers avoid OverlayFS-over-OverlayFS stacking limits.
+            mount -t overlay overlay -o lowerdir="$lower_layers",upperdir="$private_upper",workdir="$work_dir" "$store_dir"
             mount --bind "$store_dir" "$store_dir"
             mount -o remount,ro,bind "$store_dir"
           done < "$rows"

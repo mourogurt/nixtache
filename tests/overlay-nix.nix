@@ -531,7 +531,14 @@ let
         && indexOf "middle-runtime" nestedTopology.physical.order
           < indexOf "leaf" nestedTopology.physical.order;
       leafUsesMiddle = nestedTopology.physical.byId.leaf.parent == "middle-lower"
-        && lib.hasInfix "parent_root=\"$(physical_root \"$parent\")/nix/store\"" nestedScript;
+        && lib.hasInfix ''lower=$(uri_encode "$(store_url "$own" "$parent")")'' nestedScript;
+      flatLowerLayers = lib.hasInfix ''lower_layers=$(physical_lower_layers "$parent")'' nestedScript
+        && lib.hasInfix ''ancestor_stage=$(physical_stage "$ancestor" "$logical" "$role")'' nestedScript
+        && lib.hasInfix ''alias="$scratch/l/$ancestor"'' nestedScript
+        && lib.hasInfix ''mount --bind "$ancestor_stage/upper" "$alias"'' nestedScript
+        && lib.hasInfix ''lowerdir="$lower_layers",upperdir="$mount_dir/upper",workdir="$mount_dir/work"'' nestedScript
+        && lib.hasInfix ''publish_mount_upper "$physical_id" "$logical_id" "$role"'' nestedScript
+        && !(lib.hasInfix ''lowerdir="$parent_root"'' nestedScript);
       leafHasOwnState = lib.hasInfix ''destination="$stage/nodes/$physical_id"'' materializerSource;
       finalWholeTreeCheck = lib.hasInfix "check_store \"$node_url\" \"$node_root\"" nestedScript
         && lib.hasInfix "unmount_all" nestedScript;
@@ -988,7 +995,8 @@ let
   frozenPlanUnit = "nixtache-overlay-frozen.service";
   hostFrozenUnit = "nixtache-overlay-frozen-host-lower.service";
   alphaFrozenUnit = "nixtache-overlay-frozen-alpha-lower.service";
-  parentRootPhase = builtins.elemAt (lib.splitString ''done < "$rows"'' frozenPlanService.script) 1;
+  parentRootPhaseParts = lib.splitString ''done < "$rows"'' frozenPlanService.script;
+  parentRootPhase = builtins.elemAt parentRootPhaseParts (builtins.length parentRootPhaseParts - 1);
   selectsPlanParent = nodeId:
     lib.hasInfix "parent_physical=$(plan_consumer_parent ${nodeId})" parentRootPhase
     && lib.hasInfix "activate_lower_root \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" parentRootPhase
@@ -1009,7 +1017,10 @@ let
       selectedSlotAndGeneration = lib.hasInfix "slot=$(cat /run/nixtache-overlay/selected-slot" frozenPlanService.script
         && lib.hasInfix ''"$(readlink -f "/var/lib/nix-overlay/upper-slots/$slot/current")" = "$generation"'' frozenPlanService.script;
       privateRunWork = lib.hasInfix ''frozen_root="/run/nixtache-overlay/frozen/$physical_id"'' frozenPlanService.script
-        && lib.hasInfix ''lowerdir="$upper_dir":"$lower_root",upperdir="$private_upper",workdir="$work_dir" "$store_dir"'' frozenPlanService.script;
+        && lib.hasInfix ''lower_layers="$upper_dir"'' frozenPlanService.script
+        && lib.hasInfix ''lower_layers="$lower_layers:$ancestor_upper"'' frozenPlanService.script
+        && lib.hasInfix ''ancestor=$(frozen_parent "$ancestor")'' frozenPlanService.script
+        && lib.hasInfix ''lowerdir="$lower_layers",upperdir="$private_upper",workdir="$work_dir" "$store_dir"'' frozenPlanService.script;
       frozenStoresReadOnly = lib.hasInfix ''mount -o remount,ro,bind "$store_dir"'' frozenPlanService.script;
       frozenReadinessIsStrict = lib.hasPrefix "set -euo pipefail\n" frozenPlanService.script
         && lib.hasInfix ''if [ "$published_plan" = 1 ] && ! grep -q "^$physical_id|" "$generation/persistent-plan.rows"; then'' frozenPlanService.script
