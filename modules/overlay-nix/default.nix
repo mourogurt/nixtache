@@ -46,6 +46,7 @@ let
   systemdModule = import ./systemd.nix (shared // {
     prepareScript = preparation.script;
     selectionScript = selection.script;
+    parentRootActivationSnippet = selection.parentRootActivationSnippet;
   });
 
   layerType = types.submodule {

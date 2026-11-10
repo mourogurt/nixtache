@@ -233,6 +233,58 @@ let
     for name in ${concatStringsSep " " stateNames}; do reset_dir "${node.stateDir}/$name"; done
   '') sortedTopology;
 
+  lowerRootFunctionsSnippet = ''
+    activate_lower_root() {
+      local source=$1 destination=$2 name
+      mkdir -p "$destination/nix/store" "$destination/nix/var/nix"
+      if ! mountpoint -q "$destination/nix/store"; then
+        mount --bind "$source/nix/store" "$destination/nix/store"
+      fi
+      mount -o remount,ro,bind "$destination/nix/store"
+      for name in ${concatStringsSep " " stateNames}; do
+        mkdir -p "$destination/nix/var/nix/$name"
+        if ! mountpoint -q "$destination/nix/var/nix/$name"; then
+          mount --bind "$source/nix/var/nix/$name" "$destination/nix/var/nix/$name"
+        fi
+        mount -o remount,ro,bind "$destination/nix/var/nix/$name"
+      done
+    }
+
+    plan_consumer_parent() {
+      local wanted=$1 physical_id logical_id role parent rest
+      while IFS='|' read -r physical_id logical_id role parent rest; do
+        if [ "$logical_id" = "$wanted" ] && [ "$role" = runtime ]; then
+          printf '%s\n' "$parent"
+          return 0
+        fi
+      done < "$generation/plan.rows"
+      echo "nixtache-overlay: selected plan has no runtime row for $wanted" >&2
+      return 1
+    }
+  '';
+
+  parentRootActivationSnippet = ''
+    activation_started=0
+    activation_complete=0
+    activation_log=${runtimeState}/parent-root-activation.log
+    ${migration.rollbackActivationSnippet}
+    trap rollback_activation EXIT
+    ${migration.activatePathSnippet}
+    ${migration.activateStateDirSnippet}
+    activate_frozen_state() {
+      local source=$1 target=$2 backup=$3 name
+      for name in ${concatStringsSep " " stateNames}; do
+        activate_state_dir "$source/$name" "$target/$name" "$backup/$name"
+        mount -o remount,ro,bind "$target/$name"
+      done
+    }
+    activation_started=1
+    : > "$activation_log"
+    ${lowerRootFunctionsSnippet}
+    ${activateParentLowerSnippets}
+    activation_complete=1
+  '';
+
   selectionScript = pkgs.writeShellScript "nixtache-overlay-select" ''
     set -euo pipefail
     export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux systemd ])}
@@ -281,40 +333,12 @@ let
       done
     }
 
-    activate_lower_root() {
-      local source=$1 destination=$2 name
-      mkdir -p "$destination/nix/store" "$destination/nix/var/nix"
-      if ! mountpoint -q "$destination/nix/store"; then
-        mount --bind "$source/nix/store" "$destination/nix/store"
-      fi
-      mount -o remount,ro,bind "$destination/nix/store"
-      for name in ${concatStringsSep " " stateNames}; do
-        mkdir -p "$destination/nix/var/nix/$name"
-        if ! mountpoint -q "$destination/nix/var/nix/$name"; then
-          mount --bind "$source/nix/var/nix/$name" "$destination/nix/var/nix/$name"
-        fi
-        mount -o remount,ro,bind "$destination/nix/var/nix/$name"
-      done
-    }
-
     select_frozen_generation() {
       local physical_id=$1 logical_id=$2 candidate
       candidate="$generation/nodes/$physical_id"
       if [ ! -d "$candidate" ] && [ "$logical_id" = host ]; then candidate="$generation/host"; fi
       if [ ! -d "$candidate" ]; then candidate="$generation/layers/$logical_id"; fi
       printf '%s\n' "$candidate"
-    }
-
-    plan_consumer_parent() {
-      local wanted=$1 physical_id logical_id role parent rest
-      while IFS='|' read -r physical_id logical_id role parent rest; do
-        if [ "$logical_id" = "$wanted" ] && [ "$role" = runtime ]; then
-          printf '%s\n' "$parent"
-          return 0
-        fi
-      done < "$generation/plan.rows"
-      echo "nixtache-overlay: selected plan has no runtime row for $wanted" >&2
-      return 1
     }
 
     activate_generation() {
@@ -330,7 +354,6 @@ let
       ${activationLayerSnippets}
       ${activateFrozenGenerationSnippets}
       ${activatePhysicalHostSnippet}
-      ${activateParentLowerSnippets}
       printf '%s\n' "$1" > ${runtimeState}/selected-generation
       touch ${runtimeState}/selected-chain-ready
       activation_complete=1
@@ -353,7 +376,6 @@ let
       ${activateEphemeralFrozenSnippets}
       ${optionalString abEnabled ''
         ${activatePhysicalHostSnippet}
-        ${activateParentLowerSnippets}
       ''}
       touch ${runtimeState}/selected-chain-ready
       exit 0
@@ -373,7 +395,6 @@ let
       ${resetFrozenSnippets}
       ${activateEphemeralFrozenSnippets}
       ${activatePhysicalHostSnippet}
-      ${activateParentLowerSnippets}
       touch ${runtimeState}/selected-chain-ready
       exit 0
     fi
@@ -399,6 +420,6 @@ let
   '';
 in
 {
-  inherit discoverySnippet metadataValueSnippet readyGenerationSnippet;
+  inherit discoverySnippet metadataValueSnippet readyGenerationSnippet parentRootActivationSnippet;
   script = selectionScript;
 }

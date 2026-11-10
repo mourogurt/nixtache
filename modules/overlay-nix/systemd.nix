@@ -8,6 +8,7 @@
 , slotsDir
 , prepareScript
 , selectionScript
+, parentRootActivationSnippet
 , ...
 }:
 
@@ -219,6 +220,7 @@ in
             mount --bind "$store_dir" "$store_dir"
             mount -o remount,ro,bind "$store_dir"
           done < "$rows"
+          ${parentRootActivationSnippet}
         '';
       };
     })

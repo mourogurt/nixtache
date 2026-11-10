@@ -988,10 +988,12 @@ let
   frozenPlanUnit = "nixtache-overlay-frozen.service";
   hostFrozenUnit = "nixtache-overlay-frozen-host-lower.service";
   alphaFrozenUnit = "nixtache-overlay-frozen-alpha-lower.service";
+  parentRootPhase = builtins.elemAt (lib.splitString ''done < "$rows"'' frozenPlanService.script) 1;
   selectsPlanParent = nodeId:
-    lib.hasInfix "parent_physical=$(plan_consumer_parent ${nodeId})" frozenSelection
-    && lib.hasInfix "activate_lower_root \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" frozenSelection
-    && !(lib.hasInfix "activate_path \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" frozenSelection);
+    lib.hasInfix "parent_physical=$(plan_consumer_parent ${nodeId})" parentRootPhase
+    && lib.hasInfix "activate_lower_root \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" parentRootPhase
+    && !(lib.hasInfix "activate_lower_root" frozenSelection)
+    && !(lib.hasInfix "activate_path \"$parent_root\" /run/nixtache-overlay/parents/${nodeId}" parentRootPhase);
   scenarioRuntimeFrozenLowers = {
     name = "runtime consumers use selected frozen parents with dedicated state and plan ordering";
     checks = {
@@ -1039,12 +1041,13 @@ let
         && selectsPlanParent "alpha"
         && selectsPlanParent "beta"
         && selectsPlanParent "gamma"
-        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/alpha/nix/var/nix'' frozenSelection
-        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/beta/nix/var/nix'' frozenSelection;
-      frozenMetadataReadOnlyWithoutCopies =
-        lib.hasInfix ''mount -o remount,ro,bind "$target/$name"'' frozenSelection
-        && !(lib.hasInfix ''cp -a "$source'' frozenSelection)
-        && !(lib.hasInfix ''cp -a -- "$source'' frozenSelection);
+        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/alpha/nix/var/nix'' parentRootPhase
+        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/beta/nix/var/nix'' parentRootPhase;
+      frozenMetadataReadOnlyWithoutCopies = lib.all (script:
+        lib.hasInfix ''mount -o remount,ro,bind "$target/$name"'' script
+        && !(lib.hasInfix ''cp -a "$source'' script)
+        && !(lib.hasInfix ''cp -a -- "$source'' script)
+      ) [ frozenSelection parentRootPhase ];
       noRuntimeContinuationLower =
         !(lib.hasInfix ''activate_frozen_state "$consumer_generation/state"'' frozenSelection)
         && !(lib.hasInfix "lower_root=/nix/store" frozenPlanService.script)
