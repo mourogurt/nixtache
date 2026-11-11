@@ -258,6 +258,7 @@ let
         };
       initialReverse = reverseAt 0;
       checkpointReverse = reverseAt trace.checkpoint;
+      allReverses = map reverseAt (lib.range 0 (builtins.length history - 1));
       reverseMatchesOracle = reverse: oracle.projection reverse.actual == oracle.projection reverse.expected;
       reverseMatchesHistory = reverse:
         { inherit (reverse.actual) nodes order; }
@@ -289,6 +290,14 @@ let
           intermediateReversePreservesUntouchedLineage = reversePreservesUntouched checkpointReverse;
         };
       };
+      rollbackEveryStep = map (reverse: {
+        name = "${trace.name}: rollback restores ${reverse.targetStep.name}";
+        checks = {
+          reverseMatchesOracle = reverseMatchesOracle reverse;
+          reverseLogicalGraphMatchesHistory = reverseMatchesHistory reverse;
+          reversePreservesUntouchedLineage = reversePreservesUntouched reverse;
+        };
+      }) allReverses;
     };
 
   evaluatedTraces = map evaluateTrace traces;
@@ -331,6 +340,7 @@ let
   scenarios = lib.concatMap (trace: trace.steps) evaluatedTraces
     ++ map (trace: trace.replay) evaluatedTraces
     ++ map (trace: trace.rollback) evaluatedTraces
+    ++ lib.concatMap (trace: trace.rollbackEveryStep) evaluatedTraces
     ++ [ invalidScenario ];
 
   failed = lib.concatMap
