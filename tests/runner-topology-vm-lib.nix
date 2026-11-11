@@ -227,9 +227,13 @@ let
 
     def assert_clone_store(node, path):
         appliance.succeed("test -f " + q(RUNNERS[node]["hostBackup"] + "/nix/store/" + basename(path)))
-        db = RUNNERS[node]["hostBackup"] + "/nix/var/nix/db/db.sqlite"
+        db_dir = RUNNERS[node]["hostBackup"] + "/nix/var/nix/db"
+        db = db_dir + "/db.sqlite"
         sql = "SELECT COUNT(*) FROM ValidPaths WHERE path = '" + path + "';"
-        count = appliance.succeed("sqlite3 " + q(db) + " " + q(sql)).strip()
+        # Overlay activation can mask the persistent clone DB with upper-owned
+        # state. Unmount only in a private namespace to inspect the clone itself.
+        read_db = "if mountpoint -q " + q(db_dir) + "; then umount " + q(db_dir) + "; fi; sqlite3 " + q(db) + " " + q(sql)
+        count = appliance.succeed("unshare -m --propagation private /bin/sh -c " + q(read_db)).strip()
         assert count == "1", f"missing additive clone record for {path} in {db}: {count}"
 
     def assert_runtime_upper(node, path, expected=True):
@@ -279,7 +283,7 @@ let
 
     def tree_checksum(path):
         return appliance.succeed(
-          "tar --sort=name --numeric-owner -cf - -C " + q(path) + " . | sha256sum | awk '{print $1}'"
+          "tar --sort=name --numeric-owner --mtime=@0 --exclude='*/work' -cf - -C " + q(path) + " . | sha256sum | awk '{print $1}'"
         ).strip()
 
     def inactive_slot():
@@ -336,12 +340,16 @@ let
                 assert appliance.succeed("readlink " + q(alias)).strip() == "../nodes/" + physical_id
         return plan
 
-    def wait_graph(blessed=True):
+    def wait_graph(blessed=True, already_blessed=False):
         appliance.wait_until_succeeds(
           "systemctl is-active --quiet nixtache-overlay-ready.target", timeout=600
         )
-        if blessed:
+        if blessed and not already_blessed:
             appliance.wait_until_succeeds("systemctl is-active --quiet boot-complete.target", timeout=300)
+        if already_blessed:
+            # An already-blessed loader entry skips bless-boot and does not pull
+            # boot-complete.target back in; its critical canary must still run.
+            appliance.succeed("systemctl is-active --quiet nixtache-runner-topology-canary.service")
         appliance.wait_until_succeeds(
           "systemctl is-active --quiet nixtache-overlay-frozen.service", timeout=300
         )
@@ -378,9 +386,9 @@ let
             assert "nixtache-overlay-ready.target" in required.split()
             options = crun(node, "findmnt -n -o OPTIONS " + q(settings["path"] + "/nix/store"))
             assert "lowerdir=" + settings["lowerRoot"] + "/nix/store" in options, options
-            upper = appliance.succeed("readlink -f " + q(runtime_upper(node))).strip()
-            expected_upper = selected + "/nodes/" + EXPECTED_GRAPH["consumerNodeByLogical"][node] + "/upper"
-            assert upper == expected_upper, f"{node} upper {upper} does not select {expected_upper}"
+            upper = appliance.succeed("findmnt -n -o FSROOT --target " + q(runtime_upper(node))).strip()
+            expected_upper = selected + "/nodes/" + EXPECTED_GRAPH["consumerNodeByLogical"][node]
+            assert upper == expected_upper, f"{node} upper mount source {upper} does not select {expected_upper}"
             appliance.succeed("test -f " + q(settings["lowerRoot"] + "/nix/var/nix/db/db.sqlite"))
         print("OK: production containers, daemon storage and one atomic readiness boundary are active")
 

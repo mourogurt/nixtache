@@ -80,12 +80,50 @@ let
   };
   sourceIds = builtins.attrNames sourceState;
   consumerBundle = fixture.consumerPackages "runner-operation" ([ "host" ] ++ sourceIds);
-  v1 = fixture.mkAppliance {
+  degradedSubstituterShim = { lib, ... }:
+    let
+      outerPath = builtins.head (lib.splitString " "
+        v1Base.config.systemd.services.nixtache-overlay-prepare.script);
+      outerText = builtins.readFile outerPath;
+      innerPath = builtins.head (lib.splitString "\n"
+        (builtins.elemAt (lib.splitString "unshare -m --propagation private " outerText) 1));
+      innerText = builtins.readFile innerPath;
+      dropFunction = ''
+        drop_target_dependencies() {
+          [ -r /run/nixtache-overlay-test-substituter ] || return 0
+          while read -r dependency; do
+            [ -n "$dependency" ] || continue
+            find "$stage" -path "*/upper/$(basename "$dependency")" -type f -delete
+          done < /run/nixtache-overlay-test-substituter
+          echo "nixtache-overlay-test: removed target-only dependencies for substituter check" >&2
+        }
+      '';
+      injectedInner = pkgs.writeShellScript "nixtache-overlay-verify-degraded-substituter"
+        (builtins.replaceStrings [
+          "set -euo pipefail\n"
+          "lower_url=$(uri_encode \"local?root=$lower_root&state=$stage/host/lower-state&read-only=true\")\n"
+        ] [
+          "set -euo pipefail\n${dropFunction}"
+          "lower_url=$(uri_encode \"local?root=$lower_root&state=$stage/host/lower-state&read-only=true\")\ndrop_target_dependencies\n"
+        ] innerText);
+      injectedOuter = pkgs.writeShellScript "nixtache-overlay-prepare-degraded-substituter"
+        (builtins.replaceStrings
+          [ "unshare -m --propagation private ${innerPath}" ]
+          [ "unshare -m --propagation private ${injectedInner}" ]
+          outerText);
+    in
+    {
+      systemd.services.nixtache-overlay-prepare.script = lib.mkForce "${injectedOuter} --installed";
+    };
+  v1Base = fixture.mkAppliance {
     version = "1";
     state = sourceState;
     inherit policy;
     lowerDependencies = builtins.attrValues consumerBundle.dependencies;
   };
+  v1 = if policy == "reconcile" then v1Base.extendModules {
+    modules = [ degradedSubstituterShim ];
+  } else v1Base;
   v2 = fixture.mkAppliance {
     version = "2";
     state = cloneState;
@@ -192,13 +230,14 @@ pkgs.testers.runNixOSTest {
             parent = RUNNERS[parent]["parent"]
         return result + ["host"]
 
-    def assert_unblessed():
+    def assert_unblessed(counted=True):
         appliance.wait_until_succeeds(
           "systemctl is-failed --quiet nixtache-runner-topology-canary.service", timeout=120
         )
-        appliance.wait_until_succeeds(
-          "systemctl is-failed --quiet nixtache-health-check.service", timeout=120
-        )
+        if counted:
+            appliance.wait_until_succeeds(
+              "systemctl is-failed --quiet nixtache-health-check.service", timeout=120
+            )
         appliance.fail("systemctl is-active --quiet boot-complete.target")
 
     def assert_operation_runtime():
@@ -260,6 +299,7 @@ pkgs.testers.runNixOSTest {
 
     v2_slot = stage("2")
     if POLICY == "reconcile":
+        appliance.succeed("printf '%s\\n' " + q(DEPENDENCIES["host"]) + " > /run/nixtache-overlay-test-substituter")
         deployer.succeed("systemctl stop nix-serve.service")
         appliance.fail("systemctl start nixtache-overlay-prepare.service", timeout=900)
         assert_preparation_blocked(v2_slot, v1_selected, v1_checksum)
@@ -349,6 +389,52 @@ pkgs.testers.runNixOSTest {
     assert_unblessed()
     print("OK: v2 graph and both overlay/clone writes persisted across its second unblessed boot")
 
+    # The v3 installation reuses the v1 physical slot. Verify rollback while
+    # that lower is intact, then force v2 for the clone-to-overlay transition.
+    RUNNERS = SOURCE_RUNNERS
+    EXPECTED_GRAPH = SOURCE_GRAPH
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
+    assert appliance.succeed("cat /etc/image-version").strip() == "1"
+    wait_graph(already_blessed=True)
+    assert selected_generation() == v1_selected
+    assert tree_checksum(v1_selected) == v1_checksum, "rollback changed the preserved source generation"
+    assert_source_working()
+    for node in RUNNERS:
+        path_absent(node, v2_proof)
+        path_absent(node, clone_proof)
+    assert_clone_store("stable", CONSUMERS["stable"])
+    assert_clone_store("stable", clone_proof)
+    appliance.succeed(
+      "test -f " + q(v2_target + "/nodes/addDeep/upper/" + basename(v2_proof))
+    )
+    log = appliance.succeed(
+      "journalctl -b -u nixtache-overlay-select.service -u nixtache-overlay-prepare.service --no-pager -o cat"
+    )
+    for marker in ("nixtache-overlay: repairing ", "nixtache-overlay: prepared ", "nixtache-overlay: checking "):
+        assert marker not in log, f"rollback ran reverse preparation: {log}"
+    print("OK: rollback restored the exact previous graph without reverse preparation")
+
+    RUNNERS = CLONE_RUNNERS
+    EXPECTED_GRAPH = CLONE_GRAPH
+    # Exhausted counted entries are not selectable with set-oneshot, so reuse
+    # the v2 UKI as the plain fallback entry for this forced continuation boot.
+    appliance.succeed(
+      "cp /boot/EFI/Linux/abtest_2+*.efi /boot/EFI/Linux/abtest_1.efi && "
+      "bootctl set-default abtest_1.efi"
+    )
+    appliance.reboot()
+    appliance.wait_for_unit("multi-user.target", timeout=3600)
+    assert appliance.succeed("cat /etc/image-version").strip() == "2"
+    wait_graph(blessed=False)
+    assert selected_generation() == v2_target
+    # Plain fallback entries do not pull in the counted health check; the
+    # failed canary and inactive target still prove this continuation is unblessed.
+    assert_unblessed(counted=False)
+    path_info("addDeep", v2_proof)
+    path_info("stable", clone_proof)
+    assert_clone_store("stable", clone_proof)
+
     v2_checksum = tree_checksum(v2_target)
     v3_slot = stage("3")
     EXPECTED_GRAPH = TARGET_GRAPH
@@ -366,6 +452,8 @@ pkgs.testers.runNixOSTest {
     print("OK: clone-to-overlay published an empty replacement node and preserved the additive clone store")
 
     RUNNERS = TARGET_RUNNERS
+    # Leave the forced v2 fallback behind and select the fresh counted v3 entry.
+    appliance.succeed("bootctl set-default \"$(basename /boot/EFI/Linux/abtest_3+*.efi)\"")
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=3600)
     assert appliance.succeed("cat /etc/image-version").strip() == "3"
@@ -381,28 +469,6 @@ pkgs.testers.runNixOSTest {
     assert_clone_store("stable", clone_proof)
     print("OK: replacement overlay is clean at runtime while the additive clone remains intact")
 
-    RUNNERS = SOURCE_RUNNERS
-    EXPECTED_GRAPH = SOURCE_GRAPH
-    appliance.reboot()
-    appliance.wait_for_unit("multi-user.target", timeout=3600)
-    assert appliance.succeed("cat /etc/image-version").strip() == "1"
-    wait_graph()
-    assert selected_generation() == v1_selected
-    assert tree_checksum(v1_selected) == v1_checksum, "rollback changed the preserved source generation"
-    assert_source_working()
-    for node in RUNNERS:
-        path_absent(node, v2_proof)
-        path_absent(node, clone_proof)
-    assert_clone_store("stable", CONSUMERS["stable"])
-    assert_clone_store("stable", clone_proof)
-    appliance.succeed(
-      "test -f " + q(v2_target + "/nodes/addDeep/upper/" + basename(v2_proof))
-    )
-    log = appliance.succeed(
-      "journalctl -b -u nixtache-overlay-select.service -u nixtache-overlay-prepare.service --no-pager -o cat"
-    )
-    for marker in ("nixtache-overlay: repairing ", "nixtache-overlay: prepared ", "nixtache-overlay: checking "):
-        assert marker not in log, f"rollback ran reverse preparation: {log}"
-    print("PASS: ${policy} operation and clone-mode OTA converged after retry and rollback restored the exact previous graph")
+    print("PASS: ${policy} operation and clone-mode OTA converged after retry; rollback restored the exact previous graph")
   '';
 }
