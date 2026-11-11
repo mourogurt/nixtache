@@ -1022,6 +1022,12 @@ self.nixosModules.runner
       siblingCompatibility = (hostCascadeOverlay.config.services.nixtache.overlay-nix._topology.byId.runner).parent == null;
       cloneOutsideReadiness = !(lib.elem "nixtache-overlay-ready.target"
         (hostNamed.config.systemd.services."container@additive".requires or [ ]));
+      cloneSeedUsesPhysicalLower = hostNamed.config.containers.additive.bindMounts."host-nix-db".hostPath
+        == "/run/nixtache-overlay/physical-host/nix/var/nix/db";
+      cloneSeedWaitsForLower = lib.elem "nixtache-overlay-frozen.service"
+        (hostNamed.config.systemd.services."container@additive".requires or [ ])
+        && lib.elem "nixtache-overlay-frozen.service"
+          (hostNamed.config.systemd.services."container@additive".after or [ ]);
     };
   };
 

@@ -136,12 +136,20 @@ in
     # mode adds the bind explicitly for the clone's scratch copy; overlay
     # additionally binds the lower store and DB outside /nix so the custom
     # daemon's relocated-/nix bind cannot shadow them. Container ordering
-    # makes both modes' first read follow the loader's completion.
+    # makes both modes' first read follow the loader's completion; slot-scoped
+    # clones also wait for the selected physical lower to become available.
     systemd.services = mapAttrs'
       (_: declaration:
+        let
+          selectedPhysicalClone = declaration.store.path != "/"
+            && declaration.store.mode == "clone"
+            && (config.services.nixtache.overlay-nix.enable or false);
+        in
         nameValuePair "container@${declaration.containerName}"
           (mkIf (config.services.nixtache.ab-image.enable or false) {
-            after = [ "nixtache-lower-store-db-load.service" ];
+            after = [ "nixtache-lower-store-db-load.service" ]
+              ++ optional selectedPhysicalClone "nixtache-overlay-frozen.service";
+            requires = optional selectedPhysicalClone "nixtache-overlay-frozen.service";
           }))
       enabledDeclarations;
 
@@ -206,7 +214,11 @@ in
           }) // (optionalAttrs hostNixDisabled {
             "host-nix-db" = {
               mountPoint = "/nix/var/nix/db";
-              hostPath = "/nix/var/nix/db";
+              # A clone copies the complete selected lower closure. Consumer
+              # state contains only upper-owned records and is empty after wipe.
+              hostPath = if useClone && selectionManagedLower
+                then "${config.services.nixtache.overlay-nix._topology.physicalHostRoot}/nix/var/nix/db"
+                else "/nix/var/nix/db";
               isReadOnly = true;
             };
           }) // (optionalAttrs (hostNixDisabled && useOverlay) {

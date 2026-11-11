@@ -43,8 +43,10 @@ owns the generation-artifact and target-preparation contract. On a nix-less
 appliance host the
 runner container also disables its internal nix module, renders `nix.conf`
 with the preserved settings plus `ca-derivations`, and ships the CLI
-explicitly. Clone mode then enumerates a scratch copy of the real host DB.
-Overlay mode binds the selected parent's frozen store and metadata read-only
+explicitly. With host `overlay-nix`, clone mode enumerates a scratch copy of
+the selected physical lower DB after that lower is activated; without it, clone
+mode uses the real host DB. Overlay mode binds the selected parent's frozen
+store and metadata read-only
 under `/run/nixtache-runner-lower` for the singleton, or
 `/run/nixtache-runner-lower/<logical-id>` for a named declaration. Without host
 `overlay-nix`, that root is a plain read-only local lower. With host
@@ -65,9 +67,11 @@ Clone mode is deliberately outside the upper-metaslot tree. Its single relocated
 store at `<hostBackup>/nix` already contains a complete writable local store and
 DB, not an OverlayFS upper with a separate lower/upper metadata role. A slot
 swap seeds the new lower additively into that same store, preserving prior CI
-outputs and avoiding a second multi-GB slot-owned copy. Overlay mode instead
-places each runner upper and its upper-owned state in the physical slot's tree,
-so target preparation and rollback select the host and runner layers together.
+outputs and avoiding a second multi-GB slot-owned copy. Switching to overlay
+covers upper-owned state with generation binds without moving the underlying
+clone DB, so switching back reveals the preserved store. Overlay mode places
+each runner upper and its upper-owned state in the physical slot's tree, so
+target preparation and rollback select the host and runner layers together.
 
 The rest of this document covers the internals: how the dump is generated,
 how the store is imaged, and why the runtime workarounds exist.
