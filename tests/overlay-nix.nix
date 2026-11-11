@@ -540,6 +540,16 @@ let
         && lib.hasInfix ''publish_mount_upper "$physical_id" "$logical_id" "$role"'' nestedScript
         && !(lib.hasInfix ''lowerdir="$parent_root"'' nestedScript);
       leafHasOwnState = lib.hasInfix ''destination="$stage/nodes/$physical_id"'' materializerSource;
+      duplicatesAncestorMetadata = lib.hasInfix ''duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"'' nestedScript
+        && lib.hasInfix ''if [ "$disposition" != empty ] && [ "$disposition" != empty-continuation ]; then'' nestedScript
+        && lib.hasInfix ''parent_state="$scratch/lower-states/$parent"'' nestedScript
+        && lib.hasInfix ''--store "local?root=$scratch/dump-root&state=$parent_state&read-only=true" --dump-db'' nestedScript
+        && lib.hasInfix ''--store "local?root=$merged&state=$state" --load-db'' nestedScript
+        && (posOf ''repair_store "$node_url" "$node_stage/state" "$node_root"'' nestedScript)
+          < (posOf ''duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"'' nestedScript)
+        && (posOf ''duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"'' nestedScript)
+          < (posOf ''cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"'' nestedScript)
+        && !(lib.hasInfix ''duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"'' prepareScript);
       finalWholeTreeCheck = lib.hasInfix "check_store \"$node_url\" \"$node_root\"" nestedScript
         && lib.hasInfix "unmount_all" nestedScript;
       parentsRecheckedAfterChildren = lib.hasInfix "physical_is_parent" nestedScript
@@ -1014,6 +1024,15 @@ let
         && frozenTopology.consumerNodeByLogical.beta == "beta";
       selectedPhysicalUppers = lib.hasInfix ''upper="$generation/nodes/$physical_id/upper"'' frozenPlanService.script
         && lib.hasInfix ''rows="$generation/plan.rows"'' frozenPlanService.script;
+      runnerUppersVisibleThroughContainerBinds =
+        lib.hasInfix ''activate_state_dir "$consumer_generation" /var/lib/runners/alpha/overlay'' frozenSelection
+        && lib.hasInfix ''activate_state_dir "$consumer_generation" /var/lib/runners/beta/overlay'' frozenSelection
+        && !(lib.hasInfix ''activate_state_dir "$consumer_generation/upper" /var/lib/runners/alpha/overlay/upper'' frozenSelection)
+        && !(lib.hasInfix ''activate_path "$consumer_generation/upper" /var/lib/runners/alpha/overlay/upper'' frozenSelection);
+      runnerStatePreservesAdditiveClone =
+        lib.hasInfix ''activate_persistent_state_dir "$consumer_generation/state/$name" "/var/lib/runners/alpha/nix/var/nix/$name"'' frozenSelection
+        && lib.hasInfix "U) ;;" migration.rollbackActivationSnippet
+        && !(lib.hasInfix ''activate_state_dir "$consumer_generation/state/$name" "/var/lib/runners/alpha/nix/var/nix/$name"'' frozenSelection);
       selectedSlotAndGeneration = lib.hasInfix "slot=$(cat /run/nixtache-overlay/selected-slot" frozenPlanService.script
         && lib.hasInfix ''"$(readlink -f "/var/lib/nix-overlay/upper-slots/$slot/current")" = "$generation"'' frozenPlanService.script;
       privateRunWork = lib.hasInfix ''frozen_root="/run/nixtache-overlay/frozen/$physical_id"'' frozenPlanService.script
