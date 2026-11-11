@@ -197,14 +197,14 @@ let
       for name in ${concatStringsSep " " stateNames}; do reset_dir "${node.stateDir}/$name"; done
     else
       ephemeral_layers[${node.id}]=0
-      ${if node.isSingleton or false then ''
+      ${if (node.isSingleton or false) || (node ? containerName) then ''
         activate_state_dir "$consumer_generation" ${dirOf node.upperDir} ${legacyBackup}/layers/${node.id}/overlay
       '' else ''
         activate_path "$consumer_generation/upper" ${node.upperDir} ${legacyBackup}/layers/${node.id}/upper
         activate_path "$consumer_generation/work" ${node.workDir} ${legacyBackup}/layers/${node.id}/work
       ''}
       for name in ${concatStringsSep " " stateNames}; do
-        activate_state_dir "$consumer_generation/state/$name" "${node.stateDir}/$name" "${legacyBackup}/layers/${node.id}/state/$name"
+        activate_persistent_state_dir "$consumer_generation/state/$name" "${node.stateDir}/$name" "${legacyBackup}/layers/${node.id}/state/$name"
       done
     fi
   '') sortedTopology;
@@ -303,6 +303,8 @@ let
     ${migration.activatePathSnippet}
 
     ${migration.activateStateDirSnippet}
+
+    ${migration.activatePersistentStateDirSnippet}
 
     ${discoverySnippet}
 

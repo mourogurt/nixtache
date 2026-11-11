@@ -518,7 +518,24 @@ let
         ${repairStoreSnippet}
         ${checkStoreSnippet}
 
-        while IFS='|' read -r physical_id logical_id role parent rest; do
+        duplicate_visible_metadata() {
+          local physical_id=$1 parent=$2 state=$3 merged=$4 parent_state
+          if [ "$parent" = - ]; then
+            parent_state="$stage/host/lower-state"
+          else
+            parent_state="$scratch/lower-states/$parent"
+          fi
+          mkdir -p "$scratch/dump-root/nix/store"
+          # Parent-first preparation duplicates the parent's complete visible
+          # records into each child upper DB; a local-overlay dump alone would
+          # contain only the child's own upper records.
+          nix-store --option experimental-features "ca-derivations read-only-local-store" \
+            --store "local?root=$scratch/dump-root&state=$parent_state&read-only=true" --dump-db |
+            nix-store --option experimental-features "ca-derivations" \
+              --store "local?root=$merged&state=$state" --load-db
+        }
+
+        while IFS='|' read -r physical_id logical_id role parent operation disposition rest; do
           [ -n "$physical_id" ] || continue
           mount_physical "$physical_id" "$logical_id" "$role" "$parent"
           node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
@@ -532,6 +549,11 @@ let
           else
             repair_store "$node_url" "$node_stage/state" "$node_root"
           fi
+          ${optionalString (cfg.upperOnUpdate == "reconcile") ''
+            if [ "$disposition" != empty ] && [ "$disposition" != empty-continuation ]; then
+              duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"
+            fi
+          ''}
           publish_mount_upper "$physical_id" "$logical_id" "$role"
           mkdir -p "$scratch/lower-states/$physical_id"
           cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"

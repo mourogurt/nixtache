@@ -64,6 +64,9 @@
               ;;
             S) rm -rf "$link"; ln -s "$data" "$link" || true ;;
             N) rm -rf "$link" ;;
+            # Bind-only activation preserves the underlying store; rollback
+            # needs only the unmount performed before this case is dispatched.
+            U) ;;
             B)
               if [ -d "$data" ]; then
                 mkdir -p "$link"
@@ -201,6 +204,31 @@
       fi
       activate_path "$source" "$link" "$backup"
       rm -f "$link"
+      mkdir -p "$link"
+      mount --bind "$source" "$link"
+    }
+  '';
+
+  activatePersistentStateDirSnippet = ''
+    activate_persistent_state_dir() {
+      local source=$1 link=$2 backup=$3 previous_source=""
+      if mountpoint -q "$link"; then
+        previous_source=$(findmnt -n -o FSROOT --target "$link" | head -n 1)
+        if [ -z "$previous_source" ] || [ "$previous_source" = / ]; then
+          previous_source=$(findmnt -n -o SOURCE --target "$link" | head -n 1)
+        fi
+        if [ -n "$previous_source" ]; then
+          printf 'B|%s|%s\n' "$link" "$previous_source" >> "$activation_log"
+        fi
+        umount "$link"
+      elif [ -L "$link" ]; then
+        activate_state_dir "$source" "$link" "$backup"
+        return 0
+      else
+        # Runner state can coexist with an additive clone at the same path.
+        # Cover it with a bind instead of moving the only clone DB to a backup.
+        printf 'U|%s|\n' "$link" >> "$activation_log"
+      fi
       mkdir -p "$link"
       mount --bind "$source" "$link"
     }
