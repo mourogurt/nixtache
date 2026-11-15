@@ -55,11 +55,15 @@ without building, and `suite` overrides `subset`. Full inventory:
 `ab-runner-compat-vm`, `ab-compression-vm`, `ab-staging-vm`,
 `ab-deploy-self-vm`, `ab-ota-verify-vm`, `auto-update-vm`.
 
-`runner-builder-isolation-vm` runs host and custom-daemon builds concurrently
-and checks both cleanup directions: cancelling the host client leaves the
-container builder alive to finish its output, and cancelling the container
-client leaves the host builder alive to finish. The UID-isolation contract is
-in [`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
+`runner-builder-isolation-vm` pins only the inner container to Nix 2.35 and
+starts with a bounded `nix store info` handshake through the relocated socket,
+covering named-descriptor socket activation at runtime. It then runs host and
+custom-daemon builds concurrently and checks both cleanup directions:
+cancelling the host client leaves the container builder alive to finish its
+output, and cancelling the container client leaves the host builder alive to
+finish. `tests/runner.nix` separately covers the evaluated socket wiring. The
+socket-activation and UID-isolation contracts are in
+[`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
 
 Every `vmTests` suite belongs in the full matrix unless it is explicitly
 parked. A parked suite remains locally buildable, its exclusion site names the

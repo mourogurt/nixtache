@@ -118,6 +118,7 @@ self.nixosModules.runner
       storageRequiresSystemDaemon = lib.elem "nix-daemon.service" (svcSrv."nix-daemon-storage".requires or [ ]);
       storageDaemonEnv = lib.elem "NIX_REMOTE=daemon" (svcSrv."nix-daemon-storage".serviceConfig.Environment or [ ]);
       socketPath = (socketsOf hostSrv)."nix-daemon-custom".listenStreams == [ "/srv/nix/var/nix/daemon-socket/socket" ];
+      socketDescriptorName = (socketsOf hostSrv)."nix-daemon-custom".socketConfig.FileDescriptorName == "nix-daemon.socket";
       socketParentTmpfiles = lib.elem
         "d /srv/nix/var/nix/daemon-socket 0755 root root -"
         (containerCfg hostSrv).systemd.tmpfiles.rules;

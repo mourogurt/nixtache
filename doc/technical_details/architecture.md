@@ -49,6 +49,17 @@ all definitions into the inner `eval-config` modules list).
 | `deploy.nix` | `deploy.targets.<name>` map → job env `NIXTACHE_DEPLOY_TARGETS` + per-target key bind-mounts / `LoadCredential` (`deploy_ssh_<name>[.pub]`). |
 | `ab.nix` | Runner-side A/B staging (`deploy.ab.*`): central staging dir + HTTPS distribution via the cache vhost, GPG manifest signing, retain-GC. |
 
+### Runner custom-daemon socket activation
+
+For a relocated store, `nix-daemon-custom.socket` sets
+`FileDescriptorName=nix-daemon.socket`. Nix 2.35 and newer versions accept a
+socket-activated listener only when its `LISTEN_FDNAMES` entry matches
+`nix-daemon.socket`; the explicit descriptor name keeps the custom unit name
+and relocated socket path independent of that protocol requirement. Older Nix
+versions accept the same configuration without filtering by descriptor name.
+Canonical requirement:
+[`openspec/specs/runner/spec.md`](../../openspec/specs/runner/spec.md).
+
 ### Runner custom-daemon builder identities
 
 For a relocated store, `store.nix` declares the `nixtache-runner-bld` group

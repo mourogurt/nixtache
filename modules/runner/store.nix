@@ -485,6 +485,9 @@ in
         description = "Custom Nix Daemon Socket";
         listenStreams = [ "${cfg.store.path}/nix/var/nix/daemon-socket/socket" ];
         socketConfig.DirectoryMode = "0755";
+        # Nix 2.35+ selects socket-activated descriptors by this fixed protocol
+        # name, not by the custom systemd unit name; older Nix ignores the name.
+        socketConfig.FileDescriptorName = "nix-daemon.socket";
         wantedBy = [ "sockets.target" ];
       };
       };

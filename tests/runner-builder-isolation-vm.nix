@@ -1,3 +1,7 @@
+# The host keeps the default Nix package while the inner container uses Nix
+# 2.35. Besides builder UID isolation, the suite verifies that the custom
+# daemon accepts the socket-activated descriptor named "nix-daemon.socket".
+# Cache is disabled to keep this runtime contract independent of nix-serve.
 { nixpkgs, self, system ? "x86_64-linux" }:
 
 let
@@ -22,12 +26,15 @@ pkgs.testers.runNixOSTest {
       store.mode = "clone";
       enableSandbox = false;
     };
-    containers.runner.config = {
+    containers.runner.config = { config, ... }: {
+      nix.package = pkgs.nixVersions.nix_2_35;
+      # Seed the selected inner Nix too: the custom daemon's BindPaths replaces
+      # /nix with this copy before its ExecStart.
       systemd.services.nix-daemon-storage.serviceConfig.ExecStart = lib.mkForce (
         pkgs.writeShellScript "seed-runner-builder-isolation" ''
           ${lib.getExe pkgs.nix} --extra-experimental-features nix-command copy \
             --no-check-sigs --from daemon --to /srv \
-            ${pkgs.nix} ${pkgs.bashInteractive} ${pkgs.coreutils-full}
+            ${pkgs.nix} ${config.nix.package} ${pkgs.bashInteractive} ${pkgs.coreutils-full}
         ''
       );
     };
@@ -192,6 +199,16 @@ pkgs.testers.runNixOSTest {
             + "journalctl -u nix-daemon-custom -u nix-daemon-storage -n 100 --no-pager 2>&1 || true"
         ))
         raise
+
+    # Nix 2.35 filters activated descriptors by name. Bound the probe so a
+    # daemon with no accepted listener fails here instead of hanging a build.
+    crun(
+        "timeout 15 /run/current-system/sw/bin/nix "
+        "--extra-experimental-features nix-command store info "
+        "--store unix:///srv/nix/var/nix/daemon-socket/socket"
+    )
+    print("OK: Nix 2.35 custom-daemon socket handshake")
+
     builder = machine.succeed("readlink -f /bin/sh").strip()
     coreutils_bin = machine.succeed("dirname $(readlink -f $(command -v mkdir))").strip()
     machine.succeed("rm -rf /srv/bincache/runner-isolation && mkdir -p /srv/bincache/runner-isolation")
