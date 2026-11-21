@@ -92,7 +92,7 @@ let
                 chmod +x /tmp/nixtache-legacy-tool
                 mount -t overlay overlay -o lowerdir=/nix/store,upperdir=/var/lib/nix-overlay/upper,workdir=/var/lib/nix-overlay/work /nix/store
                 trap 'umount -l /nix/store 2>/dev/null || true' EXIT
-                p=$(nix-store --option experimental-features "ca-derivations local-overlay-store" --store 'local-overlay://?lower-store=local&upper-layer=/var/lib/nix-overlay/upper&check-mount=false' --add /tmp/nixtache-legacy-tool)
+                p=$(nix-store --option experimental-features "local-overlay-store" --store 'local-overlay://?lower-store=local&upper-layer=/var/lib/nix-overlay/upper&check-mount=false' --add /tmp/nixtache-legacy-tool)
                 echo "$p" > /tmp/nixtache-legacy-tool-path
                 ln -s "$p" /nix/var/nix/gcroots/legacy-tool
                 umount -l /nix/store

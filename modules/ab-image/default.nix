@@ -78,7 +78,9 @@ let
   # Default sysupdate transfers. `@v` carries the version; Path is STATIC
   # (sysupdate.d(5)). Local-self uses a plain-path regular-file source; a
   # remote target uses http(s):// + url-file (set stagingPath to the URL).
-  # Verify is forced from publicKey/publicKeyFile on every transfer.
+  # Verify is forced from publicKey/publicKeyFile on every transfer. `%A`
+  # protects the complete running image's resource set when a later install
+  # makes room before the running system has rebooted into its pending slot.
   defaultTransfers = {
     "10-nix-store" = {
       Source = {
@@ -94,6 +96,7 @@ let
         MatchPartitionType = "linux-generic";
         ReadOnly = "yes";
       };
+      Transfer.ProtectVersion = "%A";
       Transfer.Verify = if verify then "yes" else "no";
     };
     # The slot's lower store DB dump rides the ESP alongside the UKI —
@@ -115,6 +118,7 @@ let
         PathRelativeTo = "boot";
         Type = "regular-file";
       };
+      Transfer.ProtectVersion = "%A";
       Transfer.Verify = if verify then "yes" else "no";
     };
     "20-boot-image" = {
@@ -131,6 +135,7 @@ let
         PathRelativeTo = "boot";
         Type = "regular-file";
       };
+      Transfer.ProtectVersion = "%A";
       Transfer.Verify = if verify then "yes" else "no";
     };
   } // optionalAttrs overlayEnabled {
@@ -148,6 +153,7 @@ let
         PathRelativeTo = "boot";
         Type = "regular-file";
       };
+      Transfer.ProtectVersion = "%A";
       Transfer.Verify = if verify then "yes" else "no";
     };
   };
@@ -169,8 +175,6 @@ in
         Import this module ONLY on A/B targets — it pulls the image-based-appliance
         profile (nix.enable=false), which is wrong for live-rebuilt machines.
         Pair with services.nixtache.deploy-target.ab (runtime: polkit/gating).
-        Enabling disables import from derivation because content-addressed
-        derivations do not support IFD.
       '';
     };
 
@@ -405,7 +409,6 @@ in
 
     system.image.id = cfg.imageId;
     system.image.version = cfg.imageVersion;
-    nix.settings.allow-import-from-derivation = false;
 
     # UKI boot model (the appliance profile enables bootspec/UKI); no grub.
     boot.loader.grub.enable = false;
@@ -574,12 +577,6 @@ in
     # systemd#40702, means relying on /etc alone can fail).
     environment.etc = optionalAttrs verify {
       "systemd/import-pubring.pgp".source = pubringSource;
-    } // {
-      # Image-based appliances disable the Nix module but still ship the CLI,
-      # so render the IFD restriction when no daemon configuration is generated.
-      "nix/nix.conf".text = mkIf (!config.nix.enable) (mkAfter ''
-        allow-import-from-derivation = false
-      '');
     };
     systemd.tmpfiles.rules = optionals verify [
       "L+ /usr/lib/systemd/import-pubring.pgp - - - - ${pubringSource}"

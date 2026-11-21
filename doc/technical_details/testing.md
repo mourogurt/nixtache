@@ -58,12 +58,15 @@ without building, and `suite` overrides `subset`. Full inventory:
   `-reconcile`, `-reconcile-degraded` and `-tmpfs` variants.
 - Overlay fault injection: `overlay-nix-fault-migration-mv-vm`,
   `overlay-nix-fault-migration-exdev-vm`,
+  `overlay-nix-fault-migration-exdev-copy-vm`,
+  `overlay-nix-fault-migration-exdev-unlink-vm`,
   `overlay-nix-fault-activation-state-vm`,
   `overlay-nix-fault-publication-stage-mv-vm`,
   `overlay-nix-fault-publication-ready-vm`,
   `overlay-nix-fault-publication-current-vm`,
   `overlay-nix-fault-concurrent-vm`,
-  `overlay-nix-fault-concurrent-booted-vm`, and
+  `overlay-nix-fault-concurrent-booted-vm`,
+  `overlay-nix-fault-concurrent-mixed-vm`, and
   `overlay-nix-fault-retention-vm`.
 - Rooted-tree storage oracles:
   `overlay-tree-{sibling,nested,composed}-{wipe,reconcile}-vm`,
@@ -82,8 +85,8 @@ without building, and `suite` overrides `subset`. Full inventory:
   `runner-builder-isolation-vm`, `runner-store-swap-clone-vm`,
   `runner-store-swap-overlay-vm`, `runner-store-swap-overlay-ephemeral-vm`,
   `runner-store-parent-metadata-freshness-vm`, `auto-update-vm`,
-  `auto-update-managed-tmpfs-window-vm`, and
-  `auto-update-no-intermediate-reboot-vm`.
+  `auto-update-managed-tmpfs-{window,if-needed}-vm`, and
+  `auto-update-no-intermediate-reboot{,-wipe}-vm`.
 
 ### Runner production coverage and the operation matrix
 
@@ -95,7 +98,7 @@ but says nothing by itself about consumer option handling.
 | Evidence level | Current suites and operations | Scope and limit |
 |---|---|---|
 | Production declarations, pure eval | `checks.runner` evaluates singleton and named runner containers, siblings, nesting, clone/native exclusions, unsafe or missing parents, cycles and component-wise path collisions. | Checks declaration-derived configuration without booting containers or applying an operation sequence. |
-| Production operation traces, pure eval | `checks.runner-topology-operations` evaluates named declarations through add/promote/reparent/remove/storage-reset and store-mode transitions, including overlay→clone→overlay, and compares forward, reverse and replayed graphs with an independent oracle under both policies. | Checks production declaration handling and operation derivation without booting containers or materializing a target. |
+| Production operation traces, pure eval | `checks.runner-topology-operations` evaluates named declarations through add/promote/reparent/remove/storage-reset and store-mode transitions, including overlay→clone→overlay, and compares forward, replayed and rollback-to-every-earlier-graph transitions with an independent oracle under both policies. | Checks production declaration handling and operation derivation without booting containers or materializing a target. |
 | Operation algebra, pure eval | `checks.overlay-nix` compares first-child promotion, rebase, add/reparent/remove/storage-change plans, lineage and whole-graph fingerprints, and runs descriptor/planner differential cases. | Uses internal logical-node fixtures rather than named runner declarations. |
 | Production runner, KVM | `runner-store-swap-{clone,overlay,overlay-ephemeral}-vm` boots the singleton module through slot changes; `runner-store-parent-metadata-freshness-vm` checks isolation, rebase and child restart. `runner-topology-{sibling,nested,composed}-vm` boots named production topologies through reconciliation; `runner-topology-operations-{reconcile,wipe}-vm` applies add/reparent/remove/storage-reset and overlay→clone→overlay transitions, retry and rollback. | Uses fixed production declaration and operation traces, not generated arbitrary histories. |
 | Operation transitions, KVM storage fixture | `overlay-topology-operations-{reconcile,wipe}-vm` checks first-child promotion, sibling/depth additions, reparenting, removal and final graph/state dispositions. `storage-reset` checks empty replacement state; `descriptor-{missing,mismatch}` checks fail-closed preparation before publication. | Uses an internal low-level topology fixture and an independent expected-operation/graph oracle, separately from production named-runner coverage. |
@@ -321,10 +324,13 @@ empty replacement overlay state and exact graph/state restoration on rollback.
 Canonical behavior:
 [`runner`](../../openspec/specs/runner/spec.md).
 
-`auto-update-no-intermediate-reboot-vm` checks that v2 then v3 without a
-reboot publishes and selects the exact ready v3 generation.
-`auto-update-managed-tmpfs-window-vm` checks managed tmpfs source discovery,
-recording of the deferred reboot, reboot into the new lower, reset of ephemeral
+`auto-update-no-intermediate-reboot{,-wipe}-vm` checks that v2 then a rewritten
+v3 without a reboot preserves the active v1 resources and publishes and selects
+the exact ready v3 generation and lower checksum. The wipe variant also changes
+the deferred source and verifies
+that cutover refreshes a clean target without copying those writes.
+`auto-update-managed-tmpfs-{window,if-needed}-vm` checks managed tmpfs source
+discovery, deferred or immediate reboot into the new lower, reset of ephemeral
 upper and Nix state, and loading of exactly the new lower dump without a
 persistent metaslot or persistent upper copies. The policy contract is
 documented in

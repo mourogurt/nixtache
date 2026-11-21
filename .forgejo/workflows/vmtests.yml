@@ -98,7 +98,9 @@ jobs:
           - runner-store-parent-metadata-freshness-vm
           - auto-update-vm
           - auto-update-managed-tmpfs-window-vm
+          - auto-update-managed-tmpfs-if-needed-vm
           - auto-update-no-intermediate-reboot-vm
+          - auto-update-no-intermediate-reboot-wipe-vm
           - overlay-nix-vm
           - overlay-nix-install-vm
           - overlay-nix-ab-swap-vm
@@ -109,12 +111,15 @@ jobs:
           - overlay-nix-ota-invalid-tmpfs-vm
           - overlay-nix-fault-migration-mv-vm
           - overlay-nix-fault-migration-exdev-vm
+          - overlay-nix-fault-migration-exdev-copy-vm
+          - overlay-nix-fault-migration-exdev-unlink-vm
           - overlay-nix-fault-activation-state-vm
           - overlay-nix-fault-publication-stage-mv-vm
           - overlay-nix-fault-publication-ready-vm
           - overlay-nix-fault-publication-current-vm
           - overlay-nix-fault-concurrent-vm
           - overlay-nix-fault-concurrent-booted-vm
+          - overlay-nix-fault-concurrent-mixed-vm
           - overlay-nix-fault-retention-vm
           - overlay-tree-sibling-wipe-vm
           - overlay-tree-sibling-reconcile-vm

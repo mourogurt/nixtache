@@ -4,7 +4,7 @@
 , topology ? "sibling"
 , upperOnUpdate ? "wipe"
 , ephemeralNode ? null
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let

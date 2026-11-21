@@ -48,7 +48,7 @@ let
         self.nixosModules.ab-image
         self.nixosModules.overlay-nix
         baseModule
-        caModule
+        applianceModule
         extra
       ];
     };
@@ -77,9 +77,9 @@ let
       rootNoWeight = !(pf.root.repartConfig ? Weight);
       verifyNo = (transfers hostFixed)."10-nix-store".Transfer.Verify == "no";
       verifyNoBoot = (transfers hostFixed)."20-boot-image".Transfer.Verify == "no";
-      ifdDisabled = hostFixed.config.nix.settings.allow-import-from-derivation == false;
-      ifdConfRendered = lib.hasInfix "allow-import-from-derivation = false"
-        (hostFixed.config.environment.etc."nix/nix.conf".text or "");
+      activeVersionProtected = lib.all
+        (transfer: (transfer.Transfer.ProtectVersion or null) == "%A")
+        (lib.attrValues (transfers hostFixed));
     };
   };
 
@@ -248,13 +248,13 @@ let
       descriptorTransfer = overlayTopologyTransfer != null
         && overlayTopologyTransfer.Source.MatchPattern == [ "h_@v.overlay-topology.json" ]
         && overlayTopologyTransfer.Target.MatchPattern == [ "h_@v.overlay-topology.json" ]
-        && overlayTopologyTransfer.Target.InstancesMax == 2;
+        && overlayTopologyTransfer.Target.InstancesMax == 2
+        && overlayTopologyTransfer.Transfer.ProtectVersion == "%A";
       descriptorProjectionJsonSafe = !(lib.hasInfix "rebase" overlayDescriptorJson)
         && lib.hasInfix "\"fingerprint\"" overlayDescriptorJson
         && lib.hasInfix "\"nodes\"" overlayDescriptorJson;
       plainImageOmitsDescriptor = !(builtins.hasAttr "/EFI/nixtache/h_1.overlay-topology.json" espContents)
         && !((transfers hostFixed) ? "17-overlay-topology");
-      ifdDisabled = hostOverlayFixed.config.nix.settings.allow-import-from-derivation == false;
     };
   };
 

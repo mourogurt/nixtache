@@ -1,7 +1,7 @@
 { nixpkgs
 , self
 , system ? "x86_64-linux"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -171,19 +171,19 @@ let
 
     def path_info(node, path):
         crun(node,
-          "nix --extra-experimental-features 'nix-command ca-derivations local-overlay-store read-only-local-store' " +
+          "nix --extra-experimental-features 'nix-command local-overlay-store read-only-local-store' " +
           "path-info --store " + q(RUNNERS[node]["socket"]) + " " + q(path)
         )
 
     def path_absent(node, path):
         cfail(node,
-          "nix --extra-experimental-features 'nix-command ca-derivations local-overlay-store read-only-local-store' " +
+          "nix --extra-experimental-features 'nix-command local-overlay-store read-only-local-store' " +
           "path-info --store " + q(RUNNERS[node]["socket"]) + " " + q(path)
         )
 
     def realize(node, path):
         crun(node,
-          "nix-store --option experimental-features 'ca-derivations local-overlay-store read-only-local-store' " +
+          "nix-store --option experimental-features 'local-overlay-store read-only-local-store' " +
           "--store " + q(RUNNERS[node]["socket"]) + " --realize " + q(path)
         )
         state = RUNNERS[node]["path"] + "/nix/var/nix"

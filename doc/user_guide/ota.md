@@ -87,15 +87,6 @@ experimental feature is required on the image builder or appliance. The
 signed `sysupdate-package` carries the store image, UKI and snapshot-derived
 dump; sysupdate delivers the dump to the ESP for the boot-time loader.
 
-Content-addressed derivations do not support import from derivation (IFD).
-Enabling the AB/OTA image or receiving deploy-target AB mode therefore sets
-`allow-import-from-derivation = false` in the target Nix configuration. Image
-and update closures must be realized ahead of time, not imported from a
-derivation built during evaluation. Build and deployment hosts must disable
-IFD in their own Nix configuration too; the target module cannot change the
-builder's configuration. See
-[`lower-store-db.md`](../technical_details/lower-store-db.md#enabling-ca-and-disabling-ifd).
-
 ## Lower installation, upper readiness and rollback
 
 A completed sysupdate installation and a ready upper chain are separate
@@ -111,8 +102,10 @@ Readiness always refers to the **latest installed lower**. Installing v2 and
 then v3 without an intervening reboot runs preparation twice and selects the
 ready v3 generation, rather than treating the earlier successful oneshot or v2
 metadata as sufficient. The same lower-dump and descriptor checks distinguish
-a rewritten lower even if its image version did not change. The detailed
-operation, publication and retention rules live in
+a rewritten lower even if its image version did not change. Every transfer
+protects the running image version (`ProtectVersion=%A`) while sysupdate makes
+room, so a later installation cannot vacuum the active lower partition or its
+ESP metadata before cutover. The detailed operation, publication and retention rules live in
 [`overlay-nix.md`](overlay-nix.md#target-preparation-and-topology-operations).
 
 With a deferred reboot, the persistent source generation is fingerprinted when

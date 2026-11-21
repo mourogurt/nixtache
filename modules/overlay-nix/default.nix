@@ -41,11 +41,16 @@ let
   preparation = import ./preparation.nix (shared // {
     inherit (selection) discoverySnippet metadataValueSnippet readyGenerationSnippet;
   });
+  scriptTexts = {
+    selection = selection.scriptText;
+    prepare = preparation.prepareText;
+    materializer = preparation.materializerText;
+    namespace = preparation.namespaceText;
+  };
 
   topologyModule = import ./topology.nix shared;
   systemdModule = import ./systemd.nix (shared // {
-    prepareScript = preparation.script;
-    selectionScript = selection.script;
+    inherit scriptTexts;
     parentRootActivationSnippet = selection.parentRootActivationSnippet;
   });
 
@@ -144,6 +149,13 @@ in
       default = { };
       internal = true;
       description = "Derived overlay nodes, parent index, preparation order and graph fingerprint for internal module consumers.";
+    };
+
+    _scripts = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      internal = true;
+      description = "Generated overlay script texts for internal evaluation and composition without realising their store paths.";
     };
   };
 }

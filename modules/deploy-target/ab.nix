@@ -46,8 +46,7 @@ in
         authorization to start the ab-image apply units. The consumer MUST
         separately enable `systemd.sysupdate` + `boot.loader.systemd-boot.bootCounting`
         (asserted below) and provide the image/repart/transfer config
-        (see `doc/user_guide/ota.md`). Enabling also disables import from
-        derivation because content-addressed derivations do not support IFD.
+        (see `doc/user_guide/ota.md`).
       '';
     };
 
@@ -118,10 +117,6 @@ in
   };
 
   config = mkIf (cfg.enable && ab.enable) {
-    nix.settings.allow-import-from-derivation = false;
-    environment.etc."nix/nix.conf".text = mkIf (!config.nix.enable) (mkAfter ''
-      allow-import-from-derivation = false
-    '');
     assertions = [
       {
         assertion = config.systemd.sysupdate.enable or false;

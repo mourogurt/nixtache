@@ -115,7 +115,6 @@ let
       # The module owns ALL of systemd.sysupdate: enables it and derives the
       # UKI transfer (default bootTarget="auto" → ESP /EFI/Linux via $BOOT).
       sysupdateEnabled = cfg.systemd.sysupdate.enable == true;
-      ifdDisabled = cfg.nix.settings.allow-import-from-derivation == false;
       bootImageAuto =
         (cfg.systemd.sysupdate.transfers."20-boot-image".Target.PathRelativeTo or null) == "boot"
         && (cfg.systemd.sysupdate.transfers."20-boot-image".Target.Path or null) == "/EFI/Linux";
@@ -154,6 +153,9 @@ let
       {
         hasOneTransfer = t ? "10-nix-store";
         instancesMaxTwo = (t."10-nix-store".Target.InstancesMax or null) == 2;
+        activeVersionProtected = lib.all
+          (transfer: (transfer.Transfer.ProtectVersion or null) == "%A")
+          (lib.attrValues t);
       });
 
   scenarioPartRegularFile = contract
@@ -220,7 +222,6 @@ let
         && cfg.services.nixtache.ab-image.storeSize == "512M";
       imageSlotsMatch = cfg.image.repart.partitions.nix-store.repartConfig.SizeMinBytes == "512M"
         && cfg.image.repart.partitions.empty.repartConfig.SizeMinBytes == "512M";
-      ifdDisabled = cfg.nix.settings.allow-import-from-derivation == false;
     });
 
   recoveryModules = [
@@ -392,8 +393,7 @@ let
     }
   ];
 
-  prepareScriptOf = cfg: builtins.readFile
-    (builtins.head (lib.splitString " " cfg.systemd.services.nixtache-overlay-prepare.script));
+  prepareScriptOf = cfg: cfg.services.nixtache.overlay-nix._scripts.prepare;
 
   scenarioOverlayLifecycleDefault = contract
     "overlay-nix: selection and preparation replace shared cutover lifecycle state"
@@ -470,10 +470,8 @@ let
     (overlayApplianceModules "reconcile")
     (cfg: let
       script = prepareScriptOf cfg;
-      verifyScript = builtins.readFile (builtins.head (lib.splitString "\n"
-        (builtins.elemAt (lib.splitString "unshare -m --propagation private " script) 1)));
-      materializerScript = builtins.readFile (builtins.head (lib.splitString "\n"
-        (builtins.elemAt (lib.splitString "materializer=" script) 1)));
+      verifyScript = cfg.services.nixtache.overlay-nix._scripts.namespace;
+      materializerScript = cfg.services.nixtache.overlay-nix._scripts.materializer;
     in {
       clonesSourceGeneration = lib.hasInfix "source_dir/host" script;
       recordsSourceGeneration = lib.hasInfix "source_generation=$source_generation" script;

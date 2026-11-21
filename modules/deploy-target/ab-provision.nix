@@ -115,10 +115,17 @@ let
       Source = mkDefault { Path = srcPath; Type = srcType; MatchPattern = [ matchPattern ]; };
     }
     else { };
-  mkVerify =
-    if verifyEffective then { Transfer.Verify = "yes"; }
-    else if !abImageActive then { Transfer.Verify = mkDefault "no"; }
-    else { };
+  # ProtectVersion keeps the running image's complete resource set available
+  # when a repeated installation makes room before reboot.
+  mkTransferSettings = {
+    Transfer = {
+      ProtectVersion = "%A";
+    } // (
+      if verifyEffective then { Verify = "yes"; }
+      else if !abImageActive then { Verify = mkDefault "no"; }
+      else { }
+    );
+  };
 
   # sysupdate transfer derivation. ab-provision owns the Target structure
   # (slot discovery) at normal priority.
@@ -133,7 +140,7 @@ let
         MatchPartitionType = "linux-generic";
         ReadOnly = "yes";
       });
-    } // mkVerify;
+    } // mkTransferSettings;
 
   storeTransfers =
     if isRegularFile then
@@ -163,7 +170,7 @@ let
       } else {
         Path = partitions.bootTarget;
       });
-    } // mkVerify;
+    } // mkTransferSettings;
   };
 
   topologyTransfer = optionalAttrs overlayActive {
@@ -176,7 +183,7 @@ let
         PathRelativeTo = "boot";
         Type = "regular-file";
       };
-    } // mkVerify;
+    } // mkTransferSettings;
   };
 
   # Slot submodule: type + storage + label. Both slots share the same submodule

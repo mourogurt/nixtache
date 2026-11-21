@@ -6,8 +6,7 @@
 , runtimeState
 , lowerStateLink
 , slotsDir
-, prepareScript
-, selectionScript
+, scriptTexts
 , parentRootActivationSnippet
 , ...
 }:
@@ -56,9 +55,10 @@ in
 {
   config = mkIf cfg.enable (mkMerge [
     {
+      services.nixtache.overlay-nix._scripts = scriptTexts;
       nix.enable = mkOverride 99 true;
       nix.settings.store = overlayStoreUrl;
-      nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" "ca-derivations" "read-only-local-store" ];
+      nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" "read-only-local-store" ];
       nix.settings.flake-registry = "";
 
       systemd.services.nixtache-overlay-select = {
@@ -72,7 +72,7 @@ in
           Type = "oneshot";
           RemainAfterExit = true;
         };
-        script = readFile selectionScript;
+        script = scriptTexts.selection;
       };
 
       systemd.services.nixtache-overlay-prepare = {
@@ -82,7 +82,7 @@ in
           Type = "oneshot";
           TimeoutStartSec = "1h";
         };
-        script = "${prepareScript} --installed";
+        script = scriptTexts.prepare;
       };
 
       systemd.services.nix-daemon-overlay-mount = {
@@ -144,8 +144,8 @@ in
         description = "Mount every selected frozen Nix store read-only in plan order";
         wantedBy = [ "nixtache-overlay-ready.target" ];
         before = [ "nixtache-overlay-ready.target" "nix-daemon-overlay-mount.service" ];
-        after = [ "nixtache-overlay-select.service" ];
-        requires = [ "nixtache-overlay-select.service" ];
+        after = [ "nixtache-overlay-select.service" "nixtache-lower-store-db-load.service" ];
+        requires = [ "nixtache-overlay-select.service" "nixtache-lower-store-db-load.service" ];
         path = with pkgs; [ coreutils gnugrep util-linux ];
         serviceConfig = {
           Type = "oneshot";
@@ -155,8 +155,8 @@ in
           set -euo pipefail
           slot=$(cat ${runtimeState}/selected-slot 2>/dev/null || true)
           generation=$(cat ${runtimeState}/selected-generation 2>/dev/null || true)
-          if [ -n "$slot" ] || [ -n "$generation" ]; then
-            [ -n "$slot" ] && [ -n "$generation" ]
+          if [ -n "$generation" ]; then
+            [ -n "$slot" ]
             [ "$(readlink -f "${slotsDir}/$slot/current")" = "$generation" ]
           fi
           rows=${legacyFrozenRows}

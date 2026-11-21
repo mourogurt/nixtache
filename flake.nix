@@ -151,6 +151,9 @@
         # tmpfs upper: same-version reboot clears stale upper-owned state and
         # reseeds the current lower DB; the swap leg checks overlay health too.
         overlay-nix-ota-invalid-tmpfs-vm = import ./tests/overlay-nix-ota-invalid-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; overlayOptions.upperOnUpdate = "wipe"; upperTmpfs = true; };
+        overlay-nix-fault-migration-exdev-copy-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "migration-exdev-copy"; };
+        overlay-nix-fault-migration-exdev-unlink-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "migration-exdev-unlink"; };
+        overlay-nix-fault-concurrent-mixed-vm = import ./tests/overlay-nix-fault-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "concurrent-mixed"; };
         # Reusable rooted-layer primitives: each topology and policy has an
         # independently cached real-appliance suite for exact repair placement,
         # atomic readiness and whole-tree closure validation.
@@ -214,7 +217,9 @@
         # ab path.
         auto-update-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; };
         auto-update-managed-tmpfs-window-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "managed-tmpfs-window"; };
+        auto-update-managed-tmpfs-if-needed-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "managed-tmpfs-if-needed"; };
         auto-update-no-intermediate-reboot-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "no-intermediate-reboot"; };
+        auto-update-no-intermediate-reboot-wipe-vm = import ./tests/auto-update-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; scenario = "no-intermediate-reboot-wipe"; };
         # ab-ota-rollback-vm: boot-counting rollback — a broken v2 exhausts
         # its tries, the blessed v1 boots, and a fixed v3 still installs.
         ab-ota-rollback-vm = import ./tests/ab-ota-rollback-vm.nix { inherit nixpkgs self; system = "x86_64-linux"; appliancePkgs = vmPkgs; };

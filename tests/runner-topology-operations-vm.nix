@@ -2,7 +2,7 @@
 , self
 , system ? "x86_64-linux"
 , policy ? "reconcile"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -82,12 +82,10 @@ let
   consumerBundle = fixture.consumerPackages "runner-operation" ([ "host" ] ++ sourceIds);
   degradedSubstituterShim = { lib, ... }:
     let
-      outerPath = builtins.head (lib.splitString " "
-        v1Base.config.systemd.services.nixtache-overlay-prepare.script);
-      outerText = builtins.readFile outerPath;
+      outerText = v1Base.config.services.nixtache.overlay-nix._scripts.prepare;
       innerPath = builtins.head (lib.splitString "\n"
         (builtins.elemAt (lib.splitString "unshare -m --propagation private " outerText) 1));
-      innerText = builtins.readFile innerPath;
+      innerText = v1Base.config.services.nixtache.overlay-nix._scripts.namespace;
       dropFunction = ''
         drop_target_dependencies() {
           [ -r /run/nixtache-overlay-test-substituter ] || return 0

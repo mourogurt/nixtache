@@ -145,9 +145,13 @@ let
     fi
   '';
 
-  activatePhysicalHostSnippet = ''
+  activatePhysicalHostStoreSnippet = ''
     ${preservePhysicalLowerSnippet}
+  '';
+
+  activatePhysicalHostStateSnippet = ''
     mkdir -p ${physicalHostRoot}/nix/var/nix
+    for name in ${concatStringsSep " " stateNames}; do mkdir -p ${lowerStateLink}/$name; done
     activate_frozen_state ${lowerStateLink} ${physicalHostRoot}/nix/var/nix ${runtimeBackup}/physical-host
   '';
 
@@ -281,6 +285,7 @@ let
     activation_started=1
     : > "$activation_log"
     ${lowerRootFunctionsSnippet}
+    ${activatePhysicalHostStateSnippet}
     ${activateParentLowerSnippets}
     activation_complete=1
   '';
@@ -355,7 +360,7 @@ let
       done
       ${activationLayerSnippets}
       ${activateFrozenGenerationSnippets}
-      ${activatePhysicalHostSnippet}
+      ${activatePhysicalHostStoreSnippet}
       printf '%s\n' "$1" > ${runtimeState}/selected-generation
       touch ${runtimeState}/selected-chain-ready
       activation_complete=1
@@ -377,7 +382,7 @@ let
       ${resetFrozenSnippets}
       ${activateEphemeralFrozenSnippets}
       ${optionalString abEnabled ''
-        ${activatePhysicalHostSnippet}
+        ${activatePhysicalHostStoreSnippet}
       ''}
       touch ${runtimeState}/selected-chain-ready
       exit 0
@@ -396,7 +401,7 @@ let
       ${resetAllLayerSnippets}
       ${resetFrozenSnippets}
       ${activateEphemeralFrozenSnippets}
-      ${activatePhysicalHostSnippet}
+      ${activatePhysicalHostStoreSnippet}
       touch ${runtimeState}/selected-chain-ready
       exit 0
     fi
@@ -424,4 +429,5 @@ in
 {
   inherit discoverySnippet metadataValueSnippet readyGenerationSnippet parentRootActivationSnippet;
   script = selectionScript;
+  scriptText = selectionScript.text;
 }

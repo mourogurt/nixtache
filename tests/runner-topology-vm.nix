@@ -2,7 +2,7 @@
 , self
 , system ? "x86_64-linux"
 , topology ? "sibling"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let

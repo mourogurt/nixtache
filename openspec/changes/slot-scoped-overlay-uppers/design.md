@@ -6,6 +6,8 @@ See `proposal.md` for motivation and `specs/` for the observable contracts.
 
 The current host overlay has one configured upper/work pair and one lifecycle marker. Its `/nix/var/nix` state survives independently of the lower slot and is cleared or repaired after a version-changing boot. The runner overlay adds another OverlayFS upper with its own state while consuming the host merged store and database as its lower.
 
+Current `main` builds appliance closures with ordinary input addressing and generates the lower database from the paired slot-store snapshot. This change consumes that `lower-db` as an immutable generation-owned artifact; it does not introduce content addressing, an import-from-derivation restriction or another image-registration path.
+
 Nix's [`local-overlay` model](https://nix.dev/manual/nix/2.35/store/types/experimental-local-overlay-store.html) separates lower files and metadata from the upper layer and upper SQLite database. A lower store may grow logically, but Linux OverlayFS additionally requires a directory used as a lower not to change beneath its consumers. Nix's `read-only=true` SQLite mode is `immutable`, so it is not a safe live view of a database that another process continues to modify. A writable parent-daemon socket would provide fresh metadata but would not provide a read-only security boundary. The design therefore gives every child an immutable parent lower and moves the parent's own writes into a separate runtime continuation.
 
 The logical consumer graph and the physical storage graph are different concerns. Users evolve runner declarations; the module derives frozen lowers, runtime continuations, lower roots and per-slot state. Every transition still crosses a private target-preparation and boot-selection boundary; no active mounted tree is rewired in place.
@@ -189,12 +191,6 @@ Pure-eval tests derive graphs from real runner declarations and assert internal 
 Operation-based tests start from a declared graph, apply add, reparent and remove operations at several widths and depths, and compare the resulting production configuration and final stores with the operation's contract. They do not bless one hard-coded composed tree as the only production topology. Generated valid sequences vary parent shape and root placement; invalid cycles, self-reparenting, orphaned removal and path collisions must fail without changing the active graph. Representative traces also exercise failure/retry and rollback.
 
 The runner freshness scenario has two phases: a parent runtime write is absent from its running child, then a prepared rebase and child restart expose both the path and validity record from the new frozen lower. Other regression coverage includes parent-root tampering, corrupted reference metadata, both same-version slots, ephemeral managed OTA, repeated installation without reboot, migration move failures and cross-filesystem backup, activation/publication interruptions, concurrent preparation and bounded retention. The VM workflow inventory must exactly match the flake's VM outputs, and the full matrix must pass on the reviewed SHA.
-
-### D13 — AB/OTA disables import from derivation
-
-Content-addressed derivations do not support import from derivation (IFD). Enabling the AB/OTA image module or the receiving deploy-target AB mode therefore sets `allow-import-from-derivation = false` in the target system's Nix configuration. Image and update closures MUST be realized ahead of time; runtime evaluation MUST NOT depend on building a derivation and importing its output.
-
-The target setting cannot rewrite the Nix configuration of the machine performing the image evaluation. Build and deployment hosts handling the content-addressed appliance closure MUST also disable IFD through their own Nix configuration. Pure evaluation tests assert the target contract so a later default or module merge cannot silently re-enable it.
 
 ### Future formal verification — non-goal
 

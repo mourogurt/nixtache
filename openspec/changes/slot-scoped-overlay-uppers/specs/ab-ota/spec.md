@@ -106,12 +106,17 @@ On an appliance with persistent overlays, a newly selected slot MUST NOT reach b
 
 ### Requirement: Repeated installations refresh the prepared target
 
-Every completed installation MUST produce or validate preparation for the latest installed lower, even when an earlier installation is still awaiting reboot. Reboot MUST select the exact ready generation for that latest lower, not a stale earlier preparation.
+Every completed installation MUST produce or validate preparation for the latest installed lower, even when an earlier installation is still awaiting reboot. Reboot MUST select the exact ready generation for that latest lower, not a stale earlier preparation. Making room for a later installation MUST NOT vacuum the running image's lower partition or associated ESP resources before cutover.
 
 #### Scenario: Two updates without an intermediate reboot select the second target
 
 - **WHEN** v2 and then v3 are installed while v1 remains active and neither installation has rebooted
 - **THEN** v3 receives a distinct ready generation whose image and lower checksum match v3, and the eventual reboot selects that generation without replacing it through boot recovery
+
+#### Scenario: Repeated installation preserves the running image resources
+
+- **WHEN** v2 and then v3 are installed while v1 remains active
+- **THEN** v1's lower partition, lower dump, topology descriptor and boot resources remain available throughout installation and preparation
 
 #### Scenario: A successful preparation service remains rerunnable
 
@@ -140,17 +145,3 @@ Successful publication MUST remove superseded ready generations according to a b
 
 - **WHEN** several reconcile preparations for one target slot complete successfully
 - **THEN** the number of retained ready generations reaches a fixed bound, each rerun produces current metadata for the latest source, and no staging directories remain after publication
-
-### Requirement: AB/OTA systems disable import from derivation
-
-An enabled AB/OTA image or receiving deploy-target AB mode MUST set `allow-import-from-derivation = false` in its Nix configuration. Content-addressed image and update flows MUST NOT depend on import from derivation; required closures MUST be realized ahead of time.
-
-#### Scenario: Enabling AB/OTA disables IFD
-
-- **WHEN** the AB/OTA image module is enabled, with or without the overlay module, or an existing target enables deploy-target AB mode
-- **THEN** the evaluated target Nix configuration disables import from derivation
-
-#### Scenario: CA build hosts use the same restriction
-
-- **WHEN** an operator evaluates or builds the content-addressed appliance closure on another host
-- **THEN** the documented host configuration disables import from derivation because the target module cannot change the builder's own Nix configuration

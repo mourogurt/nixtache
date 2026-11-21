@@ -2,7 +2,7 @@
 , self
 , system ? "x86_64-linux"
 , scenario ? "migration-mv"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -23,6 +23,7 @@ let
     "publication-current"
     "concurrent"
     "concurrent-booted"
+    "concurrent-mixed"
     "retention"
   ];
   migrationFaultScenarios = [ "migration-mv" "migration-exdev-copy" "migration-exdev-unlink" ];
@@ -34,6 +35,7 @@ let
     "publication-current"
     "concurrent"
     "concurrent-booted"
+    "concurrent-mixed"
     "retention"
   ];
   publicationPoint = {
@@ -86,7 +88,7 @@ let
               chmod +x /tmp/nixtache-legacy-tool
               mount -t overlay overlay -o lowerdir=/nix/store,upperdir=${upperDir},workdir=${workDir} /nix/store
               trap 'umount -l /nix/store 2>/dev/null || true' EXIT
-              p=$(nix-store --option experimental-features "ca-derivations local-overlay-store" --store 'local-overlay://?lower-store=local&upper-layer=${upperDir}&check-mount=false' --add /tmp/nixtache-legacy-tool)
+              p=$(nix-store --option experimental-features "local-overlay-store" --store 'local-overlay://?lower-store=local&upper-layer=${upperDir}&check-mount=false' --add /tmp/nixtache-legacy-tool)
               echo "$p" > /tmp/nixtache-legacy-tool-path
               ln -s "$p" /nix/var/nix/gcroots/legacy-tool
               umount -l /nix/store
@@ -109,10 +111,8 @@ let
     };
 
   baseV1 = mkAppliance { version = "1"; legacyFixture = true; };
-  selectionText = baseV1.config.systemd.services.nixtache-overlay-select.script;
-  prepareCommand = baseV1.config.systemd.services.nixtache-overlay-prepare.script;
-  preparePath = builtins.head (lib.splitString " " prepareCommand);
-  prepareText = builtins.readFile preparePath;
+  selectionText = baseV1.config.services.nixtache.overlay-nix._scripts.selection;
+  prepareText = baseV1.config.services.nixtache.overlay-nix._scripts.prepare;
 
   selectionFaultFunction = ''
     overlay_test_fault() {
@@ -182,8 +182,6 @@ let
         selectionWithFaultFunction
     else
       selectionText;
-  injectedSelection = pkgs.writeShellScript "nixtache-overlay-select-test-${scenario}" injectedSelectionText;
-
   preparationFunctions = ''
     overlay_test_publication_fault() {
       local point=$1
@@ -209,6 +207,13 @@ let
         while [ ! -e "$barrier_dir/release" ]; do sleep 0.05; done
       fi
     }
+    overlay_test_lock_waiting() {
+      local role=''${NIXTACHE_TEST_ROLE:-} barrier_dir=/run/nixtache-overlay-test-barrier
+      if [ -n "$role" ]; then
+        mkdir -p "$barrier_dir"
+        touch "$barrier_dir/$role-lock-waiting"
+      fi
+    }
   '';
   prepareWithFunctions = replaceChecked "preparation fault functions"
     "set -euo pipefail\n"
@@ -218,12 +223,18 @@ let
     "mode=\${1:---installed}"
     "mode=\${1:---installed}\noverlay_test_preparation_started"
     prepareWithFunctions;
+  prepareWithLockMarker = replaceChecked "slot lock acquisition"
+    ''flock -x "$prepare_lock_fd"''
+    ''
+      overlay_test_lock_waiting
+            flock -x "$prepare_lock_fd"''
+    prepareWithStartMarker;
   prepareWithBarrier = replaceChecked "staging barrier"
     ''cp "$slot_dir/generations/$generation/metadata" "$stage/metadata"''
     ''
       cp "$slot_dir/generations/$generation/metadata" "$stage/metadata"
             overlay_test_preparation_barrier''
-    prepareWithStartMarker;
+    prepareWithLockMarker;
   prepareWithStageFault = replaceChecked "stage publication"
     ''mv "$stage" "$slot_dir/generations/$generation"''
     ''
@@ -236,12 +247,47 @@ let
       sed -i 's/^state=unready$/state=ready/' "$slot_dir/generations/$generation/metadata"
             overlay_test_publication_fault after-ready''
     prepareWithStageFault;
-  injectedPrepareText = replaceChecked "current publication"
+  prepareWithPublicationFaults = replaceChecked "current publication"
     ''mv -Tf "$slot_dir/.current-$generation" "$slot_dir/current"''
     ''
       mv -Tf "$slot_dir/.current-$generation" "$slot_dir/current"
             overlay_test_publication_fault after-current''
     prepareWithReadyFault;
+  prepareWithMixedSlot =
+    if scenario == "concurrent-mixed" then
+      replaceChecked "mixed booted slot selector"
+        ''stopped_units=""''
+        ''
+          discover_booted() {
+                if [ -n "''${NIXTACHE_TEST_BOOTED_SLOT:-}" ]; then
+                  printf '%s\n' "$NIXTACHE_TEST_BOOTED_SLOT"
+                else
+                  discover_booted_actual
+                fi
+              }
+          stopped_units=""''
+        (replaceChecked "actual booted slot discovery"
+          "discover_booted() {"
+          "discover_booted_actual() {"
+          prepareWithPublicationFaults)
+    else
+      prepareWithPublicationFaults;
+  prepareWithMixedVersion =
+    if scenario == "concurrent-mixed" then
+      replaceChecked "mixed booted version"
+        ''target_version=$(cat /etc/image-version)''
+        ''target_version=''${NIXTACHE_TEST_BOOTED_VERSION:-$(cat /etc/image-version)}''
+        prepareWithMixedSlot
+    else
+      prepareWithMixedSlot;
+  injectedPrepareText =
+    if scenario == "concurrent-mixed" then
+      replaceChecked "mixed booted device"
+        ''prepare_chain "$target_slot" "$target_version" BOOTED "$source_slot" "$source_generation" "$initial"''
+        ''prepare_chain "$target_slot" "$target_version" "''${NIXTACHE_TEST_BOOTED_DEVICE:-BOOTED}" "$source_slot" "$source_generation" "$initial"''
+        prepareWithMixedVersion
+    else
+      prepareWithMixedVersion;
   injectedPrepare = pkgs.writeShellScript "nixtache-overlay-prepare-test-${scenario}" injectedPrepareText;
 
   shimModule = { lib, ... }: {
@@ -249,7 +295,7 @@ let
       text = "${scenario}\n";
     };
     systemd.services.nixtache-overlay-select = lib.mkIf selectionScenario {
-      script = lib.mkForce (builtins.readFile injectedSelection);
+      script = lib.mkForce injectedSelectionText;
     };
     systemd.services.nixtache-overlay-prepare = lib.mkIf preparationScenario {
       script = lib.mkForce "${injectedPrepare} --installed";
@@ -278,7 +324,6 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import shlex
-    import time
 
     SCENARIO = ${builtins.toJSON scenario}
     PUBLICATION_POINT = ${if publicationPoint == null then "None" else builtins.toJSON publicationPoint}
@@ -308,6 +353,14 @@ pkgs.testers.runNixOSTest {
           "awk -v active=\"$(cat /run/nixtache-overlay/selected-slot)\" "
           "'BEGIN{IGNORECASE=1} $2 ~ /^nix-store_/ && tolower($1) != active "
           "{print tolower($1); exit}'"
+        ).strip()
+
+    def inactive_device():
+        return appliance.succeed(
+          "lsblk -nrpo NAME,PARTUUID,PARTLABEL | "
+          "awk -v active=\"$(cat /run/nixtache-overlay/selected-slot)\" "
+          "'BEGIN{IGNORECASE=1} $3 ~ /^nix-store_/ && tolower($2) != active "
+          "{print $1; exit}'"
         ).strip()
 
     def active_checksum():
@@ -539,15 +592,17 @@ pkgs.testers.runNixOSTest {
         assert selected_generation() == active_generation
         assert_active_tool()
         assert failed_disposition != "orphaned", "successful retry left the interrupted generation outside the published ready chain"
+        appliance.fail("find " + q(target_root) + " -maxdepth 1 -name '.staging-*' | grep -q .")
         print("PASS: " + point + " interruption preserved active state and retry discarded or adopted the interrupted generation")
 
-    def run_concurrent(mode):
+    def run_concurrent(mode, mixed=False):
         wait_v1()
         if mode == "--installed":
             stage_v2()
             target_slot = inactive_slot()
         else:
             target_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+        second_mode = "--booted" if mixed else mode
         target_root = OVERLAY_BASE + "/upper-slots/" + target_slot
         active_before = active_checksum()
         active_generation = selected_generation()
@@ -558,18 +613,25 @@ pkgs.testers.runNixOSTest {
         )
         appliance.wait_until_succeeds("test -s /run/nixtache-overlay-test-barrier/first", timeout=300)
         first_stage = appliance.succeed("cat /run/nixtache-overlay-test-barrier/first").strip()
+        mixed_environment = ""
+        if mixed:
+            mixed_environment = (
+              "--setenv=NIXTACHE_TEST_BOOTED_SLOT=" + target_slot + " "
+              "--setenv=NIXTACHE_TEST_BOOTED_VERSION=2 "
+              "--setenv=NIXTACHE_TEST_BOOTED_DEVICE=" + inactive_device() + " "
+            )
         appliance.succeed(
           "systemd-run --no-block --unit=overlay-nix-prepare-second --property=Type=oneshot "
-          "--setenv=NIXTACHE_TEST_ROLE=second " + PREPARE_SCRIPT + " " + mode
+          "--setenv=NIXTACHE_TEST_ROLE=second " + mixed_environment + PREPARE_SCRIPT + " " + second_mode
         )
-        appliance.wait_until_succeeds("test -e /run/nixtache-overlay-test-barrier/second-started", timeout=300)
-        for _ in range(300):
-            observed = appliance.succeed(
-              "if test -s /run/nixtache-overlay-test-barrier/second || ! systemctl is-active --quiet overlay-nix-prepare-second.service; then echo yes; else echo no; fi"
-            ).strip()
-            if observed == "yes":
-                break
-            time.sleep(0.1)
+        appliance.wait_until_succeeds("test -e /run/nixtache-overlay-test-barrier/second-lock-waiting", timeout=300)
+        appliance.wait_until_succeeds(
+          "pid=$(systemctl show -p MainPID --value overlay-nix-prepare-second.service); "
+          "for child in $(cat /proc/$pid/task/$pid/children 2>/dev/null); do "
+          "if test \"$(cat /proc/$child/comm 2>/dev/null)\" = flock; then exit 0; fi; "
+          "done; exit 1",
+          timeout=300,
+        )
         first_stage_state = appliance.succeed(
           "test -d " + q(first_stage) + " && echo survived || echo deleted"
         ).strip()
@@ -579,6 +641,10 @@ pkgs.testers.runNixOSTest {
           "test ! -e /run/nixtache-overlay-test-barrier/release; then echo blocked; else echo released; fi"
         ).strip()
         assert first_still_blocked == "blocked", "the first preparation left its barrier before the second process overlapped it"
+        second_entered_staging = appliance.succeed(
+          "test -s /run/nixtache-overlay-test-barrier/second && echo yes || echo no"
+        ).strip()
+        assert second_entered_staging == "no", "the second preparation entered staging before the first released the slot lock"
         appliance.succeed("touch /run/nixtache-overlay-test-barrier/release")
         appliance.wait_until_succeeds("! systemctl is-active --quiet overlay-nix-prepare-first.service", timeout=900)
         appliance.wait_until_succeeds("! systemctl is-active --quiet overlay-nix-prepare-second.service", timeout=900)
@@ -587,12 +653,17 @@ pkgs.testers.runNixOSTest {
         assert first_stage_state == "survived", "the second preparation deleted the first process's staging directory before its barrier was released"
         assert first_result == "success", "the first preparation failed after the concurrent second cleanup: first=" + first_result + " second=" + second_result
         assert second_result == "success", "the second preparation failed: first=" + first_result + " second=" + second_result
-        assert_ready_current(target_root)
+        current = assert_ready_current(target_root)
+        prepared_generation = appliance.succeed("cat /run/nixtache-overlay/prepared-generation").strip()
+        assert current == target_root + "/generations/" + prepared_generation
+        appliance.fail("find " + q(target_root) + " -maxdepth 1 -name '.staging-*' | grep -q .")
         assert active_checksum() == active_before
         if mode == "--installed":
             assert selected_generation() == active_generation
+            appliance.succeed("grep -q '^image_version=2$' " + q(current + "/metadata"))
+            appliance.succeed("cmp " + q(current + "/lower-db") + " /boot/EFI/nixtache/abtest_2.lower-db")
         assert_active_tool()
-        print("PASS: concurrent " + mode + " preparation preserved the first staging chain; second result=" + second_result)
+        print("PASS: concurrent " + mode + " and " + second_mode + " preparation preserved the first staging chain; second result=" + second_result)
 
     def run_retention():
         wait_v1()
@@ -617,6 +688,9 @@ pkgs.testers.runNixOSTest {
               "\"$(cat /tmp/nixtache-legacy-tool-path)\""
             )
             generations.append(prepared_generation)
+            if len(generations) > 1:
+                previous = target_root + "/generations/" + generations[-2]
+                appliance.succeed("grep -q '^state=ready$' " + q(previous + "/metadata"))
             ready_counts.append(int(appliance.succeed(
               "grep -l '^state=ready$' " + q(target_root) + "/generations/*/metadata 2>/dev/null | wc -l"
             ).strip()))
@@ -651,6 +725,8 @@ pkgs.testers.runNixOSTest {
         run_concurrent("--installed")
     elif SCENARIO == "concurrent-booted":
         run_concurrent("--booted")
+    elif SCENARIO == "concurrent-mixed":
+        run_concurrent("--installed", mixed=True)
     elif SCENARIO == "retention":
         run_retention()
     else:

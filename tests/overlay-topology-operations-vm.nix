@@ -2,7 +2,7 @@
 , self
 , system ? "x86_64-linux"
 , scenario ? "reconcile"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -188,7 +188,7 @@ pkgs.testers.runNixOSTest {
         return path.rsplit("/", 1)[-1]
 
     def nix_store(node, args):
-        features = "ca-derivations local-overlay-store read-only-local-store"
+        features = "local-overlay-store read-only-local-store"
         return "nix-store --option experimental-features " + q(features) + " --store " + q(STORES[node]) + " " + args
 
     def seed_consumer(node, path):

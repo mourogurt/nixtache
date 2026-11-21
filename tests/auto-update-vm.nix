@@ -208,6 +208,9 @@ let
   p2Path = pkgs_2.outPath;
   p4Path = pkgs_4.outPath;
 
+  regressionUpperOnUpdate = if scenario == "no-intermediate-reboot-wipe" then "wipe" else "reconcile";
+  regressionRebootPolicy = if scenario == "managed-tmpfs-if-needed" then "if-needed" else "window";
+
   mkAutoAppliance = { version, rebootPolicy, extraPackages ? [ ], withTreeDependencies ? false }:
     otaLib.mkAppliance {
       inherit version;
@@ -253,14 +256,14 @@ let
         ({ lib, ... }: {
           services.nixtache.overlay-nix = {
             enable = true;
-            upperOnUpdate = "reconcile";
+            upperOnUpdate = regressionUpperOnUpdate;
           } // lib.optionalAttrs ephemeral {
             upperDir = "/tmp/nix-overlay/upper";
             workDir = "/tmp/nix-overlay/work";
           };
           services.nixtache.auto-update = {
             enable = true;
-            rebootPolicy = "window";
+            rebootPolicy = regressionRebootPolicy;
             rebootWindow = {
               start = "00:00";
               end = "23:59";
@@ -288,7 +291,7 @@ let
   };
   managedTmpfsV2Pkg = managedTmpfsV2.config.system.build.sysupdate-package;
 
-  stackedV1 = mkRegressionAppliance { version = "1"; };
+  stackedV1 = mkRegressionAppliance { version = "1"; extraPackages = [ pkgs_1 ]; };
   stackedV1Image = "${stackedV1.config.system.build.image}/abtest_1.raw";
   stackedV2 = mkRegressionAppliance { version = "2"; };
   stackedV2Pkg = stackedV2.config.system.build.sysupdate-package;
@@ -342,11 +345,17 @@ let
     };
   };
 in
-assert lib.assertMsg (builtins.elem scenario [ "full" "managed-tmpfs-window" "no-intermediate-reboot" ])
+assert lib.assertMsg (builtins.elem scenario [
+  "full"
+  "managed-tmpfs-window"
+  "managed-tmpfs-if-needed"
+  "no-intermediate-reboot"
+  "no-intermediate-reboot-wipe"
+])
   "unknown auto-update VM scenario: ${scenario}";
-if scenario == "managed-tmpfs-window" then
+if lib.hasPrefix "managed-tmpfs-" scenario then
   pkgs.testers.runNixOSTest {
-    name = "auto-update-managed-tmpfs-window";
+    name = "auto-update-${scenario}";
     globalTimeout = 5400;
 
     nodes.deployer = otaLib.deployerNode {
@@ -354,6 +363,8 @@ if scenario == "managed-tmpfs-window" then
     };
 
     testScript = ''
+      IMMEDIATE = ${if scenario == "managed-tmpfs-if-needed" then "True" else "False"}
+
       def create_auto_machine(**kwargs):
           machine = create_machine(start_command="${otaLib.startCommand { image = managedTmpfsV1Image; }}", **kwargs)
           driver.machines_qemu.append(machine)
@@ -393,7 +404,8 @@ if scenario == "managed-tmpfs-window" then
       appliance.wait_until_succeeds("systemctl is-active --quiet boot-complete.target", timeout=300)
       appliance.wait_until_succeeds("nix --version", timeout=300)
       assert appliance.succeed("cat /etc/image-version").strip() == "1"
-      appliance.succeed("test ! -e /run/nixtache-overlay/selected-slot")
+      appliance.succeed("test -s /run/nixtache-overlay/selected-slot")
+      appliance.succeed("test ! -e /run/nixtache-overlay/selected-generation")
       appliance.succeed("test ! -e /tmp/nix-overlay/upper-slots")
 
       appliance.succeed("nix-store --realize ${p2Path}", timeout=600)
@@ -411,18 +423,24 @@ if scenario == "managed-tmpfs-window" then
 
       original_boot = appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip()
       stage("${managedTmpfsV2Pkg}")
-      appliance.succeed("systemctl start nixtache-auto-update.service", timeout=900)
-      appliance.succeed("${otaLib.assertSysupdateInstalled}")
-      appliance.succeed("sgdisk -p /dev/vda | grep nix-store_2")
-      appliance.succeed("test -f /boot/EFI/Linux/abtest_2+*.efi")
-      appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
-      assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "window policy rebooted during installation"
-      assert_no_persistent_proof()
-      print("OK: managed tmpfs OTA installed and recorded a deferred reboot without a persistent metaslot")
+      if IMMEDIATE:
+          appliance.succeed("systemctl start --no-block nixtache-auto-update.service", timeout=300)
+      else:
+          appliance.succeed("systemctl start nixtache-auto-update.service", timeout=900)
+          appliance.succeed("${otaLib.assertSysupdateInstalled}")
+          appliance.succeed("sgdisk -p /dev/vda | grep nix-store_2")
+          appliance.succeed("test -f /boot/EFI/Linux/abtest_2+*.efi")
+          appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
+          assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "window policy rebooted during installation"
+          assert_no_persistent_proof()
+          print("OK: managed tmpfs OTA installed and recorded a deferred reboot without a persistent metaslot")
+          appliance.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
 
-      appliance.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
       wait_fresh_boot(original_boot)
       assert appliance.succeed("cat /etc/image-version").strip() == "2"
+      appliance.succeed("sgdisk -p /dev/vda | grep nix-store_2")
+      # A blessed boot renames the counted UKI to its done form without '+'.
+      appliance.succeed("test -f /boot/EFI/Linux/abtest_2.efi || test -f /boot/EFI/Linux/abtest_2+*.efi")
       appliance.wait_until_succeeds("nix --version", timeout=300)
       appliance.wait_until_succeeds(
         "systemctl is-active --quiet nixtache-lower-store-db-load.service", timeout=180
@@ -444,17 +462,20 @@ if scenario == "managed-tmpfs-window" then
       assert marker == expected_marker, "tmpfs reboot did not load exactly the v2 lower DB dump"
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending")
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
+      appliance.succeed("test ! -e /var/lib/nix-overlay/upper-slots")
+      appliance.succeed("test ! -e /tmp/nix-overlay/upper-slots")
       assert_no_persistent_proof()
       copies = appliance.succeed(
         "find /tmp/nix-overlay -name '${baseNameOf p2Path}' -print 2>/dev/null || true"
       ).strip()
       assert copies == "", f"ephemeral upper proof survived reboot in a managed copy: {copies}"
-      print("PASS: managed tmpfs auto-update installed v2, deferred reboot, reset upper and DB, and loaded the v2 lower dump")
+      reboot_kind = "immediate" if IMMEDIATE else "deferred"
+      print(f"PASS: managed tmpfs auto-update installed v2, {reboot_kind} reboot, reset upper and DB, and loaded the v2 lower dump")
     '';
   }
-else if scenario == "no-intermediate-reboot" then
+else if lib.hasPrefix "no-intermediate-reboot" scenario then
   pkgs.testers.runNixOSTest {
-    name = "auto-update-no-intermediate-reboot";
+    name = "auto-update-${scenario}";
     globalTimeout = 5400;
 
     nodes.deployer = otaLib.deployerNode {
@@ -462,6 +483,8 @@ else if scenario == "no-intermediate-reboot" then
     };
 
     testScript = ''
+      WIPE = ${if scenario == "no-intermediate-reboot-wipe" then "True" else "False"}
+
       def create_auto_machine(**kwargs):
           machine = create_machine(start_command="${otaLib.startCommand { image = stackedV1Image; }}", **kwargs)
           driver.machines_qemu.append(machine)
@@ -546,18 +569,49 @@ else if scenario == "no-intermediate-reboot" then
       appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
       appliance.succeed("test -f /var/lib/nixtache/reboot-pending-overlay")
       assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "an intermediate reboot occurred before the v3 assertions"
-      print("OK: v1 -> v2 -> rewritten v3 without reboot produced a fresh ready v3 generation and matching lower SHA")
+      appliance.succeed("sgdisk -p /dev/vda | grep -q nix-store_1")
+      appliance.succeed("test -f /boot/EFI/nixtache/abtest_1.lower-db")
+      appliance.succeed("test -f /boot/EFI/nixtache/abtest_1.overlay-topology.json")
+      appliance.succeed("test -f /boot/EFI/Linux/abtest_1.efi || test -f /boot/EFI/Linux/abtest_1+*.efi")
+      appliance.succeed("nix path-info ${p1Path}")
+      print("OK: v1 -> v2 -> rewritten v3 without reboot preserved active v1 resources and produced a fresh ready v3 generation and matching lower SHA")
+
+      if WIPE:
+          source_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
+          source_target = appliance.succeed(
+            "readlink -f /var/lib/nix-overlay/upper-slots/" + source_slot + "/current"
+          ).strip()
+          appliance.succeed(
+            "touch /var/lib/nix-overlay/upper/deferred-wipe-upper && "
+            "mkdir -p /nix/var/nix/gcroots/deferred-wipe-state"
+          )
 
       appliance.succeed("systemctl start --no-block nixtache-auto-update-reboot.service", timeout=300)
       wait_fresh_boot(original_boot)
       assert appliance.succeed("cat /etc/image-version").strip() == "3"
       assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == slot_v3
-      assert appliance.succeed("cat /run/nixtache-overlay/selected-generation").strip() == generation_v3, "boot recovery replaced the prepared v3 generation"
+      selected_generation = appliance.succeed("cat /run/nixtache-overlay/selected-generation").strip()
+      if WIPE:
+          assert selected_generation != generation_v3, "changed deferred source did not refresh the wipe target"
+          generation_v3 = selected_generation
+          target_v3 = "/var/lib/nix-overlay/upper-slots/" + slot_v3 + "/generations/" + selected_generation
+          assert metadata_value(target_v3, "state") == "ready"
+          assert metadata_value(target_v3, "lower_sha256") == expected_v3_sha
+          appliance.fail("test -e " + target_v3 + "/host/upper/deferred-wipe-upper")
+          appliance.fail("test -e " + target_v3 + "/host/state/gcroots/deferred-wipe-state")
+          appliance.succeed("test -e " + source_target + "/host/upper/deferred-wipe-upper")
+          appliance.succeed("test -e " + source_target + "/host/state/gcroots/deferred-wipe-state")
+          appliance.fail("test -e /var/lib/nix-overlay/upper/deferred-wipe-upper")
+          appliance.fail("test -e /nix/var/nix/gcroots/deferred-wipe-state")
+      else:
+          assert selected_generation == generation_v3, "boot recovery replaced the prepared v3 generation"
       assert appliance.succeed("readlink -f /var/lib/nix-overlay/upper-slots/" + slot_v3 + "/current").strip() == target_v3
       assert metadata_value(target_v3, "image_version") == "3"
+      appliance.wait_until_succeeds("nix --version", timeout=300)
+      appliance.succeed("nix path-info ${p1Path}")
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending")
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
-      print("PASS: stacked auto-update installs selected the exact pre-reboot v3 generation")
+      print("PASS: stacked auto-update installs selected the exact ready rewritten-v3 generation")
     '';
   }
 else
@@ -808,7 +862,7 @@ pkgs.testers.runNixOSTest {
     TREE_EXTRA_ROOTS = ${builtins.toJSON treeFixture.extraRoots}
 
     def tree_nix_store(node, args):
-        features = "ca-derivations local-overlay-store read-only-local-store"
+        features = "local-overlay-store read-only-local-store"
         return "nix-store --option experimental-features " + shlex.quote(features) + " --store " + shlex.quote(TREE_STORES[node]) + " " + args
 
     def tree_realize(node, path):

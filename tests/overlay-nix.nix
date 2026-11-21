@@ -54,8 +54,7 @@ let
   hostDefault = mkHost { };
   svcDefault = servicesOf hostDefault;
   selectScript = svcDefault.nixtache-overlay-select.script;
-  prepareCommand = svcDefault.nixtache-overlay-prepare.script;
-  prepareScript = builtins.readFile (builtins.head (lib.splitString " " prepareCommand));
+  prepareScript = (cfgOf hostDefault)._scripts.prepare;
 
   migration = import ../modules/overlay-nix/migration.nix { inherit pkgs; };
   migrationCheck = pkgs.runCommand "overlay-nix-migration-test" { } ''
@@ -212,8 +211,7 @@ let
   };
 
   hostReconcile = mkHost { services.nixtache.overlay-nix.upperOnUpdate = "reconcile"; };
-  reconcileCommand = hostReconcile.config.systemd.services.nixtache-overlay-prepare.script;
-  reconcileScript = builtins.readFile (builtins.head (lib.splitString " " reconcileCommand));
+  reconcileScript = (cfgOf hostReconcile)._scripts.prepare;
   quiesceRecoveryCheck = pkgs.runCommand "overlay-nix-quiesce-recovery-test" {
     inherit reconcileScript;
     passAsFile = [ "reconcileScript" ];
@@ -322,14 +320,8 @@ let
       upperOnUpdate = "reconcile";
     };
   };
-  scriptWithLayers = layers: let
-    host = hostWithLayers layers;
-  in builtins.readFile (builtins.head (lib.splitString " "
-    host.config.systemd.services.nixtache-overlay-prepare.script));
-  namespaceWithLayers = layers: let
-    script = scriptWithLayers layers;
-  in builtins.readFile (builtins.head (lib.splitString "\n"
-    (builtins.elemAt (lib.splitString "unshare -m --propagation private " script) 1)));
+  scriptWithLayers = layers: (cfgOf (hostWithLayers layers))._scripts.prepare;
+  namespaceWithLayers = layers: (cfgOf (hostWithLayers layers))._scripts.namespace;
   selectWithLayers = layers: (hostWithLayers layers).config.systemd.services.nixtache-overlay-select.script;
   tryHost = extra: builtins.tryEval (mkHost {
     imports = [ extra ];
@@ -818,7 +810,7 @@ let
     (builtins.elemAt (lib.splitString "\n${name}=" prepareScript) 1));
   planner = scriptAssignment "planner";
   materializer = scriptAssignment "materializer";
-  materializerSource = builtins.readFile materializer;
+  materializerSource = (cfgOf hostDefault)._scripts.materializer;
   plannerTransitionCheck = pkgs.runCommand "overlay-transition-test" {
     inherit plannerOracleBundle planner materializer;
   } ''
@@ -1035,6 +1027,14 @@ let
         && !(lib.hasInfix ''activate_state_dir "$consumer_generation/state/$name" "/var/lib/runners/alpha/nix/var/nix/$name"'' frozenSelection);
       selectedSlotAndGeneration = lib.hasInfix "slot=$(cat /run/nixtache-overlay/selected-slot" frozenPlanService.script
         && lib.hasInfix ''"$(readlink -f "/var/lib/nix-overlay/upper-slots/$slot/current")" = "$generation"'' frozenPlanService.script;
+      ephemeralSelectionAllowed = lib.hasInfix ''if [ -n "$generation" ]; then'' frozenPlanService.script
+        && !(lib.hasInfix ''[ -n "$slot" ] && [ -n "$generation" ]'' frozenPlanService.script);
+      physicalHostStateAfterLowerLoad =
+        lib.elem "nixtache-lower-store-db-load.service" frozenPlanService.after
+        && lib.elem "nixtache-lower-store-db-load.service" frozenPlanService.requires
+        && lib.hasInfix ''for name in db gcroots profiles temproots; do mkdir -p /var/lib/nix-overlay/lower-state/$name; done'' parentRootPhase
+        && lib.hasInfix ''activate_frozen_state /var/lib/nix-overlay/lower-state /run/nixtache-overlay/physical-host/nix/var/nix'' parentRootPhase
+        && !(lib.hasInfix ''activate_frozen_state /var/lib/nix-overlay/lower-state /run/nixtache-overlay/physical-host/nix/var/nix'' frozenSelection);
       privateRunWork = lib.hasInfix ''frozen_root="/run/nixtache-overlay/frozen/$physical_id"'' frozenPlanService.script
         && lib.hasInfix ''lower_layers="$upper_dir"'' frozenPlanService.script
         && lib.hasInfix ''lower_layers="$lower_layers:$ancestor_upper"'' frozenPlanService.script

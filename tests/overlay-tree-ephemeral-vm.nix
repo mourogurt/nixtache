@@ -2,7 +2,7 @@
 , self
 , system ? "x86_64-linux"
 , ephemeralNode ? "host"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -73,11 +73,11 @@ pkgs.testers.runNixOSTest {
         return node_dir(target, node) + "/upper/" + basename(path)
 
     def nix_store(node, args):
-        features = "ca-derivations local-overlay-store read-only-local-store"
+        features = "local-overlay-store read-only-local-store"
         return "nix-store --option experimental-features " + q(features) + " --store " + q(STORES[node]) + " " + args
 
     def nix_cli(node, args):
-        features = "nix-command ca-derivations local-overlay-store read-only-local-store"
+        features = "nix-command local-overlay-store read-only-local-store"
         return "nix --extra-experimental-features " + q(features) + " --store " + q(STORES[node]) + " " + args
 
     def realize(node, path):

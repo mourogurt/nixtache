@@ -93,7 +93,7 @@ let
         mkdir -p "$destination/db"
         nix-store --option experimental-features "read-only-local-store" \
           --store "local?root=$merge_scratch/root&state=$source&read-only=true" --dump-db |
-          nix-store --option experimental-features "ca-derivations" \
+          nix-store \
             --store "local?root=$merge_scratch/root&state=$destination" --load-db
       fi
       for name in gcroots profiles temproots; do
@@ -195,6 +195,219 @@ let
       printf '%s' "$value"
     }
   '';
+
+  verifyNamespaceScript = pkgs.writeShellScript "nixtache-overlay-verify-namespace" ''
+        set -euo pipefail
+        export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix ])}
+        ${encodeStoreUri}
+        rows="$stage/persistent-plan.rows"
+        if [ "$target_device" = "BOOTED" ]; then
+          mount --bind ${topology.physicalHostRoot}/nix/store "$lower_store"
+          mount -o remount,ro,bind "$lower_store"
+        else
+          mount -o ro "$target_device" "$lower_store"
+        fi
+        seed=$(mktemp -d /run/nixtache-overlay/seed.XXXXXX)
+        mkdir -p "$seed/upper" "$seed/work"
+        mount -t overlay overlay -o lowerdir="$lower_store",upperdir="$seed/upper",workdir="$seed/work" "$lower_store"
+        nix-store --store "local?root=$lower_root&state=$stage/host/lower-state" --load-db < "$target_dump"
+        umount "$lower_store"
+        lower_url=$(uri_encode "local?root=$lower_root&state=$stage/host/lower-state&read-only=true")
+
+        physical_stage() {
+          local physical_id=$1 logical_id=$2 role=$3
+          if [ "$role" = runtime ]; then
+            if [ "$logical_id" = host ]; then
+              printf '%s\n' "$stage/host"
+            else
+              printf '%s\n' "$stage/layers/$logical_id"
+            fi
+          else
+            printf '%s\n' "$stage/nodes/$physical_id"
+          fi
+        }
+        physical_root() {
+          printf '%s\n' "$scratch/nodes/$1"
+        }
+        physical_parent() {
+          local wanted=$1 physical_id logical_id role parent rest
+          while IFS='|' read -r physical_id logical_id role parent rest; do
+            if [ "$physical_id" = "$wanted" ]; then
+              printf '%s\n' "$parent"
+              return 0
+            fi
+          done < "$rows"
+          return 1
+        }
+        physical_role() {
+          local wanted=$1 physical_id logical_id role rest
+          while IFS='|' read -r physical_id logical_id role rest; do
+            if [ "$physical_id" = "$wanted" ]; then
+              printf '%s\n' "$role"
+              return 0
+            fi
+          done < "$rows"
+          return 1
+        }
+        physical_logical() {
+          local wanted=$1 physical_id logical_id rest
+          while IFS='|' read -r physical_id logical_id rest; do
+            if [ "$physical_id" = "$wanted" ]; then
+              printf '%s\n' "$logical_id"
+              return 0
+            fi
+          done < "$rows"
+          return 1
+        }
+        physical_is_parent() {
+          local wanted=$1 physical_id logical_id role parent rest
+          while IFS='|' read -r physical_id logical_id role parent rest; do
+            if [ "$parent" = "$wanted" ]; then return 0; fi
+          done < "$rows"
+          return 1
+        }
+        physical_mount_dir() {
+          printf '%s\n' "$scratch/mounted-uppers/$1"
+        }
+        store_url() {
+          local own=$1 current=$2 parent logical role current_stage current_root mount_upper state lower
+          parent=$(physical_parent "$current")
+          logical=$(physical_logical "$current")
+          role=$(physical_role "$current")
+          current_stage=$(physical_stage "$current" "$logical" "$role")
+          current_root=$(physical_root "$current")
+          mount_upper="$(physical_mount_dir "$current")/upper"
+          if [ "$own" = "$current" ]; then
+            state="$current_stage/state"
+          else
+            state="$scratch/lower-states/$current"
+          fi
+          if [ "$parent" = - ]; then
+            lower="$lower_url"
+          else
+            lower=$(uri_encode "$(store_url "$own" "$parent")")
+          fi
+          printf '%s\n' "local-overlay://?root=$current_root&state=$state&lower-store=$lower&upper-layer=$mount_upper&ignore-gc-delete-failure=true&check-mount=false"
+        }
+        physical_lower_layers() {
+          local ancestor=$1 logical role ancestor_stage alias layers=""
+          while [ "$ancestor" != - ]; do
+            logical=$(physical_logical "$ancestor")
+            role=$(physical_role "$ancestor")
+            ancestor_stage=$(physical_stage "$ancestor" "$logical" "$role")
+            alias="$scratch/l/$ancestor"
+            mkdir -p "$alias"
+            if ! mountpoint -q "$alias"; then
+              mount --bind "$ancestor_stage/upper" "$alias"
+            fi
+            mount -o remount,ro,bind "$alias"
+            layers="''${layers:+''${layers}:}$alias"
+            ancestor=$(physical_parent "$ancestor")
+          done
+          printf '%s\n' "''${layers:+''${layers}:}$lower_store"
+        }
+        mount_physical() {
+          local physical_id=$1 logical_id=$2 role=$3 parent=$4 node_stage node_root mount_dir lower_layers
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          node_root=$(physical_root "$physical_id")
+          mount_dir=$(physical_mount_dir "$physical_id")
+          lower_layers=$(physical_lower_layers "$parent")
+          mkdir -p "$node_root/nix/store" "$mount_dir/work"
+          if [ ! -d "$mount_dir/upper" ]; then
+            mkdir -p "$mount_dir/upper"
+            cp -a "$node_stage/upper/." "$mount_dir/upper/"
+          fi
+          # Private mount uppers avoid upper/lower sharing; independent short
+          # aliases avoid nested stacking and new-mount-API option length limits.
+          mount -t overlay overlay -o lowerdir="$lower_layers",upperdir="$mount_dir/upper",workdir="$mount_dir/work" "$node_root/nix/store"
+        }
+        publish_mount_upper() {
+          local physical_id=$1 logical_id=$2 role=$3 node_stage mount_dir
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          mount_dir=$(physical_mount_dir "$physical_id")
+          rm -rf "$node_stage/upper"
+          mkdir -p "$node_stage/upper"
+          cp -a "$mount_dir/upper/." "$node_stage/upper/"
+        }
+        unmount_all() {
+          local physical_id rest node_root
+          while IFS='|' read -r physical_id rest; do
+            [ -n "$physical_id" ] || continue
+            node_root=$(physical_root "$physical_id")
+            if mountpoint -q "$node_root/nix/store"; then umount "$node_root/nix/store"; fi
+          done < <(tac "$rows")
+        }
+
+        ${repairStoreSnippet}
+        ${checkStoreSnippet}
+
+        duplicate_visible_metadata() {
+          local physical_id=$1 parent=$2 state=$3 merged=$4 parent_state
+          if [ "$parent" = - ]; then
+            parent_state="$stage/host/lower-state"
+          else
+            parent_state="$scratch/lower-states/$parent"
+          fi
+          mkdir -p "$scratch/dump-root/nix/store"
+          # Parent-first preparation duplicates the parent's complete visible
+          # records into each child upper DB; a local-overlay dump alone would
+          # contain only the child's own upper records.
+          nix-store --option experimental-features "read-only-local-store" \
+            --store "local?root=$scratch/dump-root&state=$parent_state&read-only=true" --dump-db |
+            nix-store \
+              --store "local?root=$merged&state=$state" --load-db
+        }
+
+        while IFS='|' read -r physical_id logical_id role parent operation disposition rest; do
+          [ -n "$physical_id" ] || continue
+          mount_physical "$physical_id" "$logical_id" "$role" "$parent"
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          node_root=$(physical_root "$physical_id")
+          node_url=$(store_url "$physical_id" "$physical_id")
+          echo "nixtache-overlay: repairing $physical_id"
+          if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
+            host_url=$node_url
+            host_root=$node_root
+            repair_store "$host_url" "$stage/host/state" "$host_root"
+          else
+            repair_store "$node_url" "$node_stage/state" "$node_root"
+          fi
+          ${optionalString (cfg.upperOnUpdate == "reconcile") ''
+            if [ "$disposition" != empty ] && [ "$disposition" != empty-continuation ]; then
+              duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"
+            fi
+          ''}
+          publish_mount_upper "$physical_id" "$logical_id" "$role"
+          mkdir -p "$scratch/lower-states/$physical_id"
+          cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"
+          echo "nixtache-overlay: prepared $physical_id"
+        done < "$rows"
+        unmount_all
+        while IFS='|' read -r physical_id logical_id role parent rest; do
+          [ -n "$physical_id" ] || continue
+          mount_physical "$physical_id" "$logical_id" "$role" "$parent"
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          node_root=$(physical_root "$physical_id")
+          node_url=$(store_url "$physical_id" "$physical_id")
+          echo "nixtache-overlay: checking $physical_id"
+          if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
+            host_url=$node_url
+            host_root=$node_root
+            check_store "$host_url" "$host_root"
+          else
+            check_store "$node_url" "$node_root"
+          fi
+        done < "$rows"
+        while IFS='|' read -r physical_id logical_id role parent rest; do
+          [ -n "$physical_id" ] || continue
+          if ! physical_is_parent "$physical_id"; then continue; fi
+          parent_url=$(store_url "$physical_id" "$physical_id")
+          parent_merged_root=$(physical_root "$physical_id")
+          echo "nixtache-overlay: rechecking parent $physical_id"
+          check_store "$parent_url" "$parent_merged_root"
+        done < "$rows"
+        unmount_all
+      '';
 
   prepareScript = pkgs.writeShellScript "nixtache-overlay-prepare" ''
     set -euo pipefail
@@ -373,218 +586,7 @@ let
       lower_store="$lower_root/nix/store"
       mkdir -p "$lower_store"
       export target_device scratch lower_root lower_store stage target_dump
-      unshare -m --propagation private ${pkgs.writeShellScript "nixtache-overlay-verify-namespace" ''
-        set -euo pipefail
-        export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix ])}
-        ${encodeStoreUri}
-        rows="$stage/persistent-plan.rows"
-        if [ "$target_device" = "BOOTED" ]; then
-          mount --bind ${topology.physicalHostRoot}/nix/store "$lower_store"
-          mount -o remount,ro,bind "$lower_store"
-        else
-          mount -o ro "$target_device" "$lower_store"
-        fi
-        seed=$(mktemp -d /run/nixtache-overlay/seed.XXXXXX)
-        mkdir -p "$seed/upper" "$seed/work"
-        mount -t overlay overlay -o lowerdir="$lower_store",upperdir="$seed/upper",workdir="$seed/work" "$lower_store"
-        nix-store --option experimental-features "ca-derivations" --store "local?root=$lower_root&state=$stage/host/lower-state" --load-db < "$target_dump"
-        umount "$lower_store"
-        lower_url=$(uri_encode "local?root=$lower_root&state=$stage/host/lower-state&read-only=true")
-
-        physical_stage() {
-          local physical_id=$1 logical_id=$2 role=$3
-          if [ "$role" = runtime ]; then
-            if [ "$logical_id" = host ]; then
-              printf '%s\n' "$stage/host"
-            else
-              printf '%s\n' "$stage/layers/$logical_id"
-            fi
-          else
-            printf '%s\n' "$stage/nodes/$physical_id"
-          fi
-        }
-        physical_root() {
-          printf '%s\n' "$scratch/nodes/$1"
-        }
-        physical_parent() {
-          local wanted=$1 physical_id logical_id role parent rest
-          while IFS='|' read -r physical_id logical_id role parent rest; do
-            if [ "$physical_id" = "$wanted" ]; then
-              printf '%s\n' "$parent"
-              return 0
-            fi
-          done < "$rows"
-          return 1
-        }
-        physical_role() {
-          local wanted=$1 physical_id logical_id role rest
-          while IFS='|' read -r physical_id logical_id role rest; do
-            if [ "$physical_id" = "$wanted" ]; then
-              printf '%s\n' "$role"
-              return 0
-            fi
-          done < "$rows"
-          return 1
-        }
-        physical_logical() {
-          local wanted=$1 physical_id logical_id rest
-          while IFS='|' read -r physical_id logical_id rest; do
-            if [ "$physical_id" = "$wanted" ]; then
-              printf '%s\n' "$logical_id"
-              return 0
-            fi
-          done < "$rows"
-          return 1
-        }
-        physical_is_parent() {
-          local wanted=$1 physical_id logical_id role parent rest
-          while IFS='|' read -r physical_id logical_id role parent rest; do
-            if [ "$parent" = "$wanted" ]; then return 0; fi
-          done < "$rows"
-          return 1
-        }
-        physical_mount_dir() {
-          printf '%s\n' "$scratch/mounted-uppers/$1"
-        }
-        store_url() {
-          local own=$1 current=$2 parent logical role current_stage current_root mount_upper state lower
-          parent=$(physical_parent "$current")
-          logical=$(physical_logical "$current")
-          role=$(physical_role "$current")
-          current_stage=$(physical_stage "$current" "$logical" "$role")
-          current_root=$(physical_root "$current")
-          mount_upper="$(physical_mount_dir "$current")/upper"
-          if [ "$own" = "$current" ]; then
-            state="$current_stage/state"
-          else
-            state="$scratch/lower-states/$current"
-          fi
-          if [ "$parent" = - ]; then
-            lower="$lower_url"
-          else
-            lower=$(uri_encode "$(store_url "$own" "$parent")")
-          fi
-          printf '%s\n' "local-overlay://?root=$current_root&state=$state&lower-store=$lower&upper-layer=$mount_upper&ignore-gc-delete-failure=true&check-mount=false"
-        }
-        physical_lower_layers() {
-          local ancestor=$1 logical role ancestor_stage alias layers=""
-          while [ "$ancestor" != - ]; do
-            logical=$(physical_logical "$ancestor")
-            role=$(physical_role "$ancestor")
-            ancestor_stage=$(physical_stage "$ancestor" "$logical" "$role")
-            alias="$scratch/l/$ancestor"
-            mkdir -p "$alias"
-            if ! mountpoint -q "$alias"; then
-              mount --bind "$ancestor_stage/upper" "$alias"
-            fi
-            mount -o remount,ro,bind "$alias"
-            layers="''${layers:+''${layers}:}$alias"
-            ancestor=$(physical_parent "$ancestor")
-          done
-          printf '%s\n' "''${layers:+''${layers}:}$lower_store"
-        }
-        mount_physical() {
-          local physical_id=$1 logical_id=$2 role=$3 parent=$4 node_stage node_root mount_dir lower_layers
-          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
-          node_root=$(physical_root "$physical_id")
-          mount_dir=$(physical_mount_dir "$physical_id")
-          lower_layers=$(physical_lower_layers "$parent")
-          mkdir -p "$node_root/nix/store" "$mount_dir/work"
-          if [ ! -d "$mount_dir/upper" ]; then
-            mkdir -p "$mount_dir/upper"
-            cp -a "$node_stage/upper/." "$mount_dir/upper/"
-          fi
-          # Private mount uppers avoid upper/lower sharing; independent short
-          # aliases avoid nested stacking and new-mount-API option length limits.
-          mount -t overlay overlay -o lowerdir="$lower_layers",upperdir="$mount_dir/upper",workdir="$mount_dir/work" "$node_root/nix/store"
-        }
-        publish_mount_upper() {
-          local physical_id=$1 logical_id=$2 role=$3 node_stage mount_dir
-          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
-          mount_dir=$(physical_mount_dir "$physical_id")
-          rm -rf "$node_stage/upper"
-          mkdir -p "$node_stage/upper"
-          cp -a "$mount_dir/upper/." "$node_stage/upper/"
-        }
-        unmount_all() {
-          local physical_id rest node_root
-          while IFS='|' read -r physical_id rest; do
-            [ -n "$physical_id" ] || continue
-            node_root=$(physical_root "$physical_id")
-            if mountpoint -q "$node_root/nix/store"; then umount "$node_root/nix/store"; fi
-          done < <(tac "$rows")
-        }
-
-        ${repairStoreSnippet}
-        ${checkStoreSnippet}
-
-        duplicate_visible_metadata() {
-          local physical_id=$1 parent=$2 state=$3 merged=$4 parent_state
-          if [ "$parent" = - ]; then
-            parent_state="$stage/host/lower-state"
-          else
-            parent_state="$scratch/lower-states/$parent"
-          fi
-          mkdir -p "$scratch/dump-root/nix/store"
-          # Parent-first preparation duplicates the parent's complete visible
-          # records into each child upper DB; a local-overlay dump alone would
-          # contain only the child's own upper records.
-          nix-store --option experimental-features "ca-derivations read-only-local-store" \
-            --store "local?root=$scratch/dump-root&state=$parent_state&read-only=true" --dump-db |
-            nix-store --option experimental-features "ca-derivations" \
-              --store "local?root=$merged&state=$state" --load-db
-        }
-
-        while IFS='|' read -r physical_id logical_id role parent operation disposition rest; do
-          [ -n "$physical_id" ] || continue
-          mount_physical "$physical_id" "$logical_id" "$role" "$parent"
-          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
-          node_root=$(physical_root "$physical_id")
-          node_url=$(store_url "$physical_id" "$physical_id")
-          echo "nixtache-overlay: repairing $physical_id"
-          if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
-            host_url=$node_url
-            host_root=$node_root
-            repair_store "$host_url" "$stage/host/state" "$host_root"
-          else
-            repair_store "$node_url" "$node_stage/state" "$node_root"
-          fi
-          ${optionalString (cfg.upperOnUpdate == "reconcile") ''
-            if [ "$disposition" != empty ] && [ "$disposition" != empty-continuation ]; then
-              duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"
-            fi
-          ''}
-          publish_mount_upper "$physical_id" "$logical_id" "$role"
-          mkdir -p "$scratch/lower-states/$physical_id"
-          cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"
-          echo "nixtache-overlay: prepared $physical_id"
-        done < "$rows"
-        unmount_all
-        while IFS='|' read -r physical_id logical_id role parent rest; do
-          [ -n "$physical_id" ] || continue
-          mount_physical "$physical_id" "$logical_id" "$role" "$parent"
-          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
-          node_root=$(physical_root "$physical_id")
-          node_url=$(store_url "$physical_id" "$physical_id")
-          echo "nixtache-overlay: checking $physical_id"
-          if [ "$logical_id" = host ] && [ "$role" = runtime ]; then
-            host_url=$node_url
-            host_root=$node_root
-            check_store "$host_url" "$host_root"
-          else
-            check_store "$node_url" "$node_root"
-          fi
-        done < "$rows"
-        while IFS='|' read -r physical_id logical_id role parent rest; do
-          [ -n "$physical_id" ] || continue
-          if ! physical_is_parent "$physical_id"; then continue; fi
-          parent_url=$(store_url "$physical_id" "$physical_id")
-          parent_merged_root=$(physical_root "$physical_id")
-          echo "nixtache-overlay: rechecking parent $physical_id"
-          check_store "$parent_url" "$parent_merged_root"
-        done < "$rows"
-        unmount_all
-      ''}
+      unshare -m --propagation private ${verifyNamespaceScript}
 
       rm -rf "$slot_dir/generations/$generation"
       mv "$stage" "$slot_dir/generations/$generation"
@@ -666,17 +668,17 @@ let
       for link in $roots; do
         root=$(readlink "$link" || true)
         case "$root" in /nix/store/*) ;; *) continue ;; esac
-        requisites=$(nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" 2>/dev/null) || requisites=""
+        requisites=$(nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" 2>/dev/null) || requisites=""
         if [ -z "$requisites" ]; then
-          nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" --repair-path "$root" || failed=1
-          requisites=$(nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" 2>/dev/null) || failed=1
+          nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" --repair-path "$root" || failed=1
+          requisites=$(nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" 2>/dev/null) || failed=1
         fi
         for path in $requisites; do
-          [ -e "$merged$path" ] || nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" --repair-path "$path" || failed=1
+          [ -e "$merged$path" ] || nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" --repair-path "$path" || failed=1
         done
       done
-      nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" --verify || true
-      if ! listing=$(nix --extra-experimental-features "nix-command ca-derivations local-overlay-store read-only-local-store" path-info --all --store "$store_url"); then
+      nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" --verify || true
+      if ! listing=$(nix --extra-experimental-features "nix-command local-overlay-store read-only-local-store" path-info --all --store "$store_url"); then
         failed=1
       fi
       while read -r path; do
@@ -689,8 +691,8 @@ let
   checkStoreSnippet = ''
     check_store() {
       local store_url=$1 merged=$2 path listing failed=0
-      nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" --verify || failed=1
-      if ! listing=$(nix --extra-experimental-features "nix-command ca-derivations local-overlay-store read-only-local-store" path-info --all --store "$store_url"); then
+      nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" --verify || failed=1
+      if ! listing=$(nix --extra-experimental-features "nix-command local-overlay-store read-only-local-store" path-info --all --store "$store_url"); then
         failed=1
       fi
       while read -r path; do
@@ -702,4 +704,7 @@ let
 in
 {
   script = prepareScript;
+  prepareText = prepareScript.text;
+  materializerText = materializeScript.text;
+  namespaceText = verifyNamespaceScript.text;
 }

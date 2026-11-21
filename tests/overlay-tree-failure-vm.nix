@@ -3,7 +3,7 @@
 , system ? "x86_64-linux"
 , failureNode ? "host"
 , faultScenarios ? null
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -27,15 +27,14 @@ let
 
   shimModule = { config, lib, pkgs, ... }:
     let
-      outerPath = builtins.head (lib.splitString " "
-        (fixture.mkAppliance { version = "1"; }).config.systemd.services.nixtache-overlay-prepare.script);
-      outerText = builtins.readFile outerPath;
+      overlayCfg = (fixture.mkAppliance { version = "1"; }).config.services.nixtache.overlay-nix;
+      outerText = overlayCfg._scripts.prepare;
       materializerPath = builtins.head (lib.splitString "\n"
         (builtins.elemAt (lib.splitString "materializer=" outerText) 1));
-      materializerText = builtins.readFile materializerPath;
+      materializerText = overlayCfg._scripts.materializer;
       innerPath = builtins.head (lib.splitString "\n"
         (builtins.elemAt (lib.splitString "unshare -m --propagation private " outerText) 1));
-      innerText = builtins.readFile innerPath;
+      innerText = overlayCfg._scripts.namespace;
       failureFunction = ''
         fail_at() {
           local node=$1 stage=$2
@@ -65,7 +64,7 @@ let
           if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ "$node" = "''${NIXTACHE_TEST_REFS_NODE:-}" ]; then
             root=$(cat /run/nixtache-overlay-test-refs-root)
             db="$layer_stage/state/db/db.sqlite"
-            nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-expected
+            nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-expected
             ${pkgs.sqlite}/bin/sqlite3 "$db" "DELETE FROM Refs WHERE referrer = (SELECT id FROM ValidPaths WHERE path = '$root');"
             [ "$(${pkgs.sqlite}/bin/sqlite3 "$db" "SELECT COUNT(*) FROM ValidPaths WHERE path = '$root';")" = 1 ]
             [ -e "$merged$root" ]
@@ -77,7 +76,7 @@ let
           local node=$1 store_url=$2 root
           if [ -r /run/nixtache-overlay-test-failure ] && [ "$(cat /run/nixtache-overlay-test-failure)" = refs ] && [ -e /run/nixtache-overlay-test-refs-armed ] && [ "$node" = "''${NIXTACHE_TEST_REFS_NODE:-}" ]; then
             root=$(cat /run/nixtache-overlay-test-refs-root)
-            if ! nix-store --option experimental-features "ca-derivations local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-actual; then
+            if ! nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" -q --requisites "$root" | sort > /run/nixtache-overlay-test-refs-actual; then
               touch /run/nixtache-overlay-test-refs-incomplete
             elif ! ${pkgs.diffutils}/bin/cmp -s /run/nixtache-overlay-test-refs-expected /run/nixtache-overlay-test-refs-actual; then
               touch /run/nixtache-overlay-test-refs-incomplete
@@ -112,14 +111,14 @@ let
       injectedInner = pkgs.writeShellScript "nixtache-overlay-verify-namespace-failure-${failureNode}"
         (builtins.replaceStrings [
           "set -euo pipefail\n"
-          "nix-store --option experimental-features \"ca-derivations\" --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
+          "nix-store --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
           "repair_store \"$host_url\" \"$stage/host/state\" \"$host_root\""
           "repair_store \"$node_url\" \"$node_stage/state\" \"$node_root\""
           "check_store \"$host_url\" \"$host_root\""
           "check_store \"$node_url\" \"$node_root\""
         ] [
           "set -euo pipefail\n${failureFunction}"
-          "fail_at host seed\nnix-store --option experimental-features \"ca-derivations\" --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
+          "fail_at host seed\nnix-store --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
           "fail_at host repair\nrepair_store \"$host_url\" \"$stage/host/state\" \"$host_root\""
           "fail_at \"$(basename \"$node_stage\")\" repair\nrepair_store \"$node_url\" \"$node_stage/state\" \"$node_root\""
           "fail_at host final\ncorrupt_refs host-runtime \"$host_url\" \"$stage/host\" \"$host_root\"\ncheck_store \"$host_url\" \"$host_root\"\naudit_refs host-runtime \"$host_url\""
@@ -241,11 +240,11 @@ pkgs.testers.runNixOSTest {
         return STATES[node] if target is None else node_dir(target, node) + "/state"
 
     def nix_store(node, args):
-        features = "ca-derivations local-overlay-store read-only-local-store"
+        features = "local-overlay-store read-only-local-store"
         return "nix-store --option experimental-features " + q(features) + " --store " + q(STORES[node]) + " " + args
 
     def nix_cli(node, args):
-        features = "nix-command ca-derivations local-overlay-store read-only-local-store"
+        features = "nix-command local-overlay-store read-only-local-store"
         return "nix --extra-experimental-features " + q(features) + " --store " + q(STORES[node]) + " " + args
 
     def realize(node, path):
