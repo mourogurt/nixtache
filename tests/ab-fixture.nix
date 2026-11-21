@@ -5,16 +5,13 @@
 # The appliance imports the REAL nixtache modules (deploy-target + ab-image) so
 # the polkit/gating/repart/transfers/verify under test are framework code.
 #
-# `pkgs` is the build-time TOOLING import (signing keys, staging helpers) and
-# stays input-addressed; `appliancePkgs` is the import the appliance SYSTEM
-# evaluates with (`nixpkgs.pkgs`). ab-image asserts a content-addressed
-# evaluation (the shipped lower store DB holds the closure's registered
-# validity records — content-true only under CA), so the default is a CA
-# import; callers share one via flake.nix's caPkgs.
+# `pkgs` is the build-time TOOLING import (signing keys, staging helpers);
+# `appliancePkgs` is the ordinary input-addressed import the appliance SYSTEM
+# evaluates with (`nixpkgs.pkgs`). Callers share one via flake.nix.
 { nixpkgs
 , self
 , system ? "x86_64-linux"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -88,10 +85,8 @@ let
           {
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest";
-            # The appliance ships its closure's REGISTERED validity records —
-            # content-true only under content-addressing (the ab-image module
-            # asserts pkgs.config.contentAddressedByDefault). Evaluate the
-            # system with the CA import handed in by the caller.
+            # Evaluate the system with the input-addressed import handed in
+            # by the caller; snapshot registration describes the staged bytes.
             nixpkgs.pkgs = appliancePkgs;
 
             services.nixtache.ab-image = {
@@ -131,8 +126,8 @@ let
             # `systemd-bless-boot status`). A bare-name call resolves only
             # what the system path carries; referencing the test's pkgs
             # systemd path instead would miss the store (this appliance
-            # evaluates against a separate CA package set, so that exact
-            # path is not part of the image). Test-assertion ergonomics
+            # evaluates against a separate package set, so that exact path
+            # is not part of the image). Test-assertion ergonomics
             # only — a prod appliance needs nothing here: the units
             # ExecStart absolute store paths, so functionality never
             # depends on these being in PATH.

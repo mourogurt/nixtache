@@ -6,13 +6,12 @@
 # and the shared QEMU invocation base for created machines and pexpect
 # drivers alike.
 #
-# `appliancePkgs` is the nixpkgs import the appliance systems evaluate with
-# (CA — ab-image asserts it; see ab-fixture.nix). `pkgs` below stays the
-# input-addressed tooling import.
+# `appliancePkgs` is the ordinary input-addressed nixpkgs import the
+# appliance systems evaluate with; `pkgs` below is the tooling import.
 { nixpkgs
 , self
 , system ? "x86_64-linux"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let

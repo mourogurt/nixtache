@@ -32,7 +32,7 @@
 # Signing is on (signVerify) — the runner host's pulls verify manifests.
 # Needs KVM. Hermetic: the deployer node stages the signed v2 package; the
 # build is a trivial derivation with substitute=false (no network).
-{ nixpkgs, self, system ? "x86_64-linux", storeMode ? "clone", appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, self, system ? "x86_64-linux", storeMode ? "clone", appliancePkgs ? import nixpkgs { inherit system; } }:
 
 let
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };

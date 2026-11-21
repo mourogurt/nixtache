@@ -22,7 +22,7 @@ not by `nix flake check`.
 |---|---|---|
 | `tests/runner.nix` | the runner module (`services.nixtache.runner.*`) — store `/`/`/srv`/empty, multi-instance, optional SSH creds, sandbox cap on/off, deploy map wiring, `runner.envs` | `checks.<system>.runner` |
 | `tests/deploy-target.nix` | the target side — apply unit, deploy user, polkit, health check, rollback wiring | `checks.<system>.deploy-target` |
-| `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify, store-tree imaging | `checks.<system>.ab-image` |
+| `tests/ab-image.nix` | build-time A/B image config — fixed vs max-disk sizing, Verify, paired-snapshot wiring and real scratch-store database/copy fixtures | `checks.<system>.ab-image` |
 | `tests/ab-contract.nix` | cross-module A/B contracts — provisioning, overlay cutover ordering and marker independence, runner store modes | `checks.<system>.ab-contract` |
 | `tests/overlay-nix.nix` | the overlay-nix module — `upperOnUpdate` enum (wipe/reconcile), default, lifecycle wiring | `checks.<system>.overlay-nix` |
 | `tests/ab-existing.nix` | compression/UKI options, runner A/B staging assertions and retain-GC wiring, `hostBackup`, `deploy-target.ab.forceAfterTimeout`, native-store/A/B assertion | `checks.<system>.ab-existing` |
@@ -84,13 +84,13 @@ requirements are in
 `ab-ota-anywhere-vm` evaluates the install configuration once on the host and
 passes its pre-built `diskoScript` and `toplevel` to nixos-anywhere with
 `--store-paths` and `--build-on local`. The network-less VMs perform no real
-Nix evaluation or builds. The deployer registers the closure roots in its store
-DB, both closure-copy endpoints enable `ca-derivations`, and nixos-anywhere
-still exercises kexec, disko, closure transfer, `nixos-install` and reboot; the
-`--flake` entrypoint is not covered. A fresh QEMU with OVMF then boots the
+Nix evaluation or builds. The deployer registers the ordinary input-addressed
+closure roots in its store DB, and nixos-anywhere exercises kexec, disko,
+closure transfer, `nixos-install` and reboot without CA derivation support;
+the `--flake` entrypoint is not covered. A fresh QEMU with OVMF then boots the
 installed UKI before the signed OTA leg. See the
-[`ab-ota` spec](../../openspec/specs/ab-ota/spec.md); the CA-alias rationale
-and transport design are recorded in the
+[`ab-ota` spec](../../openspec/specs/ab-ota/spec.md); transport design is
+recorded in the
 [`hermeticity change`](../../openspec/changes/archive/2026-10-30-redesign-ab-ota-anywhere-hermeticity/design.md).
 
 #### vmtests job output contract
@@ -143,9 +143,20 @@ Overlay tests distinguish their lower-DB worlds (see
 [`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): appliance
 suites use the DB shipped in the image, while `overlay-nix-install-vm` uses a
 host-store lower with its own database. Results do not transfer between those
-worlds. Faithful store imaging is pinned by `checks.ab-image` (a store tree
-containing a symlink path) and `overlay-nix-vm` (the symlink survives imaging
-and resolves through `nix path-info`).
+worlds. `checks.ab-image` builds real input-addressed scratch-store fixtures
+that verify snapshot registration, staged-byte NAR hashes, a top-level
+symlink and complete closure copying into a second store. Fault-injection
+fixtures require missing staged paths, dangling references and
+post-registration corruption to fail their corresponding build-time guards.
+These focused fixtures do not replace KVM acceptance: `overlay-nix-vm`
+verifies the shipped symlink and delta runtime behavior;
+`overlay-nix-ota-invalid-vm` additionally evaluates nixpkgs and performs
+`nix profile install nixpkgs#hello` on the real snapshot-derived IA image
+with CA derivation support disabled, then exercises OTA swaps and upper
+lifecycle policies. `runner-store-swap-{clone,overlay}-vm` verifies complete
+closure copies, persistence and rebuilds across real appliance swaps.
+Canonical requirements: [`overlay-nix`](../../openspec/specs/overlay-nix/spec.md)
+and [`runner`](../../openspec/specs/runner/spec.md).
 
 The `overlay-nix-ota-invalid` matrix covers empty and tampered update attempts,
 same-version persistent-upper reboots, live-root reconcile, degraded reconcile

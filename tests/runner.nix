@@ -809,16 +809,16 @@ self.nixosModules.runner
     };
   };
   scenarioApplianceClone = {
-    name = "appliance host → container appliance mode: nix module disabled, nix.conf rendered, CLI shipped, clone standalone (sec. 11.3)";
+    name = "appliance host → container appliance mode: nix module disabled, IA nix.conf rendered, CLI shipped, clone standalone (sec. 11.3)";
     checks = {
       containerNixDisabled = cfgAppliance.nix.enable == false;
       gcOff = cfgAppliance.nix.gc.automatic == false;
       optimiseOff = cfgAppliance.nix.optimise.automatic == false;
       nixConfRendered = cfgAppliance.environment.etc ? "nix/nix.conf";
-      # The fleet's closure is content-addressed — the rendered nix.conf must
-      # carry the feature (the daemon ignores client-side overrides, so the
-      # in-container system conf is the only effective source).
-      nixConfHasCa = lib.hasInfix "ca-derivations"
+      nixConfHasRequiredFeatures =
+        let conf = cfgAppliance.environment.etc."nix/nix.conf".source.text or ""; in
+        lib.hasInfix "nix-command" conf && lib.hasInfix "flakes" conf;
+      nixConfHasNoCa = !lib.hasInfix "ca-derivations"
         (cfgAppliance.environment.etc."nix/nix.conf".source.text or "");
       nixCliShipped = builtins.elem cfgAppliance.nix.package cfgAppliance.environment.systemPackages;
       # The CI-critical feature list still reaches the container's settings
@@ -882,7 +882,9 @@ self.nixosModules.runner
         (execOverlayOf hostApplianceOverlay);
       applianceNoDaemon = !(lib.hasInfix "lower-store=daemon" (execOverlayOf hostApplianceOverlay));
       applianceReadOnlyFeature = lib.hasInfix
-        "extra-experimental-features = ca-derivations local-overlay-store read-only-local-store"
+        "extra-experimental-features = local-overlay-store read-only-local-store"
+        ((servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONFIG or "");
+      applianceNoCaFeature = !lib.hasInfix "ca-derivations"
         ((servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONFIG or "");
       applianceSingleFeatureSetting =
         let conf = (servicesOf hostApplianceOverlay)."nix-daemon-custom".environment.NIX_CONFIG or ""; in

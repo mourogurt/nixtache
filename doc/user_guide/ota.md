@@ -63,7 +63,7 @@ make the read-only lower store a first-class readable nix store. A boot-time loa
 
 | moment | what happens |
 |---|---|
-| image build | the dump is the closure's registered validity records — content-true because the appliance evaluation is content-addressed ([`lower-store-db.md`](../technical_details/lower-store-db.md)) |
+| image build | one paired snapshot supplies both the store tree and its dump; Nix computes each record from the staged bytes, so ordinary input-addressed evaluations produce matching content and metadata ([`lower-store-db.md`](../technical_details/lower-store-db.md)) |
 | update staging | the dump is part of the signed `sysupdate-package`; the `15-lower-db` transfer installs it on the ESP at `/EFI/nixtache/<imageId>_<version>.lower-db` (old slot's dump vacuumed with its UKI) |
 | first boot | the DB is missing → the dump loads, the image version is recorded in a marker |
 | same-slot reboot | the DB exists and its version marker matches → no import; the DB remains unchanged |
@@ -76,12 +76,11 @@ appliance. This is what makes the runner container work on appliance hosts
 ([`overlay-nix.md`](overlay-nix.md)); dump/loader internals live in
 [`doc/technical_details/lower-store-db.md`](../technical_details/lower-store-db.md).
 
-**Content-addressing requirement**: the appliance target's nixpkgs
-evaluation MUST set `nixpkgs.config.contentAddressedByDefault = true` (the
-module asserts it with an actionable error), and every machine that
-evaluates/builds the image needs the `ca-derivations` experimental feature
-in its SYSTEM nix.conf — see the daemon quirk in
-[`lower-store-db.md`](../technical_details/lower-store-db.md).
+**Build prerequisites**: use an ordinary input-addressed nixpkgs evaluation.
+Neither `nixpkgs.config.contentAddressedByDefault` nor the `ca-derivations`
+experimental feature is required on the image builder or appliance. The
+signed `sysupdate-package` carries the store image, UKI and snapshot-derived
+dump; sysupdate delivers the dump to the ESP for the boot-time loader.
 
 ## First deploy — three routes
 

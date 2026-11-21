@@ -30,7 +30,7 @@
 { nixpkgs
 , self
 , system ? "x86_64-linux"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 , upperOnUpdate ? "reconcile"
 }:
 
@@ -137,10 +137,8 @@ pkgs.testers.runNixOSTest {
     # the deployer's store DB misses the extraDependencies (vim and the v2
     # payload) — the appliance's `nix-store --realize` below then gets 404s
     # from nix-serve. Re-load the registration from the actually-mounted
-    # path. Names need no massaging: the dump records CA-context paths under
-    # flattened alias names, and the test requests them through the same
-    # alias names (they are interpolated from the same CA-context
-    # evaluation), so db, served files and queries agree as-is. Pure
+    # path. Store names and references come from the same input-addressed
+    # evaluation, so db, served files and queries agree as-is. Pure
     # test-harness workaround: a prod system boots a real disk — no
     # regInfo= cmdline and no register-nix-paths.service exist there.
     deployer.succeed(

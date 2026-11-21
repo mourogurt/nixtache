@@ -41,7 +41,7 @@
 #   / unsigned) is owned by ab-ota-verify-vm and not duplicated here.
 #
 # Needs KVM. Hermetic: v2 comes from the deployer node on the test LAN.
-{ nixpkgs, self, system ? "x86_64-linux", fileSystemsOverride ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, self, system ? "x86_64-linux", fileSystemsOverride ? false, appliancePkgs ? import nixpkgs { inherit system; } }:
 
 let
   otaLib = import ./ab-ota-vm-lib.nix { inherit nixpkgs self system appliancePkgs; };

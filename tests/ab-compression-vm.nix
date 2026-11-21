@@ -16,7 +16,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
-  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
+  appliancePkgs ? import nixpkgs { inherit system; },
 }:
 
 let
@@ -54,8 +54,8 @@ let
           {
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest";
-            # ab-image ships the closure's registered validity records —
-            # content-true only under CA; the module asserts this.
+            # Use the caller's ordinary input-addressed package set; the
+            # snapshot derives validity records from the staged bytes.
             nixpkgs.pkgs = appliancePkgs;
 
             services.nixtache.ab-image = {

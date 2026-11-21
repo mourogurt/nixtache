@@ -41,29 +41,19 @@ let
 
   efiArch = pkgs.stdenv.hostPlatform.efiArch;
 
-  # closureInfo's registration is the slot closure's load-db dump. Content
-  # addressing makes its records authoritative for the shipped bytes, which
-  # the runner's clone verifies on every copy; an input-addressed path can
-  # have different realisations whose bytes do not match one DB record.
-  #
+  # One immutable snapshot owns both the repart store source and the ESP
+  # database dump. Nix computes the records from these exact staged bytes.
   # The dump cannot be referenced by the toplevel (a derivation cycle) or
   # stored as an arbitrary /nix/store entry (overlay GC rejects non-store
   # names). It therefore ships versioned on the ESP via 15-lower-db.
-  lowerStoreDb = import ./lower-store-db.nix {
+  slotStoreSnapshot = import ./slot-store-snapshot.nix {
     inherit pkgs;
     toplevel = config.system.build.toplevel;
   };
+  storeTree = "${slotStoreSnapshot}/root/nix/store";
+  lowerStoreDb = "${slotStoreSnapshot}/lower-db";
   lowerStoreDbName = "${cfg.imageId}_${config.system.image.version}.lower-db";
   lowerStoreDbEspPath = "/EFI/nixtache/${lowerStoreDbName}";
-
-  # Faithful store imaging: the closure staged as one tree (see
-  # store-tree.nix) and handed to repart as a single CopyFiles source, so
-  # top-level symlink closure paths ship as symlinks instead of their
-  # target's content (repart dereferences each copy source it is handed).
-  storeTree = import ./store-tree.nix {
-    inherit pkgs;
-    toplevel = config.system.build.toplevel;
-  };
 
   # Default sysupdate transfers. `@v` carries the version; Path is STATIC
   # (sysupdate.d(5)). Local-self uses a plain-path regular-file source; a
@@ -362,24 +352,7 @@ in
   };
 
   config = mkIf cfg.enable {
-    # Registered DB records are content-true only in a CA evaluation, which
-    # the consumer must select in its nixpkgs import. The evaluating machine
-    # also needs ca-derivations in system nix.conf: after connecting to a
-    # daemon, client-side feature overrides cannot enable it (NixOS/nix#9090).
     assertions = [
-      {
-        assertion = pkgs.config.contentAddressedByDefault or false;
-        message = ''
-          services.nixtache.ab-image requires a content-addressed evaluation:
-          set `nixpkgs.config.contentAddressedByDefault = true;` on the
-          nixpkgs import for this appliance target, and enable the
-          `ca-derivations` experimental feature in the system nix.conf of
-          every machine that evaluates/builds it. The shipped lower store DB
-          is the closure's registered validity records, which are only
-          content-true for content-addressed paths — see
-          doc/technical_details/lower-store-db.md.
-        '';
-      }
       {
         assertion = !hasSuffix "%" cfg.storeSize;
         message = ''
@@ -466,8 +439,8 @@ in
           # placeholder. .links is not a store path, so it is added here
           # rather than through the closure dump or store tree.
           contents."/.links/.keep".source = pkgs.writeText "links-keep" "";
-          # One store-tree source prevents repart from dereferencing
-          # individual symlink closure paths (see store-tree.nix).
+          # One snapshot store-tree source prevents repart from dereferencing
+          # individual symlink closure paths.
           repartConfig = mkMerge [
             {
               CopyFiles = [ "${storeTree}:/" ];
@@ -618,13 +591,7 @@ in
           tmp=$(mktemp -d)
           mkdir -p "$tmp/upper" "$tmp/work"
           mount -t overlay overlay -o lowerdir=/nix/store,upperdir="$tmp/upper",workdir="$tmp/work" /nix/store
-          # The load runs CA-enabled: the appliance closure is
-          # content-addressed, and CA-enabled consumers open COPIES of this
-          # DB read-only (the runner container's clone seed) — schema
-          # migrations are writes and can never run on a read-only open, so
-          # the CA schema marker must be applied here, into the writable
-          # host DB, at load time.
-          ${lib.getExe' pkgs.nix "nix-store"} --option experimental-features "ca-derivations" --load-db < "$dump"
+          ${lib.getExe' pkgs.nix "nix-store"} --load-db < "$dump"
         ''}
         echo "$version" > "$marker"
         echo "loaded lower store DB for image version $version"

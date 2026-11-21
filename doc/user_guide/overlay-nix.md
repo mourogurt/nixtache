@@ -120,12 +120,14 @@ a path that is also valid in the lower, the module's configured
 `remount-hook` rebuilds the overlay mount so the merged view stays coherent —
 no unhandled "needs remounting" warnings.
 
-## Content-addressing
+## Input-addressed runtime operation
 
-The lower closure is built content-addressed, and the module adds
-`ca-derivations` to the daemon's experimental features so runtime evaluation
-(e.g. `nix-env`) works over it — see [`ota.md`](ota.md) for the
-evaluation-side requirement.
+The lower closure uses ordinary input-addressed store paths. The module enables
+`nix-command`, `flakes` and `local-overlay-store` for the runtime daemon;
+`ca-derivations` is not required. Evaluation and profile installation consume
+the snapshot-derived lower records, and paths already valid in the lower keep
+their input-addressed identities while new paths land in the upper. The OTA
+guide covers the [image and database contract](ota.md#the-shipped-lower-store-database).
 
 How the OTA route stages and installs updates:
 [`ota.md`](ota.md). Test inventory:

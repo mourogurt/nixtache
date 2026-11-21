@@ -317,20 +317,21 @@ in
               # In overlay mode the daemon talks to a local-overlay store rooted
               # at <store.path>; in clone mode it serves the plain relocated
               # local store at <store.path>/nix.
-               seedUnit = if useOverlay then "nix-daemon-overlay-mount.service" else "nix-daemon-storage.service";
+              seedUnit = if useOverlay then "nix-daemon-overlay-mount.service" else "nix-daemon-storage.service";
               # nix.conf content for the custom daemon (NIX_CONFIG env — a
               # multi-line nix.conf read as an alt to /etc/nix/nix.conf):
-              # - overlay mode opts into the local-overlay-store experimental
-              #   feature;
-              # - the daemon realizes the fleet's content-addressed closure,
-              #   so `ca-derivations` is always on here;
+              # - overlay mode opts into its local-overlay and read-only-local
+              #   store features;
               # - dedicated static build users isolate this daemon's cleanup
               #   from host and container system-daemon builders.
-              nixConf = lib.concatStringsSep "\n" [
-                "extra-experimental-features = ca-derivations${lib.optionalString useOverlay " local-overlay-store read-only-local-store"}"
-                "build-users-group = nixtache-runner-bld"
-                "auto-allocate-uids = false"
-              ];
+              nixConf = lib.concatStringsSep "\n" (
+                lib.optional useOverlay
+                  "extra-experimental-features = local-overlay-store read-only-local-store"
+                ++ [
+                  "build-users-group = nixtache-runner-bld"
+                  "auto-allocate-uids = false"
+                ]
+              );
             in
             {
               description = lib.mkForce "Nix Daemon with custom /nix bind mount";

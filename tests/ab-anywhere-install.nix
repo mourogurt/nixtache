@@ -12,7 +12,7 @@
 # nixtachePath supplies the shared fixture source and nixtacheModules supplies
 # the two NixOS modules without requiring this test fixture to import the
 # entire flake.
-{ nixpkgs, nixtachePath, nixtacheModules, disko, system ? "x86_64-linux", appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, nixtachePath, nixtacheModules, disko, system ? "x86_64-linux", appliancePkgs ? import nixpkgs { inherit system; } }:
 
 let
   lib = nixpkgs.lib;

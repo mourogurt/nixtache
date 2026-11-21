@@ -40,7 +40,7 @@
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test
 # LAN; no internet.
-{ nixpkgs, self, system ? "x86_64-linux", overlayOptions ? { }, upperTmpfs ? false, reconcileDegraded ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, self, system ? "x86_64-linux", overlayOptions ? { }, upperTmpfs ? false, reconcileDegraded ? false, appliancePkgs ? import nixpkgs { inherit system; } }:
 
 let
   lib = nixpkgs.lib;
@@ -111,6 +111,7 @@ let
           # timeouts on the hermetic test LAN.
           nix.settings.substituters = lib.mkForce [ "http://deployer:5000" ];
           nix.settings.trusted-public-keys = [ cachePub ];
+          nix.registry.nixpkgs.to = { type = "path"; path = "${nixpkgs}"; };
 
           networking.usePredictableInterfaceNames = false;
           networking.interfaces.eth0.ipv4.addresses = [
@@ -259,6 +260,22 @@ pkgs.testers.runNixOSTest {
     out = appliance.succeed(PROF + "/bin/tool")
     assert "tool-ok" in out, f"profile-installed tool did not run on v1 ({out!r})"
     print("OK: tool profile-installed (per-user profile target recorded)")
+
+    # Evaluate nixpkgs on the real snapshot-derived IA image, not only in the
+    # harness-lower suite. A separate short-lived profile proves the full
+    # profile-install path without rooting hello during the GC probe below.
+    features = appliance.succeed("nix show-config | grep '^experimental-features'")
+    assert "ca-derivations" not in features, f"CA unexpectedly enabled: {features}"
+    EVAL_PROF = "/var/lib/nixtache/eval-profile"
+    appliance.succeed(
+      "nix profile install --profile " + EVAL_PROF + " nixpkgs#hello", timeout=600
+    )
+    out = appliance.succeed(EVAL_PROF + "/bin/hello")
+    assert "Hello, world" in out, f"evaluated profile install did not run ({out!r})"
+    appliance.succeed(f"test -d {UPPER}/{HELLO_B}")
+    print("OK: nixpkgs evaluation + profile install on snapshot-derived IA lower with CA disabled")
+    appliance.succeed("nix profile remove --profile " + EVAL_PROF + " hello")
+    appliance.succeed("nix profile wipe-history --profile " + EVAL_PROF)
 
     appliance.succeed(f"nix-store --realize {HELLO_P}", timeout=600)
     appliance.succeed(f"test -d {UPPER}/{HELLO_B}")

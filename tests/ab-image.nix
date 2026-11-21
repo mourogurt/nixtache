@@ -10,7 +10,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
-  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
+  appliancePkgs ? import nixpkgs { inherit system; },
 }:
 
 let
@@ -25,11 +25,8 @@ let
     users.allowNoPasswordLogin = true;
   };
 
-  # The shipped DB is the closure's registered records — content-true only
-  # under content-addressing. Included in every positive-leg host; the
-  # negative-leg host below pins the module's assertion by simply not
-  # including this module (its world then evaluates input-addressed).
-  caModule = {
+  # All appliance hosts use the caller's ordinary input-addressed package set.
+  applianceModule = {
     nixpkgs.pkgs = appliancePkgs;
   };
 
@@ -39,7 +36,7 @@ let
       modules = [
         self.nixosModules.ab-image
         baseModule
-        caModule
+        applianceModule
         extra
       ];
     };
@@ -168,63 +165,35 @@ let
   };
 
   # --- scenario 5: shipped lower store DB ------------------------------------
-  # The dump MUST be produced by the module's dump generator for THIS host's
-  # toplevel: rebuilding the derivation here pins both that the dump exists
-  # and that its records cover exactly the running toplevel's closure (the
-  # closure's REGISTERED records — content-true because the fixture
-  # evaluates content-addressed). The store content itself ships via the
-  # store tree (one CopyFiles source — see scenario 6): top-level symlink
-  # closure paths image as symlinks, so the records match the shipped bytes
-  # for any closure composition. The dump ships on the ESP at a versioned
-  # path and rides updates via the 15-lower-db transfer — it cannot live in
-  # /etc (derivation cycle: the dump covers the toplevel) nor inside
-  # /nix/store (overlay GC hard-fails on non-store-path entries in the
-  # merged store dir).
-  #
-  # Rebuilt with the FIXTURE's pkgs (hostFixed.pkgs): under CA every
-  # derivation outPath depends on the pkgs instance's config, so the identity
-  # pin must use the same instance the module evaluated with.
-  expectedDump = import ../modules/ab-image/lower-store-db.nix {
+  # Both image inputs must be subpaths of the snapshot generated for THIS
+  # host's toplevel. The dump ships on the ESP at a versioned path and rides
+  # updates via the 15-lower-db transfer; it cannot live in /etc (derivation
+  # cycle) or /nix/store (overlay GC rejects non-store-path entries).
+  expectedSnapshot = import ../modules/ab-image/slot-store-snapshot.nix {
     pkgs = hostFixed.pkgs;
     toplevel = hostFixed.config.system.build.toplevel;
-  };
-  expectedTree = import ../modules/ab-image/store-tree.nix {
-    pkgs = hostFixed.pkgs;
-    toplevel = hostFixed.config.system.build.toplevel;
-  };
-  # Negative leg: a non-CA evaluation must fail the module's assertion
-  # (built without caModule — see the first-definition-wins note there).
-  hostNonCa = nixpkgs.lib.nixosSystem {
-    inherit system;
-    modules = [
-      self.nixosModules.ab-image
-      baseModule
-      {
-        services.nixtache.ab-image = {
-          enable = true;
-          imageId = "h";
-          imageVersion = "1";
-        };
-      }
-    ];
   };
   espContents = hostFixed.config.image.repart.partitions.esp.contents;
   dumpContent = espContents."/EFI/nixtache/h_1.lower-db" or null;
+  copySources = pf.nix-store.repartConfig.CopyFiles or [ ];
   lowerDbTransfer = (transfers hostFixed)."15-lower-db" or null;
   lowerDbSvc = hostFixed.config.systemd.services.nixtache-lower-store-db-load or null;
   versionedSvc = hostVersionFile.config.systemd.services.nixtache-lower-store-db-load or null;
   scenarioLowerStoreDb = {
-    name = "lower store DB: registered-record dump ships on the ESP + rides sysupdate; boot loader seeds a missing/stale DB; CA asserted";
+    name = "lower store DB: paired snapshot supplies store tree and ESP dump; boot loader seeds a missing/stale DB";
     checks = {
-      caFixture = hostFixed.pkgs.config.contentAddressedByDefault or false;
-      nonCaRejected = builtins.any
-        (a: !a.assertion && lib.hasInfix "content-addressed" a.message)
-        hostNonCa.config.assertions;
+      ordinaryIaFixture = !(hostFixed.pkgs.config.contentAddressedByDefault or false);
+      noCaRequirement = builtins.all
+        (a: a.assertion || !lib.hasInfix "content-addressed" a.message)
+        hostFixed.config.assertions;
       dumpShipped = dumpContent != null;
-      dumpIsToplevelClosure = dumpContent != null && toString dumpContent.source == toString expectedDump;
-      dumpIsRegistration = dumpContent != null && lib.hasInfix "registration" (expectedDump.passthru.checkScript or "");
-      storeTreeIsCopySource = dumpContent != null
-        && (pf.nix-store.repartConfig.CopyFiles or null) == [ "${toString expectedTree}:/" ];
+      dumpFromSnapshot = dumpContent != null
+        && toString dumpContent.source == "${expectedSnapshot}/lower-db";
+      storeTreeFromSnapshot = copySources == [ "${expectedSnapshot}/root/nix/store:/" ];
+      pairedSnapshotInputs = dumpContent != null
+        && copySources == [
+          "${lib.removeSuffix "/lower-db" (toString dumpContent.source)}/root/nix/store:/"
+        ];
       storePathsAbandoned = (pf.nix-store.storePaths or [ ]) == [ ];
       dumpTransferExists = lowerDbTransfer != null;
       dumpTransferPattern = lowerDbTransfer != null
@@ -238,6 +207,7 @@ let
       loaderReadsDump = lowerDbSvc != null && lib.hasInfix "/boot/EFI/nixtache/h_1.lower-db" lowerDbSvc.script;
       loaderTracksMarker = lowerDbSvc != null && lib.hasInfix "/var/lib/nixtache/lower-db-version" lowerDbSvc.script;
       loaderBakesVersion = versionedSvc != null && lib.hasInfix "/boot/EFI/nixtache/h_20260809120000.lower-db" versionedSvc.script;
+      loaderNeedsNoCa = lowerDbSvc != null && !lib.hasInfix "ca-derivations" lowerDbSvc.script;
     };
   };
 
@@ -251,41 +221,17 @@ let
     scenarioStoreTreeFaithful
   ];
 
-  # --- scenario 6: faithful store imaging (store tree) ----------------------
-  # The image builder (systemd-repart) dereferences each CopyFiles source it
-  # is handed, so the store partition must receive ONE source — the staging
-  # tree — whose per-path entries are materialised with top-level symlink
-  # paths recreated as symlinks. The build-level half below builds the tree
-  # for a tiny closure that CONTAINS a top-level symlink path and asserts
-  # the symlink and its target survive staging (a mangled tree would fail
-  # this derivation, failing the check); the boot-level half lives in the
-  # overlay-nix VM suites (symlink path ships, path-info resolves it).
-  symlinkFixturePath = pkgs.runCommand "symlink-fixture" { }
-    "ln -s ${pkgs.hello} $out";
-  storeTreeSymlinkCheck = pkgs.runCommand "store-tree-symlink-check"
-    { tree = import ../modules/ab-image/store-tree.nix {
-        inherit pkgs;
-        toplevel = symlinkFixturePath;
-      };
-    }
-    ''
-      set -euo pipefail
-      link=""
-      for p in "$tree"/*; do
-        case "$p" in *-symlink-fixture) link="$p";; esac
-      done
-      [ -n "$link" ] || { echo "symlink fixture path missing from the staged tree" >&2; exit 1; }
-      [ -L "$link" ] || { echo "staged entry is not a symlink: $link" >&2; exit 1; }
-      target=$(readlink "$link")
-      [ "$target" = "${pkgs.hello}" ] || { echo "symlink target mangled: $target" >&2; exit 1; }
-      [ -x "$tree/$(basename "${pkgs.hello}")/bin/hello" ] \
-        || { echo "closure content missing from the staged tree" >&2; exit 1; }
-      touch "$out"
-    '';
+  # --- scenario 6: faithful snapshot imaging and real stores ---------------
+  # The build-level fixture stages and registers an input-addressed closure,
+  # verifies a top-level symlink and complete closure copy, and proves that
+  # altered staged bytes produce altered NAR records. Fault-injection builds
+  # must reject a missing path, dangling reference and post-registration
+  # corruption. Boot-level imaging and runtime behavior remain covered by KVM.
+  snapshotChecks = import ./slot-store-snapshot.nix { inherit pkgs; };
   scenarioStoreTreeFaithful = {
-    name = "store imaging: store tree preserves top-level symlink closure paths";
+    name = "store imaging: paired snapshot preserves symlinks and exports coherent real-store records";
     checks = {
-      symlinkCheckIsBuild = lib.isDerivation storeTreeSymlinkCheck;
+      snapshotChecksAreBuild = lib.isDerivation snapshotChecks;
       espPinned = pf.esp.repartConfig.SizeMinBytes or null == "260M"
         && pf.esp.repartConfig.SizeMaxBytes or null == "260M";
       espPinnedMaxDisk = pm.esp.repartConfig.SizeMinBytes or null == "260M"
@@ -307,9 +253,8 @@ in
 pkgs.runCommand "ab-image-module-test"
   {
     inherit report failMsg;
-    # Builds the store-tree symlink check as part of this check output —
-    # a tree that mangles top-level symlink paths fails the whole suite.
-    inherit storeTreeSymlinkCheck;
+    # Builds real scratch-store snapshot checks as part of this suite.
+    inherit snapshotChecks;
     passAsFile = [ "report" "failMsg" ];
   }
   ''

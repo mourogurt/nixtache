@@ -39,9 +39,6 @@ in
 
       package = mkOption {
         type = types.package;
-        # nix-serve (Perl, tracks CppNix) serves content-addressed
-        # realisations; nix-serve-ng (the Lix rewrite) does not know CA
-        # derivations, which the relocated-store modes rely on.
         default = pkgs.nix-serve;
         defaultText = lib.literalExpression "pkgs.nix-serve";
         description = "nix-serve package to use.";
