@@ -646,8 +646,12 @@ pkgs.testers.runNixOSTest {
         ).strip()
         assert second_entered_staging == "no", "the second preparation entered staging before the first released the slot lock"
         appliance.succeed("touch /run/nixtache-overlay-test-barrier/release")
-        appliance.wait_until_succeeds("! systemctl is-active --quiet overlay-nix-prepare-first.service", timeout=900)
-        appliance.wait_until_succeeds("! systemctl is-active --quiet overlay-nix-prepare-second.service", timeout=900)
+        for unit in ("overlay-nix-prepare-first.service", "overlay-nix-prepare-second.service"):
+            appliance.wait_until_succeeds(
+              "systemctl show -p ActiveState --value " + unit + " | grep -qxE 'inactive|failed'",
+              timeout=900,
+            )
+            assert appliance.succeed("systemctl show -p ActiveState --value " + unit).strip() == "inactive"
         first_result = appliance.succeed("systemctl show -p Result --value overlay-nix-prepare-first.service").strip()
         second_result = appliance.succeed("systemctl show -p Result --value overlay-nix-prepare-second.service").strip()
         assert first_stage_state == "survived", "the second preparation deleted the first process's staging directory before its barrier was released"
