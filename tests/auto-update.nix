@@ -7,7 +7,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
-  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
+  appliancePkgs ? import nixpkgs { inherit system; },
 }:
 
 let
@@ -22,7 +22,7 @@ let
 
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
-    # The appliance world evaluates content-addressed (ab-image asserts it).
+    # Use the caller's ordinary input-addressed appliance package set.
     nixpkgs.pkgs = appliancePkgs;
     # Dummy root FS + grub off: lets probeOK force toplevel.outPath without
     # firing base NixOS bootability assertions (same pattern as ab-contract.nix).

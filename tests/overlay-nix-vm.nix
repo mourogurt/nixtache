@@ -13,7 +13,7 @@
 # overlay-nix-install-vm.nix covers full Nix operations hermetically with a
 # local cache and registry. Needs KVM (requiredSystemFeatures).
 { nixpkgs, self, system ? "x86_64-linux"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -43,8 +43,8 @@ let
           {
             system.stateVersion = config.system.nixos.release;
             networking.hostName = "abtest-overlay";
-            # Same contract as ab-fixture: the appliance world must evaluate
-            # content-addressed (the ab-image module asserts it).
+            # Same contract as ab-fixture: use the caller's ordinary
+            # input-addressed appliance package set.
             nixpkgs.pkgs = appliancePkgs;
 
             services.nixtache.ab-image = {
@@ -73,7 +73,7 @@ let
             # Faithful-imaging coverage: a closure path that is itself a
             # top-level symlink. The image must ship it AS a symlink (not its
             # target's content) with a DB record that resolves — see
-            # modules/ab-image/store-tree.nix and the assertions below.
+            # modules/ab-image/slot-store-snapshot.nix and the assertions below.
             system.extraDependencies = [
               (pkgs.runCommand "symlink-fixture" { } "ln -s ${pkgs.hello} $out")
             ];
@@ -140,10 +140,8 @@ let
     print("RESULT_LOWER_DB_LOADER=" + run("systemctl is-active nixtache-lower-store-db-load.service 2>/dev/null || echo inactive"))
     print("RESULT_LOWER_DB_VERSION=" + run("cat /var/lib/nixtache/lower-db-version 2>/dev/null || echo missing"))
     # A lower path must resolve through standard nix tooling with no manual
-    # seed. /run/current-system, not a host-side store path: the appliance
-    # evaluates content-addressed, so its shipped paths hash differently
-    # than the IA paths of the flake-level pkgs this test file evaluates
-    # with — but the toplevel (and its closure) is covered by the dump.
+    # seed. Query the running toplevel so the assertion covers the exact
+    # input-addressed closure whose records shipped in the dump.
     print("RESULT_LOWER_PATH_VALID=" + run("nix path-info /run/current-system >/dev/null 2>&1 && echo valid || echo missing"))
 
     # --- Faithful imaging: a top-level symlink closure path ships as a symlink -

@@ -40,7 +40,7 @@
 #
 # Needs KVM. Hermetic: everything comes from the deployer node on the test
 # LAN; no internet.
-{ nixpkgs, self, system ? "x86_64-linux", overlayOptions ? { }, upperTmpfs ? false, reconcileDegraded ? false, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; } }:
+{ nixpkgs, self, system ? "x86_64-linux", overlayOptions ? { }, upperTmpfs ? false, reconcileDegraded ? false, appliancePkgs ? import nixpkgs { inherit system; } }:
 
 let
   lib = nixpkgs.lib;

@@ -32,8 +32,8 @@
 #
 # Hermeticity: the VMs have no internet. No real `nix` command inside a VM
 # evaluates or builds. The pinned nixos-anywhere 1.13.0 accepts pre-built
-# closure roots, so the test evaluates once in the host's CA context and
-# interpolates both paths into this invocation:
+# closure roots, so the test evaluates once in the host's input-addressed
+# context and interpolates both paths into this invocation:
 #
 #   nixos-anywhere -i /root/.ssh/install_key --debug --build-on local
 #     --kexec /etc/nixos-anywhere/kexec-installer.tar.gz
@@ -44,8 +44,7 @@
 # nixos-anywhere drives kexec → disko → closure transfer → nixos-install →
 # reboot over those paths; only the --flake CLI entrypoint is not covered.
 # system.extraDependencies and the registration reload make the paths valid
-# in the deployer's store, and ca-derivations remains enabled on both copy
-# endpoints.
+# in the deployer's store for both copy endpoints.
 #
 # Known simplifications vs. a bare-metal runbook:
 #   - The running v1 system keeps /nix/store on the ext4 root; the A/B slots
@@ -58,7 +57,7 @@
 { nixpkgs
 , self
 , system ? "x86_64-linux"
-, appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; }
+, appliancePkgs ? import nixpkgs { inherit system; }
 }:
 
 let
@@ -83,7 +82,7 @@ let
   };
 
   # The system nixos-anywhere installs (v1), evaluated and built only in this
-  # host-side CA context.
+  # host-side input-addressed context.
   installConfig = import ./ab-anywhere-install.nix {
     inherit nixpkgs system appliancePkgs;
     nixtachePath = self;
@@ -117,13 +116,8 @@ let
     (nixpkgs.lib.nixosSystem {
       inherit system;
       modules = [
-        # The installer's serving nix must accept the appliance's
-        # content-addressed closure: `nix copy --to ssh://target` runs
-        # `nix-store --serve` on the installer, whose daemon rejects CA
-        # paths unless ca-derivations is on in ITS nix.conf (the copy
-        # fails with "experimental Nix feature 'ca-derivations' is
-        # disabled"). The feature set is the shared nixtache definition
-        # the runner container also forces.
+        # Share the runner's standard nix-command/flakes feature set with the
+        # installer's store server.
         self.nixosModules.nix-features
         (nixosImages + "/nix/kexec-installer/module.nix")
         (nixosImages + "/nix/noninteractive.nix")
@@ -311,10 +305,7 @@ pkgs.testers.runNixOSTest {
     virtualisation.cores = 4;
     environment.systemPackages = with pkgs; [ nixos-anywhere curl gnupg openssh jq ];
     # The deployer stands in for a nixtache runner host (it runs the deploy
-    # action), so its nix feature set comes from the runner module's shared
-    # definition — ca-derivations is load-bearing: the appliance closure is
-    # content-addressed and `nix copy --to ssh://target` rejects CA paths
-    # without it.
+    # action), so its nix feature set comes from the shared runner definition.
     imports = [ self.nixosModules.nix-features ];
     environment.etc."deploy-action.sh".source = "${actionRunScript}";
     environment.etc."deploy-env.sh".source = "${deployEnvFile}";
@@ -325,7 +316,7 @@ pkgs.testers.runNixOSTest {
     environment.etc."ab-esp-files".source = "${espFiles}";
     environment.etc."nixos-anywhere/kexec-installer.tar.gz".source = "${kexecTarballFile}";
     # Pre-built closure roots and install/update assets, registered in the
-    # guest nix DB so nixos-anywhere can copy valid CA paths to the target.
+    # guest nix DB so nixos-anywhere can copy valid paths to the target.
     system.extraDependencies = [
       installToplevel
       installDiskoScript

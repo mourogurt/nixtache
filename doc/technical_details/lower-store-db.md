@@ -35,9 +35,9 @@ The image therefore ships the closure's validity records (path, narHash,
 narSize, deriver, references per store path) as a dump on the ESP, and a
 boot-time loader seeds `/nix/var/nix/db` from it. On a nix-less appliance
 host the runner container also disables its internal nix module, renders
-`nix.conf` with the preserved settings plus `ca-derivations`, and ships the
-CLI explicitly. Clone mode then enumerates a scratch copy of the real host
-DB. Overlay mode binds the host store and DB read-only under
+`nix.conf` with the preserved settings, and ships the CLI explicitly. Clone
+mode then enumerates a scratch copy of the real host DB. Overlay mode binds
+the host store and DB read-only under
 `/run/nixtache-runner-lower` and uses that root as `lower-store` with the local
 store's `read-only=true` setting, so Nix does not try to change ownership or
 open the DB for writing. The separate path is required because the custom
@@ -48,80 +48,69 @@ alternative on appliances because no host daemon exists.
 The rest of this document covers the internals: how the dump is generated,
 how the store is imaged, and why the runtime workarounds exist.
 
-## Dump generation: registered records, content-true via content-addressing
+## Paired snapshot generation
 
-The dump (`modules/ab-image/lower-store-db.nix`) is the toplevel closure's
-REGISTERED validity records: `pkgs.closureInfo`'s `registration` output
-(path, base16 narHash, narSize, deriver, references per path), one
-derivation per toplevel. Trusting the daemon's DB records requires a
-content-addressed evaluation, which the module asserts
-(`nixpkgs.config.contentAddressedByDefault`; see below). Content addressing
-resolves the record/content divergence below, while faithful imaging handles
-the independent symlink constraint:
+`modules/ab-image/slot-store-snapshot.nix` builds one derivation with two
+subpaths in its result:
 
-1. **Per-host realisations (why CA is required).** An input-addressed store path
-   legitimately has *different realisations* on different hosts
-   (substitution churn, older realisations accumulated in a long-lived CI
-   store). The daemon's DB records what *that* host believes; `repart
-   CopyFiles` ships what is in the store — and the two diverge silently.
-   The divergence detonates in the production path: the runner's clone seed
-   runs `nix copy --all`, which re-serializes every path and verifies it
-   against the source DB's recorded narHash — a mismatch aborts the copy
-   and the retry loop never converges. Under `ca:fixed:r:` the path hash IS
-   the content hash — a build computes content→path, substitution verifies
-   content against the narinfo — so the DB cannot lie about content.
+- `root/nix/store/` contains every toplevel-closure path under its original
+  store basename;
+- `lower-db` contains the standard `nix-store --load-db` validity-record dump.
 
-2. **repart resolves top-level symlink copy sources (why faithful imaging is
-   required for any store).** The image builder
-   (systemd-repart, pinned 261.x) populates a partition from `CopyFiles=`
-   lines, and it opens every copy source through path resolution that
-   follows symlinks: a source that IS a symlink to a directory ships as
-   that directory's content. nixpkgs' `image.repart` `storePaths` option
-   emits one `CopyFiles=` line per closure path — so a closure path that is
-   itself a symlink shipped as its target's content, contradicting its
-   database record. The resulting clone-seed failure has this form:
+The repart store partition and the ESP dump both consume subpaths of this one
+result. They therefore cannot be substituted or selected from different
+build histories: even when an input-addressed source path has multiple
+realisations, the image's bytes and records always come from the same
+immutable snapshot. The dump has no independent `closureInfo`-backed build.
 
-   ```
-   error: hash mismatch importing path '/nix/store/…-nix-2.34.8-man';
-          specified: sha256:14rh8r1k…   (the DB record: a 184-byte symlink)
-          got:       sha256:0c6z1cjk…   (the shipped content: 476 KB of files)
-   ```
+The derivation uses `__structuredAttrs` and `exportReferencesGraph` to obtain
+the source closure's path identities and direct references. It stages regular
+paths with reflink-capable copying and recreates a top-level symlink with its
+original target text. Ownership remains the image builder's responsibility;
+the source store's modes and timestamps are otherwise preserved during
+staging.
 
-   Such paths are standard (nixpkgs' `nix.man`/`nix.doc` outputs are
-   symlinks into `nix-manual`, and the appliance ships `pkgs.nix`), and
-   rewriting the record instead would be invalid under CA. The module
-   therefore does not use `storePaths`: a store-tree derivation
-   (`modules/ab-image/store-tree.nix`) materialises the closure at build
-   time — regular paths are copied, symlink paths are recreated as
-   symlinks — and the partition receives ONE `CopyFiles` line pointing at
-   the tree. Only the tree itself is resolved; every entry inside is
-   copied type-faithfully (systemd `copy.c` recreates symlinks), so the
-   image matches the records for input-addressed and content-addressed
-   closures alike. Covered by `tests/ab-image.nix` (the store tree
-   preserves a symlink path in a real build) and the `overlay-nix-vm`
-   suite (a symlink path ships, `nix path-info` resolves it).
+### Registration and validation
 
-### Enabling CA (the two knobs, and a daemon quirk)
+The builder opens the staged tree as
+`local?root=$out/root&state=<temporary-state>`, with writable scratch state
+outside the output. It feeds each exported path, an empty deriver and its
+direct references to `nix-store --register-validity` **without**
+`--hash-given`. Nix consequently computes each NAR hash and size from the
+staged filesystem object, including the symlink object itself. It does not
+copy the source store's NAR metadata. `nix-store --dump-db` then exports the
+new records to `lower-db`; the temporary SQLite database, locks, profiles and
+roots never enter the artifact. These legacy local-store operations need no
+daemon, network, host database writes or `ca-derivations` support.
 
-- The evaluation-side knob is the nixpkgs config:
-  `config.contentAddressedByDefault = true` on the import (the
-  [wiki](https://nixos.wiki/wiki/Ca-derivations) route). There is NO
-  `content-addressed-by-default` nix.conf setting (checked on nix 2.34.8).
-- The `ca-derivations` experimental feature must ALSO be enabled — and,
-  counterintuitively, in the **system** nix.conf of every machine that
-  evaluates CA: the nix daemon ignores client-side feature overrides when
-  the new CLI connects to it (NixOS/nix#9090), so `--extra-experimental-features`,
-  `NIX_CONFIG` and user-level nix.conf are all ineffective for the
-  evaluator's gate. The modules ship the feature where they render confs:
-  the runner container's `/etc/nix/nix.conf` and the overlay appliance's
-  `nix.settings` (both pinned by tests); dev machines and bare CI runners
-  need it in their system configuration. Legacy `nix-instantiate` never
-  opens a store connection and is unaffected.
+Registration computes content metadata but does not rediscover references.
+The reference graph therefore crosses a trust boundary from the source Nix
+store: ordinary Nix build and substitution machinery must have supplied
+coherent source metadata. Before the snapshot succeeds, the builder verifies
+that the staged, dumped and queried-reference-closure path sets all equal the
+exported closure, and runs `nix-store --verify-path` for every path. This
+catches missing or overwritten staging entries and incomplete reference
+closures; it is not a NAR reference scanner or a defence against a corrupt
+source database. Artifact signing authenticates the graph and bytes together,
+and hashing does not establish provenance.
 
-One `nix-serve` cache can serve input-addressed and content-addressed paths
-side by side: their store paths differ, so no conversion is needed. CA paths
-enter the cache from CA-enabled builds; old input-addressed paths disappear
-through ordinary retention as their references age out.
+Unchanged toplevels and snapshot recipes reuse the complete cached snapshot.
+A changed input stages and NAR-hashes the closure once; repart, ESP assembly
+and downstream consumers do not repeat that work. An uncached build pays a
+full closure read/hash, trading that I/O for an ordinary input-addressed build
+without a CA world rebuild. Later squashFS/erofs compression does not affect
+NAR identity.
+
+### Symlink-faithful imaging
+
+systemd-repart resolves every top-level `CopyFiles=` source. A store path that
+is itself a symlink would therefore ship as its target's contents if passed
+as an individual source, contradicting its record. The partition instead
+receives the snapshot's `root/nix/store` as one source. Repart resolves that
+tree once and preserves the types of entries inside it, including absolute or
+relative symlink targets. The snapshot's staged-byte registration makes the
+record describe that same symlink object, so standard Nix path queries and
+closure copies verify without content-addressed realisations.
 
 ## Carrier constraints (why the dump lives on the ESP)
 
@@ -184,11 +173,10 @@ re-check these constraints when changing Nix versions.
 
 ## Alternatives considered
 
-- **Fixed CA (`ca = "fixed:r:sha256"` on the raw derivation)**: evaluates
-  without any experimental feature, but nixpkgs exposes no switch producing
-  it for regular packages — only the floating `__contentAddressed` spell
-  (what `contentAddressedByDefault` sets) exists, so it is not a fleet-wide
-  route.
+- **Custom NAR serializer or content-derived path renaming**: Nix's scratch
+  registration already computes the required metadata from the staged bytes;
+  duplicating its serialization or changing store identities would add a
+  fragile compatibility surface without improving snapshot coherence.
 - **Prebuilt `db.sqlite`**: merging a binary DB at runtime needs
   schema-aware tooling on the appliance; the records format is nix's own
   stable import format and merges additively by construction.
@@ -196,10 +184,12 @@ re-check these constraints when changing Nix versions.
 Historical design record:
 [`lower-store-db`](../../openspec/changes/archive/2026-10-30-lower-store-db/design.md).
 
-Test coverage: the dump, loader and store-tree wiring are pinned by
-`checks.<system>.ab-image` (pure-eval; the store tree is also BUILT for
-a tiny closure containing a symlink path), boot-time seeding and
-symlink-faithful imaging by `vmTests.overlay-nix-vm`, the clone/overlay
-consumption across a real swap by
-`vmTests.runner-store-swap-{clone,overlay}-vm` — see
-[`testing.md`](testing.md).
+Test coverage: the dump, loader and paired-snapshot wiring are pinned by
+`checks.<system>.ab-image`. Its real-store fixture registers and verifies an
+input-addressed closure, proves staged-byte hashing with a deliberate content
+change, preserves a top-level symlink and copies the complete closure into a
+second scratch store with NAR verification. Boot-time seeding and
+symlink-faithful imaging are covered by `vmTests.overlay-nix-vm`; clone and
+overlay consumption across a real swap by
+`vmTests.runner-store-swap-{clone,overlay}-vm`. Focused fixture success is not
+a substitute for those KVM suites — see [`testing.md`](testing.md).

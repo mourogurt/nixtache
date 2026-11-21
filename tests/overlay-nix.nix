@@ -96,16 +96,15 @@ let
     };
   };
 
-  # --- scenario 5: runtime daemon config carries the CA feature ---------------
-  # The fleet's closure is content-addressed — runtime evaluation (e.g.
-  # profile installs) must be able to evaluate CA derivations, and the daemon
-  # ignores client-side feature overrides, so the feature lives in the
-  # appliance's system nix.conf (nix.settings).
-  scenarioCaFeature = {
-    name = "daemon config: ca-derivations enabled for the content-addressed fleet closure";
+  # --- scenario 5: runtime daemon features for IA operation ------------------
+  scenarioRuntimeFeatures = {
+    name = "daemon config: CLI, flakes and local-overlay enabled without ca-derivations";
     checks = {
-      caFeatureOn = builtins.elem "ca-derivations"
-        hostDefault.config.nix.settings.extra-experimental-features;
+      cliFeaturesOn = builtins.all
+        (feature: builtins.elem feature hostDefault.config.nix.settings.extra-experimental-features)
+        [ "nix-command" "flakes" "local-overlay-store" ];
+      caFeatureOff = !(builtins.elem "ca-derivations"
+        hostDefault.config.nix.settings.extra-experimental-features);
     };
   };
 
@@ -114,7 +113,7 @@ let
     scenarioReconcile
     scenarioWipe
     scenarioNoneRejected
-    scenarioCaFeature
+    scenarioRuntimeFeatures
   ];
 
   failed = builtins.concatMap

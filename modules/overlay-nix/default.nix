@@ -268,7 +268,7 @@ in
     # (run/shell/build/realise/GC) talks to the system daemon via the standard
     # socket and gets the layered view.
     nix.settings.store = overlayStoreUrl;
-    nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" "ca-derivations" ];
+    nix.settings.extra-experimental-features = [ "nix-command" "flakes" "local-overlay-store" ];
     # Avoid downloading the global flake registry on typically offline
     # appliances; local nix.registry entries remain available.
     nix.settings.flake-registry = "";

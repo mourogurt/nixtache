@@ -11,7 +11,7 @@
   nixpkgs,
   self,
   system ? "x86_64-linux",
-  appliancePkgs ? import nixpkgs { inherit system; config.contentAddressedByDefault = true; },
+  appliancePkgs ? import nixpkgs { inherit system; },
 }:
 
 let
@@ -29,7 +29,7 @@ let
 
   baseModule = { lib, ... }: {
     system.stateVersion = lib.trivial.release;
-    # The appliance world evaluates content-addressed (ab-image asserts it).
+    # Use the caller's ordinary input-addressed appliance package set.
     nixpkgs.pkgs = appliancePkgs;
   };
 
@@ -78,7 +78,7 @@ let
   # ========================================================================
   abPartCfg = ab-extra: {
     system.stateVersion = lib.trivial.release;
-    # The appliance world evaluates content-addressed (ab-image asserts it).
+    # Use the caller's ordinary input-addressed appliance package set.
     nixpkgs.pkgs = appliancePkgs;
     # Dummy root FS so the base NixOS root-filesystem assertion does not fire
     # during `probeOK` (which forces `toplevel.outPath`). The module under test
@@ -314,7 +314,7 @@ let
   # ========================================================================
   overlayCfg = {
     system.stateVersion = lib.trivial.release;
-    # The appliance world evaluates content-addressed (ab-image asserts it).
+    # Use the caller's ordinary input-addressed appliance package set.
     nixpkgs.pkgs = appliancePkgs;
     # Dummy root FS + grub off — same test-only rationale as abPartCfg / runnerBase.
     fileSystems."/".fsType = lib.mkDefault "tmpfs";
