@@ -42,6 +42,89 @@ let
     toplevel = symlinkFixture;
   };
 
+  missingPathFindutils = pkgs.runCommand "snapshot-missing-path-findutils" { } ''
+    mkdir -p "$out/bin"
+    cat > "$out/bin/find" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    staged="$out/root/nix/store/$(basename ${regularFixture})"
+    chmod -R u+w "$staged"
+    rm -rf "$staged"
+    exec ${pkgs.findutils}/bin/find "$@"
+    EOF
+    chmod +x "$out/bin/find"
+  '';
+
+  danglingReferenceJq = pkgs.runCommand "snapshot-dangling-reference-jq" { } ''
+    mkdir -p "$out/bin"
+    cat > "$out/bin/jq" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    for filter in "$@"; do
+      case "$filter" in
+        *"map([.path"*)
+          input=$(mktemp)
+          trap 'rm -f "$input"' EXIT
+          cat > "$input"
+          ${pkgs.jq}/bin/jq \
+            --arg root ${symlinkFixture} \
+            --arg dangling /nix/store/00000000000000000000000000000000-dangling-reference \
+            '(.closure[] | select(.path == $root).references) += [$dangling]' \
+            "$input" | ${pkgs.jq}/bin/jq "$@"
+          exit 0
+          ;;
+      esac
+    done
+    exec ${pkgs.jq}/bin/jq "$@"
+    EOF
+    chmod +x "$out/bin/jq"
+  '';
+
+  corruptingNix = pkgs.runCommand "snapshot-corrupting-nix" { } ''
+    mkdir -p "$out/bin"
+    ln -s ${pkgs.nix}/bin/nix "$out/bin/nix"
+    cat > "$out/bin/nix-store" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    for arg in "$@"; do
+      if [ "$arg" = "--verify-path" ]; then
+        staged="$out/root/nix/store/$(basename ${regularFixture})"
+        chmod u+w "$staged" "$staged/data"
+        printf 'post-registration corruption\n' >> "$staged/data"
+      fi
+    done
+    exec ${pkgs.nix}/bin/nix-store "$@"
+    EOF
+    chmod +x "$out/bin/nix-store"
+  '';
+
+  missingPathCheck = pkgs.testers.testBuildFailure' {
+    name = "slot-store-snapshot-missing-path-test";
+    drv = mkSnapshot {
+      pkgs = pkgs // { findutils = missingPathFindutils; };
+      toplevel = symlinkFixture;
+    };
+    expectedBuilderLogEntries = [ "snapshot-regular-fixture" ];
+  };
+
+  danglingReferenceCheck = pkgs.testers.testBuildFailure' {
+    name = "slot-store-snapshot-dangling-reference-test";
+    drv = mkSnapshot {
+      pkgs = pkgs // { jq = danglingReferenceJq; };
+      toplevel = symlinkFixture;
+    };
+    expectedBuilderLogEntries = [ "dangling-reference" ];
+  };
+
+  postRegistrationCorruptionCheck = pkgs.testers.testBuildFailure' {
+    name = "slot-store-snapshot-post-registration-corruption-test";
+    drv = mkSnapshot {
+      pkgs = pkgs // { nix = corruptingNix; };
+      toplevel = symlinkFixture;
+    };
+    expectedBuilderLogEntries = [ "was modified" ];
+  };
+
   verifySnapshot = name: snapshot: altered: pkgs.runCommand name
     {
       inherit snapshot;
@@ -107,8 +190,21 @@ let
   alteredCheck = verifySnapshot "slot-store-snapshot-altered-test" alteredSnapshot true;
 in
 pkgs.runCommand "slot-store-snapshot-tests"
-  { deps = [ normalCheck alteredCheck ]; }
+  {
+    deps = [
+      normalCheck
+      alteredCheck
+      missingPathCheck
+      danglingReferenceCheck
+      postRegistrationCorruptionCheck
+    ];
+  }
   ''
     mkdir "$out"
     cat ${normalCheck}/report ${alteredCheck}/report > "$out/report"
+    cat >> "$out/report" <<'EOF'
+    missing staged path rejected
+    dangling reference rejected
+    post-registration corruption rejected
+    EOF
   ''

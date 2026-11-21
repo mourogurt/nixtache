@@ -143,15 +143,20 @@ Overlay tests distinguish their lower-DB worlds (see
 [`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md)): appliance
 suites use the DB shipped in the image, while `overlay-nix-install-vm` uses a
 host-store lower with its own database. Results do not transfer between those
-worlds. `checks.ab-image` builds a real input-addressed scratch-store fixture
-that verifies snapshot registration, staged-byte NAR hashes, a top-level
-symlink and complete closure copying into a second store. This focused fixture
-does not replace KVM acceptance: `overlay-nix-vm` verifies the shipped symlink
-and delta runtime behavior, the OTA overlay matrix exercises swaps and upper
-lifecycle policies, and `runner-store-swap-{clone,overlay}-vm` verifies complete
-closure copies, persistence and rebuilds across real appliance swaps. Canonical
-requirements: [`overlay-nix`](../../openspec/specs/overlay-nix/spec.md) and
-[`runner`](../../openspec/specs/runner/spec.md).
+worlds. `checks.ab-image` builds real input-addressed scratch-store fixtures
+that verify snapshot registration, staged-byte NAR hashes, a top-level
+symlink and complete closure copying into a second store. Fault-injection
+fixtures require missing staged paths, dangling references and
+post-registration corruption to fail their corresponding build-time guards.
+These focused fixtures do not replace KVM acceptance: `overlay-nix-vm`
+verifies the shipped symlink and delta runtime behavior;
+`overlay-nix-ota-invalid-vm` additionally evaluates nixpkgs and performs
+`nix profile install nixpkgs#hello` on the real snapshot-derived IA image
+with CA derivation support disabled, then exercises OTA swaps and upper
+lifecycle policies. `runner-store-swap-{clone,overlay}-vm` verifies complete
+closure copies, persistence and rebuilds across real appliance swaps.
+Canonical requirements: [`overlay-nix`](../../openspec/specs/overlay-nix/spec.md)
+and [`runner`](../../openspec/specs/runner/spec.md).
 
 The `overlay-nix-ota-invalid` matrix covers empty and tampered update attempts,
 same-version persistent-upper reboots, live-root reconcile, degraded reconcile

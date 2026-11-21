@@ -155,8 +155,12 @@ makes the read-only lower layer a first-class readable nix store.
 _Avoid_: store dump (that is the carrier file on the ESP), nix db (any
 db.sqlite qualifies)
 
+**Slot-store snapshot**:
+The immutable unit pairing a slot's Store tree and Lower store database, so
+the shipped content and its validity records come from one source.
+_Avoid_: content-addressed snapshot
+
 **Store tree**:
-The build-time directory that materialises the slot closure (top-level
-symlink paths recreated as symlinks) and feeds the image builder as its
-single copy source — the unit of faithful store imaging.
+The slot closure materialised as a directory for faithful imaging, including
+top-level symlink paths; a constituent of the Slot-store snapshot.
 _Avoid_: staging tree (collides with Staging above)

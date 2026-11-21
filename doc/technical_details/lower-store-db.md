@@ -63,6 +63,16 @@ build histories: even when an input-addressed source path has multiple
 realisations, the image's bytes and records always come from the same
 immutable snapshot. The dump has no independent `closureInfo`-backed build.
 
+Without that pairing, an input-addressed store path can be copied from one
+realisation while its independently generated dump carries another
+realisation's NAR hash. On the runner clone surface, the storage seeder opens
+the appliance's lower store and runs `nix copy --all`; Nix serializes the
+shipped path, finds that its bytes do not match the recorded hash and aborts
+with `hash mismatch importing path`. Seeding then fails and the runner's
+custom store cannot start. Taking both image inputs from one snapshot
+prevents cross-artifact realisation mixing, and staged-byte registration
+makes each shipped record match the content inside that snapshot.
+
 The derivation uses `__structuredAttrs` and `exportReferencesGraph` to obtain
 the source closure's path identities and direct references. It stages regular
 paths with reflink-capable copying and recreates a top-level symlink with its
@@ -184,12 +194,5 @@ re-check these constraints when changing Nix versions.
 Historical design record:
 [`lower-store-db`](../../openspec/changes/archive/2026-10-30-lower-store-db/design.md).
 
-Test coverage: the dump, loader and paired-snapshot wiring are pinned by
-`checks.<system>.ab-image`. Its real-store fixture registers and verifies an
-input-addressed closure, proves staged-byte hashing with a deliberate content
-change, preserves a top-level symlink and copies the complete closure into a
-second scratch store with NAR verification. Boot-time seeding and
-symlink-faithful imaging are covered by `vmTests.overlay-nix-vm`; clone and
-overlay consumption across a real swap by
-`vmTests.runner-store-swap-{clone,overlay}-vm`. Focused fixture success is not
-a substitute for those KVM suites — see [`testing.md`](testing.md).
+Test coverage: [`testing.md`](testing.md) owns the real-store fixture and KVM
+acceptance inventory for the snapshot, loader and runner store consumers.

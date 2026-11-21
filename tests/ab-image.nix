@@ -224,8 +224,9 @@ let
   # --- scenario 6: faithful snapshot imaging and real stores ---------------
   # The build-level fixture stages and registers an input-addressed closure,
   # verifies a top-level symlink and complete closure copy, and proves that
-  # altered staged bytes produce altered NAR records. Boot-level imaging and
-  # runtime behavior remain covered by the KVM suites.
+  # altered staged bytes produce altered NAR records. Fault-injection builds
+  # must reject a missing path, dangling reference and post-registration
+  # corruption. Boot-level imaging and runtime behavior remain covered by KVM.
   snapshotChecks = import ./slot-store-snapshot.nix { inherit pkgs; };
   scenarioStoreTreeFaithful = {
     name = "store imaging: paired snapshot preserves symlinks and exports coherent real-store records";
