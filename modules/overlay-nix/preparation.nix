@@ -462,7 +462,7 @@ let
 
     prepare_chain() {
       local target_slot=$1 target_version=$2 target_device=$3 source_slot=$4 source_generation=$5 initial=$6
-      local target_dump target_descriptor lower_sha descriptor_sha scratch lower_root lower_store source_dir current_before source_ephemeral
+      local target_dump target_descriptor lower_sha descriptor_sha scratch lower_root lower_store source_dir current_before selected_before source_ephemeral
       slot_dir="${slotsDir}/$target_slot"
       generation="$(date +%Y%m%d%H%M%S)-$$"
       stage="$slot_dir/.staging-$generation"
@@ -502,6 +502,7 @@ let
       exec {prepare_lock_fd}> "$slot_dir/.prepare.lock"
       flock -x "$prepare_lock_fd"
       current_before=$(readlink -f "$slot_dir/current" 2>/dev/null || true)
+      selected_before=$(cat "${runtimeState}/selected-generation" 2>/dev/null || true)
       if [ "$source_ephemeral" = 0 ] && [ -n "$current_before" ] && [ -f "$current_before/plan.json" ] \
         && [ -f "$current_before/lower-db" ] && [ -f "$current_before/overlay-topology.json" ] \
         && [ "$(metadata_value "$current_before/metadata" state)" = ready ] \
@@ -524,7 +525,10 @@ let
       rm -rf "$slot_dir"/.staging-*
       while read -r old; do
         [ -n "$old" ] || continue
-        if [ "$old" = "$current_before" ]; then continue; fi
+        # Boot recovery can publish current more than once before runtime
+        # selection advances; the selected generation still backs active
+        # symlinks and bind mounts and must survive target cleanup too.
+        if [ "$old" = "$current_before" ] || [ "$old" = "$selected_before" ]; then continue; fi
         rm -rf "$old"
       done < <(find "$slot_dir/generations" -mindepth 1 -maxdepth 1 -type d)
       mkdir -p "$slot_dir/generations/$generation" "$stage"

@@ -209,9 +209,11 @@ systemctl restart nixtache-overlay-prepare.service
 The retry adopts a fully published ready current generation matching the
 requested target, or removes incomplete and superseded non-current attempts
 and constructs a fresh one. Reconcile clones the latest active state again;
-wipe constructs another clean target. Staging directories do not accumulate,
-and repeated successful preparation retains at most the current and previous
-ready generations in that target slot.
+wipe constructs another clean target. Staging directories do not accumulate.
+Repeated successful preparation retains only the current and previous ready
+generations plus, when different, the generation still selected by the running
+system. Once selection advances, a later preparation can discard that older
+generation.
 
 Preparation remains rerunnable after success. Consecutive installations without
 an intermediate reboot therefore publish readiness for the latest installed

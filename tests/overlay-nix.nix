@@ -1139,6 +1139,12 @@ let
         && lib.hasInfix
           ''[ "$descriptor_sha" = "$(sha256sum "$current_before/overlay-topology.json" | awk '{print $1}')" ]''
           prepareScript;
+      selectedActiveGenerationRetained = lib.hasInfix
+        ''selected_before=$(cat "/run/nixtache-overlay/selected-generation" 2>/dev/null || true)''
+        prepareScript
+        && lib.hasInfix
+          ''if [ "$old" = "$current_before" ] || [ "$old" = "$selected_before" ]; then continue; fi''
+          prepareScript;
       staleRecordedSourceIgnored = lib.hasInfix
         ''[ "$(metadata_value "$source_dir/metadata" state)" = ready ]''
         prepareScript
