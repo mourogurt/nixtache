@@ -10,19 +10,19 @@ updates (wipe or reconcile).
 
 ## Requirements
 
-### Requirement: Full nix surface over a read-only store
+### Requirement: Full Nix surface over an input-addressed read-only store
 
-With the overlay enabled on an A/B appliance, nix MUST be re-enabled and usable through the standard system daemon: ad-hoc realize, run, shell, build, profile install and garbage collection all operate on the merged view. Writes for paths not already valid in the lower store MUST land in the configured upper layer without mutating the lower image, and the daemon MUST enable `ca-derivations` for runtime evaluation over content-addressed closures.
+With the overlay enabled on an A/B appliance, Nix MUST be usable through the standard system daemon: ad-hoc realize, run, shell, build, profile install and garbage collection all operate on the merged view. Writes for paths not already valid in the lower store MUST land in the configured upper layer without mutating the lower image, and runtime evaluation MUST work over input-addressed lower closures without requiring `ca-derivations`.
 
 #### Scenario: Install a package at runtime on an appliance
 
 - **WHEN** a package is realized (or profile-installed) from a configured substituter on an appliance whose `/nix/store` is a read-only image
 - **THEN** the package's store paths not already valid in the lower store land under the configured upper layer, the binary runs through the merged `/nix/store`, and the lower layer's content is byte-identical to the image
 
-#### Scenario: Runtime evaluation works over the content-addressed closure
+#### Scenario: Runtime evaluation works over the input-addressed closure
 
-- **WHEN** a profile install evaluates nixpkgs on an appliance whose lower closure is content-addressed
-- **THEN** the daemon accepts the `ca:fixed:r:` derivations (the feature is enabled in its configuration) and the install completes against the merged view
+- **WHEN** a profile install evaluates nixpkgs on an appliance whose lower closure is input-addressed and CA derivation support is disabled
+- **THEN** the evaluation and install complete against the merged view, and paths already valid in the lower store retain their input-addressed identities
 
 #### Scenario: The overlay is mounted before the daemon serves requests
 
