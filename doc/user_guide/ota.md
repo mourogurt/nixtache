@@ -292,7 +292,7 @@ write; the runner host cutover is idle-gated.
 | upper preparation failed | installation stays on disk but the trigger does not reboot; the active upper remains usable, and a later retry prepares only the target |
 | unrelated reboot into an unprepared UKI | boot-time selection attempts target-only recovery before upper consumers start; failure leaves the boot unblessed so boot counting returns to the preserved slot |
 | new boot broken | tries exhaust (default 3) → previous blessed lower and its preserved upper chain boot without a reverse wipe/reconcile. Before another update, run the [post-rollback recovery](#post-rollback-recovery) so version-driven selection cannot target the running oldest slot |
-| same version staged | no lower write, upper preparation or reboot. The auto-update poll treats this as a successful no-op; `nixtache-ab-update` reports that nothing installed and exits nonzero |
+| same version staged | ordinarily no lower write, upper preparation or reboot; both trigger paths report a successful no-op. If an earlier installation's upper preparation failed, the pending requirement instead retries preparation without rewriting the lower before the normal reboot decision |
 | interrupted update | the active slot is never the write target; the half-written slot never boots; re-install is refused until `systemd-sysupdate vacuum` removes the partial instance, then the next update rewrites the slot |
 | unsigned/wrong-key manifest | rejected before any slot is touched (`Transfer.Verify`) |
 | tampered payload | checksum validated while streaming into the inactive slot: the unit FAILS mid-install, leaving a partial (never-booted) instance — same `vacuum` recovery as an interruption |

@@ -33,6 +33,7 @@ let
 
   stateDir = "/var/lib/nixtache";
   pendingFile = "${stateDir}/ab-pending";
+  upperPreparationPending = "${stateDir}/upper-preparation-pending";
 in
 {
   options.services.nixtache.deploy-target.ab = {
@@ -203,18 +204,31 @@ in
           update_journal >&2
           exit 1
         fi
+        installed=1
         if ! update_journal | grep -q "Successfully installed"; then
-          echo "nixtache-ab-update: systemd-sysupdate installed NOTHING — not rebooting, journal:" >&2
-          update_journal >&2
-          exit 0
+          installed=0
+        fi
+        if [ "$installed" = 0 ]; then
+          if [ ! -f "${upperPreparationPending}" ] \
+            || ! systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1 \
+            || ! ${config.systemd.package}/lib/systemd/systemd-sysupdate pending > /dev/null 2>&1; then
+            echo "nixtache-ab-update: systemd-sysupdate installed NOTHING — not rebooting, journal:" >&2
+            update_journal >&2
+            exit 0
+          fi
+          echo "nixtache-ab-update: installed image still needs upper preparation"
         fi
         if systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
+          if [ "$installed" = 1 ]; then
+            touch "${upperPreparationPending}" || exit 1
+          fi
           if ! systemctl start nixtache-overlay-prepare.service; then
             echo "nixtache-ab-update: upper preparation failed — not rebooting" >&2
             exit 1
           fi
+          rm -f "${upperPreparationPending}" || exit 1
         fi
-        echo "nixtache-ab-update: new version installed and upper chain prepared — triggering the reboot assessment"
+        echo "nixtache-ab-update: installed image and upper chain are ready — triggering the reboot assessment"
         systemctl start --no-block systemd-sysupdate-reboot.service \
           || echo "nixtache-ab-update: reboot trigger failed — new slot staged, reboot deferred" >&2
       '';

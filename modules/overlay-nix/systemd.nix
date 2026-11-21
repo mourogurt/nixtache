@@ -33,6 +33,9 @@ let
   overlayStoreUrl = "local-overlay://"
     + "?lower-store=${encodeStoreUri hostLowerStore}"
     + "&upper-layer=${cfg.upperDir}"
+    # GC invalidates upper copies of lower records. Cached lower fallback
+    # results would then skip reference copy-up and abort registration.
+    + "&path-info-cache-size=0"
     + "&ignore-gc-delete-failure=true"
     + "&remount-hook=${remountHook}"
     + "&check-mount=false";

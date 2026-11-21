@@ -362,6 +362,15 @@ let
         (posOf "systemctl start nixtache-overlay-prepare.service" abUpdateScript)
           < (posOf "systemd-sysupdate-reboot.service" abUpdateScript);
       abUpdateFailsWhenPreparationFails = lib.hasInfix "upper preparation failed — not rebooting" abUpdateScript;
+      abUpdateRecoversPendingPreparation = lib.hasInfix
+        "/var/lib/nixtache/upper-preparation-pending" abUpdateScript
+        && lib.hasInfix
+          (builtins.unsafeDiscardStringContext
+            "${hostAb.config.systemd.package}/lib/systemd/systemd-sysupdate pending")
+          abUpdateScript;
+      abUpdateClearsPendingOnlyAfterPreparation =
+        (posOf "systemctl start nixtache-overlay-prepare.service" abUpdateScript)
+          < (posOf ''rm -f "/var/lib/nixtache/upper-preparation-pending"'' abUpdateScript);
       # gating off (default) → no nixtache-ab-apply path/service provisioned
       noAbPath = !(hostAb.config.systemd.paths ? "nixtache-ab-apply");
       noAbService = !(hostAb.config.systemd.services ? "nixtache-ab-apply");

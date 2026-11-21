@@ -347,12 +347,14 @@ let
     (cfg:
       let script = auScript cfg; in
       {
-        prepareGuardedByInstall = lib.hasInfix ''if [ "$installed" = 1 ] && systemctl cat nixtache-overlay-prepare.service'' script;
+        prepareGuardedByInstall = lib.hasInfix ''if [ "$updateReady" = 1 ] && systemctl cat nixtache-overlay-prepare.service'' script;
         prepareBeforeReboot =
           (posOf "systemctl start nixtache-overlay-prepare.service" script)
             < (posOf "systemctl reboot" script);
         noDeferredFingerprint = !(lib.hasInfix "/var/lib/nixtache/reboot-pending-overlay" script);
         noRestartInPoll = !(lib.hasInfix "systemctl restart nixtache-overlay-prepare.service" script);
+        absolutePendingProbe = lib.hasInfix
+          "${overlaySystemdPackage}/lib/systemd/systemd-sysupdate pending" script;
         failureStopsReboot = lib.hasInfix "upper preparation failed — not rebooting" script;
       });
 
@@ -565,6 +567,17 @@ let
       rebootPolicy = "window";
       rebootWindow = { start = "02:00"; end = "05:00"; };
     })).systemd.services.nixtache-auto-update-reboot.script;
+  overlaySystemdPackage = builtins.unsafeDiscardStringContext
+    "${(evalCfg (overlayAbMods { })).systemd.package}";
+  overlayWindowPollScript = pkgs.writeText "auto-update-overlay-window-poll"
+    (evalCfg (overlayAbMods {
+      rebootPolicy = "window";
+      rebootWindow = { start = "02:00"; end = "05:00"; };
+    })).systemd.services.nixtache-auto-update.script;
+  overlayImmediatePollScript = pkgs.writeText "auto-update-overlay-immediate-poll"
+    (evalCfg (overlayAbMods {
+      rebootPolicy = "if-needed";
+    })).systemd.services.nixtache-auto-update.script;
 
   rebootWindowBehaviorCheck = pkgs.runCommand "auto-update-window-behavior" {
     inherit normalWindowScript wrappingWindowScript;
@@ -725,6 +738,128 @@ let
     printf 'ok  stable source refresh publishes its pre-refresh snapshot and reboots\n' >> "$out"
   '';
 
+  abRecoveryBehaviorCheck = pkgs.runCommand "auto-update-ab-recovery-behavior" {
+    inherit overlayWindowPollScript overlayImmediatePollScript;
+  } ''
+    set -euo pipefail
+    : > "$out"
+    mkdir -p "$TMPDIR/bin" "$TMPDIR/runtime" "$TMPDIR/boot"
+    cat > "$TMPDIR/bin/date" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' 2026-11-22
+    STUB
+    cat > "$TMPDIR/bin/findmnt" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' tmpfs
+    STUB
+    cat > "$TMPDIR/bin/journalctl" <<'STUB'
+    #!/bin/sh
+    if [ "$INSTALL" = 1 ]; then printf '%s\n' 'Successfully installed'; else printf '%s\n' 'No update needed'; fi
+    STUB
+    cat > "$TMPDIR/sysupdate-stub" <<'STUB'
+    #!/bin/sh
+    [ "$1" = pending ] && exit "$PENDING"
+    exit 2
+    STUB
+    cat > "$TMPDIR/bin/systemctl" <<'STUB'
+    #!/bin/sh
+    printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+    case "$1" in
+      is-active|is-failed) exit 1 ;;
+      cat) exit 0 ;;
+      start)
+        if [ "$2" = nixtache-overlay-prepare.service ] && [ "$PREPARE_FAIL" = 1 ]; then exit 1; fi
+        ;;
+    esac
+    exit 0
+    STUB
+    chmod +x "$TMPDIR/bin/"* "$TMPDIR/sysupdate-stub"
+    sed -e "s|${overlaySystemdPackage}/lib/systemd/systemd-sysupdate|$TMPDIR/sysupdate-stub|g" \
+      -e "s|/var/lib/nixtache|$TMPDIR/state|g" \
+      -e "s|/run/nixtache-overlay|$TMPDIR/runtime|g" \
+      -e "s|/boot/EFI/nixtache|$TMPDIR/boot|g" \
+      -e "s|/etc/image-version|$TMPDIR/image-version|g" \
+      "$overlayWindowPollScript" > "$TMPDIR/window-poll"
+    sed -e "s|${overlaySystemdPackage}/lib/systemd/systemd-sysupdate|$TMPDIR/sysupdate-stub|g" \
+      -e "s|/var/lib/nixtache|$TMPDIR/state|g" \
+      -e "s|/run/nixtache-overlay|$TMPDIR/runtime|g" \
+      -e "s|/boot/EFI/nixtache|$TMPDIR/boot|g" \
+      -e "s|/etc/image-version|$TMPDIR/image-version|g" \
+      "$overlayImmediatePollScript" > "$TMPDIR/immediate-poll"
+    printf 'slot-a\n' > "$TMPDIR/runtime/selected-slot"
+    printf '2\n' > "$TMPDIR/image-version"
+    printf 'lower-db\n' > "$TMPDIR/boot/nixtache_2.lower-db"
+    export PATH="$TMPDIR/bin:${pkgs.coreutils}/bin:${pkgs.gnugrep}/bin:${pkgs.bash}/bin"
+    export SYSTEMCTL_LOG="$TMPDIR/systemctl-log"
+    export INSTALL=0 PREPARE_FAIL=0 PENDING=1
+
+    reset_state() {
+      rm -rf "$TMPDIR/state"
+      mkdir -p "$TMPDIR/state"
+      : > "$SYSTEMCTL_LOG"
+    }
+
+    reset_state
+    touch "$TMPDIR/state/reboot-pending" "$TMPDIR/state/reboot-pending-overlay"
+    INSTALL=1 PREPARE_FAIL=1 PENDING=1 bash "$TMPDIR/window-poll" && {
+      echo 'FAIL: preparation failure was ignored' >&2; exit 1;
+    }
+    [ -f "$TMPDIR/state/upper-preparation-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending-overlay" ]
+    [ ! -e "$TMPDIR/state/reboot-pending-overlay.tmp" ]
+    printf 'ok  install with failed preparation stays pending and unarmed\n' >> "$out"
+
+    : > "$SYSTEMCTL_LOG"
+    INSTALL=0 PREPARE_FAIL=0 PENDING=0 bash "$TMPDIR/window-poll"
+    [ ! -e "$TMPDIR/state/upper-preparation-pending" ]
+    [ -f "$TMPDIR/state/reboot-pending" ]
+    [ -f "$TMPDIR/state/reboot-pending-overlay" ]
+    [ "$(grep -c '^start nixtache-overlay-prepare.service$' "$SYSTEMCTL_LOG")" = 1 ]
+    printf 'ok  no-op poll recovers an installed pending lower and rearms window reboot\n' >> "$out"
+
+    : > "$SYSTEMCTL_LOG"
+    before=$(sha256sum "$TMPDIR/state/reboot-pending" "$TMPDIR/state/reboot-pending-overlay")
+    INSTALL=0 PREPARE_FAIL=0 PENDING=0 bash "$TMPDIR/window-poll"
+    after=$(sha256sum "$TMPDIR/state/reboot-pending" "$TMPDIR/state/reboot-pending-overlay")
+    [ "$before" = "$after" ]
+    ! grep -q 'nixtache-overlay-prepare.service' "$SYSTEMCTL_LOG"
+    printf 'ok  clean no-op neither prepares nor changes deferred markers\n' >> "$out"
+
+    reset_state
+    touch "$TMPDIR/state/upper-preparation-pending"
+    INSTALL=0 PREPARE_FAIL=0 PENDING=1 bash "$TMPDIR/window-poll"
+    [ -f "$TMPDIR/state/upper-preparation-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending" ]
+    ! grep -q 'nixtache-overlay-prepare.service' "$SYSTEMCTL_LOG"
+    printf 'ok  stale preparation marker without a pending sysupdate stays inert\n' >> "$out"
+
+    : > "$SYSTEMCTL_LOG"
+    INSTALL=0 PREPARE_FAIL=1 PENDING=0 bash "$TMPDIR/window-poll" && {
+      echo 'FAIL: failed no-op recovery was ignored' >&2; exit 1;
+    }
+    [ -f "$TMPDIR/state/upper-preparation-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending" ]
+    printf 'ok  failed recovery remains pending and unarmed\n' >> "$out"
+
+    reset_state
+    touch "$TMPDIR/state/upper-preparation-pending"
+    INSTALL=0 PREPARE_FAIL=0 PENDING=0 bash "$TMPDIR/immediate-poll"
+    [ ! -e "$TMPDIR/state/upper-preparation-pending" ]
+    [ ! -e "$TMPDIR/state/reboot-pending" ]
+    [ "$(grep -c '^start nixtache-overlay-prepare.service$' "$SYSTEMCTL_LOG")" = 1 ]
+    [ "$(grep -c '^reboot$' "$SYSTEMCTL_LOG")" = 1 ]
+    printf 'ok  immediate recovery prepares once and reboots\n' >> "$out"
+
+    rm -rf "$TMPDIR/state"
+    : > "$SYSTEMCTL_LOG"
+    INSTALL=1 PREPARE_FAIL=1 PENDING=1 bash "$TMPDIR/window-poll" && {
+      echo 'FAIL: missing state directory lost the preparation requirement' >&2; exit 1;
+    }
+    [ -f "$TMPDIR/state/upper-preparation-pending" ]
+    printf 'ok  AB poll creates its state directory before recording preparation\n' >> "$out"
+  '';
+
   failureHandlingBehaviorCheck = pkgs.runCommand "auto-update-failure-handling-behavior" {
     inherit flakePollScript flakeWindowScript normalWindowScript;
   } ''
@@ -859,7 +994,7 @@ let
 in
 pkgs.runCommand "auto-update-test"
   {
-    inherit report failMsg rebootWindowBehaviorCheck fingerprintBehaviorCheck failureHandlingBehaviorCheck;
+    inherit report failMsg rebootWindowBehaviorCheck fingerprintBehaviorCheck abRecoveryBehaviorCheck failureHandlingBehaviorCheck;
     passAsFile = [ "report" "failMsg" ];
   }
   ''
@@ -872,6 +1007,8 @@ pkgs.runCommand "auto-update-test"
     cat "$rebootWindowBehaviorCheck" >> "$out"
     cat "$fingerprintBehaviorCheck"
     cat "$fingerprintBehaviorCheck" >> "$out"
+    cat "$abRecoveryBehaviorCheck"
+    cat "$abRecoveryBehaviorCheck" >> "$out"
     cat "$failureHandlingBehaviorCheck"
     cat "$failureHandlingBehaviorCheck" >> "$out"
   ''

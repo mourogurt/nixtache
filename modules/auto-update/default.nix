@@ -69,6 +69,7 @@ let
   pendingFile = "${stateDir}/pending-system";
   rebootPendingFile = "${stateDir}/reboot-pending";
   rebootPendingOverlay = "${stateDir}/reboot-pending-overlay";
+  upperPreparationPending = "${stateDir}/upper-preparation-pending";
 
   sourceFingerprint = ''
     fingerprint_source() {
@@ -162,19 +163,20 @@ let
   abRebootClause =
     if cfg.rebootPolicy == "never" then ""
     else if cfg.rebootPolicy == "if-needed" then ''
-      if [ "$installed" = 1 ]; then
-        marker "image installed — rebooting"
+      if [ "$updateReady" = 1 ]; then
+        marker "image ready — rebooting"
         systemctl reboot
       fi
     ''
     else ''
-      if [ "$installed" = 1 ]; then
+      if [ "$updateReady" = 1 ]; then
         touch "${rebootPendingFile}"
-        marker "image installed — reboot pending (window ${cfg.rebootWindow.start}-${cfg.rebootWindow.end})"
+        marker "image ready — reboot pending (window ${cfg.rebootWindow.start}-${cfg.rebootWindow.end})"
       fi
     '';
   abPollScript = ''
     set -euo pipefail
+    mkdir -p "${stateDir}"
     ${markerFn}
     ${sourceFingerprint}
     t0=$(date '+%Y-%m-%d %H:%M:%S')
@@ -199,6 +201,7 @@ let
     else
       marker "no new image installed"
     fi
+    updateReady=$installed
     ${optionalString (cfg.rebootPolicy == "window") ''
       if [ "$installed" = 1 ]; then
         rm -f "${rebootPendingFile}" "${rebootPendingOverlay}" "${rebootPendingOverlay}.tmp" \
@@ -206,7 +209,16 @@ let
       fi
     ''}
     ${optionalString (isAb && overlayEnabled) ''
-      if [ "$installed" = 1 ] && systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
+      if [ "$installed" = 0 ] && [ -f "${upperPreparationPending}" ] \
+        && systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1 \
+        && ${config.systemd.package}/lib/systemd/systemd-sysupdate pending > /dev/null 2>&1; then
+        updateReady=1
+        marker "installed image still needs upper preparation"
+      fi
+      if [ "$updateReady" = 1 ] && systemctl cat nixtache-overlay-prepare.service > /dev/null 2>&1; then
+        if [ "$installed" = 1 ]; then
+          touch "${upperPreparationPending}" || { marker "could not record the upper-preparation requirement"; exit 1; }
+        fi
         ${optionalString (cfg.rebootPolicy == "window") ''
           fingerprint_source > "${rebootPendingOverlay}.tmp" || {
             rm -f "${rebootPendingOverlay}.tmp"
@@ -219,6 +231,7 @@ let
           ${optionalString (cfg.rebootPolicy == "window") ''rm -f "${rebootPendingOverlay}.tmp"''}
           exit 1
         fi
+        rm -f "${upperPreparationPending}" || { marker "could not clear the upper-preparation requirement"; exit 1; }
         ${optionalString (cfg.rebootPolicy == "window") ''
           mv "${rebootPendingOverlay}.tmp" "${rebootPendingOverlay}" || { marker "could not record the prepared source generation"; exit 1; }
         ''}

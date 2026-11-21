@@ -143,7 +143,7 @@ A same-version lower rewrite invalidates readiness through the dump checksum. Re
 
 When an update defers reboot, record the source generation. Revalidate the target before deferred cutover if any source node changed. Under `reconcile`, refresh the complete target and freeze the latest parent runtime continuations so children receive a coherent rebase rather than silently losing parent changes or reading a live lower. Under `wipe`, repeat validation against the latest installed lower while keeping target writable upper/state clean.
 
-No-op and rejected updates do not invoke preparation. An entirely ephemeral chain has a successful no-persistent-metaslot preparation result so managed OTA and deferred reboot can proceed without inventing a selected persistent slot.
+Rejected updates and clean no-op polls do not invoke preparation. A completed installation records a durable upper-preparation requirement before fingerprinting or preparation; failure leaves it pending. A later no-op poll retries preparation only when that record exists and `systemd-sysupdate pending` confirms an installed target awaiting cutover. Successful installed or boot recovery clears it, then applies the ordinary reboot policy. An entirely ephemeral chain has a successful no-persistent-metaslot preparation result so managed OTA and deferred reboot can proceed without inventing a selected persistent slot.
 
 ### D8 — Boot selects first and blesses only a ready chain
 

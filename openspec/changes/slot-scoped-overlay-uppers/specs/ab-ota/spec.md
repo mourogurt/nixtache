@@ -123,6 +123,15 @@ Every completed installation MUST produce or validate preparation for the latest
 - **WHEN** target preparation already succeeded for an earlier installed lower and a later lower is installed before reboot
 - **THEN** starting preparation again performs the new target checks and publication instead of treating the earlier successful unit state as completion for the later lower
 
+### Requirement: Incomplete upper preparation remains recoverable
+
+An installed lower whose upper preparation failed MUST retain a durable preparation requirement until installed or boot recovery succeeds. A later poll that installs nothing MUST retry only when that requirement exists and sysupdate confirms a target awaiting cutover; a clean no-op MUST remain inert.
+
+#### Scenario: A no-op poll recovers incomplete preparation
+
+- **WHEN** an earlier lower installation completed but its upper preparation failed, and a later sysupdate poll installs nothing while that target still awaits cutover
+- **THEN** the durable preparation requirement remains pending, preparation retries once, and success applies the normal reboot policy; without that pending requirement the no-op poll neither prepares nor reboots
+
 ### Requirement: Target preparation is serialized per physical slot
 
 Preparation and boot recovery for the same physical target slot MUST hold one common lock from staging cleanup through publication. A concurrent process MUST NOT remove or modify another process's staging tree.

@@ -288,9 +288,14 @@ let
     checks = {
       valueIsReconcile = (cfgOf hostReconcile).upperOnUpdate == "reconcile";
       clonesActiveGeneration = lib.hasInfix ''"$materializer" "$stage/plan.rows" "$source_dir" "$stage"'' reconcileScript;
+      ancillaryDbStateRetained = lib.hasInfix
+        ''cp -a --reflink=auto "$entry" "$destination/db/"'' materializerSource
+        && lib.hasInfix "! -name 'db.sqlite-*'" materializerSource;
       quiescesWriters = lib.hasInfix "nix-daemon.socket" reconcileScript;
       failedStopResumesStoppedWriters = lib.isDerivation quiesceRecoveryCheck;
       verifiesPrivateTarget = lib.hasInfix "unshare -m --propagation private" reconcileScript;
+      pendingClearedOnEverySuccess = lib.length
+        (lib.splitString "rm -f /var/lib/nixtache/upper-preparation-pending" reconcileScript) == 4;
       readinessIsExplicit = lib.hasInfix "state=unready" reconcileScript
         && lib.hasInfix "state=ready" reconcileScript;
       activeIsNeverRepairTarget = !(lib.hasInfix "repair_store \"$host_url\" \"/nix/var/nix\"" reconcileScript);
@@ -305,6 +310,10 @@ let
       noLegacyLifecycle = !((servicesOf hostWipe) ? nixtache-overlay-lifecycle);
       preparationUsesStaging = lib.hasInfix ".staging-" prepareScript;
       readinessIsAtomic = lib.hasInfix "mv \"$stage\" \"$slot_dir/generations/$generation\"" prepareScript;
+      stagingStartsUnready = lib.hasInfix
+        ''printf 'generation=%s\nstate=unready\n' "$generation" > "$slot_dir/generations/$generation/metadata"''
+        prepareScript
+        && (posOf ''state=unready'' prepareScript) < (posOf ''mkdir -p "$stage"'' prepareScript);
     };
   };
 

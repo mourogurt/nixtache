@@ -69,8 +69,15 @@ pkgs.testers.runNixOSTest {
     def node_dir(target, node):
         return target + ("/host" if node == "host" else "/layers/" + node)
 
-    def upper_path(node, path, target):
-        return node_dir(target, node) + "/upper/" + basename(path)
+    def prepared_node_dir(target, node):
+        if node == "host":
+            return target + "/nodes/host-lower"
+        return node_dir(target, node)
+
+    def active_prepared_state(node):
+        if node == "host":
+            return "/run/nixtache-overlay/frozen/host-lower/nix/var/nix"
+        return STATES[node]
 
     def nix_store(node, args):
         features = "local-overlay-store read-only-local-store"
@@ -150,10 +157,18 @@ pkgs.testers.runNixOSTest {
     def assert_sentinels():
         for node in NODE_IDS:
             for directory in sentinel_dirs(node):
+                original = directory + "/ephemeral-sentinel"
                 if node in RESET_NODES:
-                    appliance.fail("test -e " + q(directory + "/ephemeral-sentinel"))
+                    appliance.fail("test -e " + q(original))
+                elif directory == WORKS[node]:
+                    appliance.fail("test -e " + q(original))
                 else:
-                    appliance.succeed("test -e " + q(directory + "/ephemeral-sentinel"))
+                    retained = prepared_node_dir(persistent_generation, node)
+                    if directory == UPPERS[node]:
+                        retained += "/upper"
+                    else:
+                        retained += "/state/" + directory.removeprefix(STATES[node] + "/")
+                    appliance.succeed("test -e " + q(retained + "/ephemeral-sentinel"))
 
     def prepare_installed_generation():
         active_slot = appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip()
@@ -212,11 +227,12 @@ pkgs.testers.runNixOSTest {
                 appliance.fail("find " + q(directory) + " -mindepth 1 -print -quit 2>/dev/null | grep -q .")
         for node in persistent_nodes:
             path = MARKERS[node]
-            marker = upper_path(node, path, generation)
+            retained = prepared_node_dir(generation, node)
+            marker = retained + "/upper/" + basename(path)
             appliance.succeed("grep -Fqx " + q(EPHEMERAL + ":" + node) + " " + q(marker))
-            root = node_dir(generation, node) + "/state/gcroots/ephemeral-marker"
+            root = retained + "/state/gcroots/ephemeral-marker"
             assert appliance.succeed("readlink " + q(root)).strip() == path
-            db = node_dir(generation, node) + "/state/db/db.sqlite"
+            db = retained + "/state/db/db.sqlite"
             sql = "SELECT COUNT(*) FROM ValidPaths WHERE path = '" + path + "';"
             assert appliance.succeed("sqlite3 " + q(db) + " " + q(sql)).strip() == "1"
         print("OK: prepared generation contains no persistent ephemeral upper or state copies; persistent siblings retain files, roots and DB records")
@@ -224,7 +240,7 @@ pkgs.testers.runNixOSTest {
     def prepared_db_hashes(generation, nodes):
         return {
           node: appliance.succeed(
-            "sha256sum " + q(node_dir(generation, node) + "/state/db/db.sqlite") + " | awk '{print $1}'"
+            "sha256sum " + q(prepared_node_dir(generation, node) + "/state/db/db.sqlite") + " | awk '{print $1}'"
           ).strip()
           for node in nodes
         }
@@ -232,16 +248,17 @@ pkgs.testers.runNixOSTest {
     def active_db_hashes(nodes):
         return {
           node: appliance.succeed(
-            "sha256sum " + q(STATES[node] + "/db/db.sqlite") + " | awk '{print $1}'"
+            "sha256sum " + q(active_prepared_state(node) + "/db/db.sqlite") + " | awk '{print $1}'"
           ).strip()
           for node in nodes
         }
 
-    def assert_markers_valid(nodes):
+    def assert_markers_valid(nodes, retained_generation=None):
         for node in nodes:
             path = MARKERS[node]
             appliance.succeed(nix_cli(node, "path-info " + q(path)))
-            root = STATES[node] + "/gcroots/ephemeral-marker"
+            state = STATES[node] if retained_generation is None else prepared_node_dir(retained_generation, node) + "/state"
+            root = state + "/gcroots/ephemeral-marker"
             assert appliance.succeed("readlink " + q(root)).strip() == path
             appliance.succeed("grep -Fqx " + q(EPHEMERAL + ":" + node) + " " + q(fs_path(node, path)))
 
@@ -299,7 +316,7 @@ pkgs.testers.runNixOSTest {
         assert_no_host_metaslot()
     assert_sentinels()
     assert_markers_invalid(RESET_NODES)
-    assert_markers_valid(persistent_nodes)
+    assert_markers_valid(persistent_nodes, persistent_generation)
     assert_runtime_consumers(persistent_nodes)
 
     if persistent_nodes:

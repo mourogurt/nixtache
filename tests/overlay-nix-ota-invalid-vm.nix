@@ -318,19 +318,17 @@ pkgs.testers.runNixOSTest {
     appliance.succeed(f"nix-store --realize {HELLO_P}", timeout=600)
     appliance.succeed(f"test -d {UPPER}/{HELLO_B}")
     appliance.succeed("nix-store --gc --print-roots | grep -F /nix/var/nix/gcroots/tool-root")
-    # A merged-store GC pass can stop after a deletion batch when it encounters
-    # an already-invalid record. Repeat a bounded number of passes; the final
-    # upper-file assertion still requires the unrooted path to disappear.
+    # A merged-store GC pass must complete, remove the unrooted upper path and
+    # preserve the rooted tool. The store URL disables path-info caching so
+    # lower fallback validity cannot bypass upper reference copy-up after GC.
     gc_status, gc_journal = appliance.execute(
-      f"gc_status=0; for i in 1 2 3; do "
-      f"nix-collect-garbage 2>&1 || gc_status=$?; "
-      f"test -d {UPPER}/{HELLO_B} || break; done; "
+      "nix-collect-garbage 2>&1; gc_status=$?; "
       "journalctl -u nix-daemon --since -10min | grep -i 'remount' || true; "
       "exit \"$gc_status\""
     )
-    print("INFO gc-remount-journal: " + gc_journal[-400:])
-    appliance.fail(f"test -d {UPPER}/{HELLO_B}")
+    print("INFO gc-pass-journal:\n" + gc_journal)
     assert gc_status == 0, f"nix-collect-garbage failed with status {gc_status}"
+    appliance.fail(f"test -d {UPPER}/{HELLO_B}")
     out = appliance.succeed(P2 + "/bin/tool")
     assert "tool-ok" in out, f"rooted tool broken by GC ({out!r})"
     print("OK: GC removed the unrooted path, rooted tool alive")
@@ -416,7 +414,7 @@ pkgs.testers.runNixOSTest {
     # -- Stage v2 + sysupdate → slot B → reboot into the new lower ---------
     if DEGRADED:
         deployer.succeed("systemctl stop nix-serve.service")
-    active_profile_before = appliance.succeed("readlink -f " + PROF).strip()
+    active_profile_before = appliance.succeed("readlink -f " + PROF).strip() if not TMPFS else None
     active_before_update = active_state_checksum() if not TMPFS else None
     update_boot_id = appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     stage_v2()
@@ -485,10 +483,13 @@ pkgs.testers.runNixOSTest {
                 appliance.fail(f"test -d {UPPER}/{P1B}")
                 print("OK: old-lower dependency repaired only in the target; active DB/files unchanged")
             appliance.succeed(
-              "cp /boot/EFI/nixtache/abtest_2.lower-db /run/nixtache-overlay/changed-lower-db && "
-              "cat /run/nixtache-overlay/changed-lower-db >> /boot/EFI/nixtache/abtest_2.lower-db"
+              f"cp {target}/lower-db /run/nixtache-overlay/changed-lower-db && "
+              f"cat /run/nixtache-overlay/changed-lower-db >> {target}/lower-db"
             )
-            print("OK: retry discarded the incomplete generation; installed lower dump checksum changed")
+            owned_sha = appliance.succeed(f"sha256sum {target}/lower-db | awk '{{print $1}}'").strip()
+            recorded_sha = appliance.succeed(f"sed -n 's/^lower_sha256=//p' {target}/metadata").strip()
+            assert owned_sha != recorded_sha, "fault injection did not change the generation-owned lower dump"
+            print("OK: retry discarded the incomplete generation; prepared generation's owned lower dump was corrupted")
 
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target")

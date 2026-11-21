@@ -891,6 +891,9 @@ self.nixosModules.runner
     checks = {
       hostLowerDaemon = lib.hasInfix "lower-store=daemon" (execOverlayOf hostOverlay);
       hostNoLocal = !(lib.hasInfix "lower-store=local" (execOverlayOf hostOverlay));
+      gcPathInfoCacheOff = lib.all
+        (host: lib.hasInfix "path-info-cache-size=0" (execOverlayOf host))
+        [ hostOverlay hostApplianceOverlay ];
       applianceLowerLocal = lib.hasInfix
         "lower-store=local%%3Froot%%3D/run/nixtache-runner-lower%%26read-only%%3Dtrue"
         (execOverlayOf hostApplianceOverlay);

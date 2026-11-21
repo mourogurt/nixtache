@@ -67,11 +67,8 @@ let
   parentUnitFor = id:
     let parent = parentById.${id}; in
     if parent == null then lowerMountUnit else mountUnitFor parent;
-  lowerDirsFor = id:
-    let parent = parentById.${id}; in
-    if parent == null
-    then "${upperDirs.host}:${physicalRoot}/nix/store"
-    else "${roots.${parent}}/nix/store";
+  parentStoreRoot = id: "/run/nixtache-overlay/parents/${id}";
+  lowerDirsFor = id: "${parentStoreRoot id}/nix/store";
 
   runtimeModule = { pkgs, ... }: {
     fileSystems = lib.optionalAttrs (ephemeralNode != null) {
@@ -119,8 +116,8 @@ let
         description = "Mount the ${id} local-overlay store over its prepared parent";
         wantedBy = [ "nixtache-overlay-ready.target" ];
         before = [ "nixtache-overlay-ready.target" ];
-        after = [ "nixtache-overlay-select.service" (parentUnitFor id) ];
-        requires = [ "nixtache-overlay-select.service" (parentUnitFor id) ];
+        after = [ "nixtache-overlay-select.service" "nixtache-overlay-frozen.service" (parentUnitFor id) ];
+        requires = [ "nixtache-overlay-select.service" "nixtache-overlay-frozen.service" (parentUnitFor id) ];
         path = with pkgs; [ coreutils util-linux ];
         serviceConfig = {
           Type = "oneshot";
@@ -142,19 +139,18 @@ let
   };
 
   encodeStoreUri = value: lib.replaceStrings [ "%" "?" "&" "=" ] [ "%25" "%3F" "%26" "%3D" ] value;
-  hostLower = "local?state=${dirOf upperDirs.host}/lower-state&read-only=true";
+  hostLower = "local?root=${parentStoreRoot "host"}&state=${parentStoreRoot "host"}/nix/var/nix&read-only=true";
   hostStoreUrl = "local-overlay://?root=/&state=/nix/var/nix"
     + "&lower-store=${encodeStoreUri hostLower}"
     + "&upper-layer=${upperDirs.host}"
     + "&ignore-gc-delete-failure=true&check-mount=false";
   storeUrls = lib.foldl' (urls: id:
     let
-      parent = parentById.${id};
-      parentId = if parent == null then "host" else parent;
+      selectedLower = "local?root=${parentStoreRoot id}&state=${parentStoreRoot id}/nix/var/nix&read-only=true";
     in
     urls // {
       ${id} = "local-overlay://?root=${roots.${id}}&state=${stateDirs.${id}}"
-        + "&lower-store=${encodeStoreUri urls.${parentId}}"
+        + "&lower-store=${encodeStoreUri selectedLower}"
         + "&upper-layer=${upperDirs.${id}}"
         + "&ignore-gc-delete-failure=true&check-mount=false";
     }

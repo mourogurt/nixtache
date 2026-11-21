@@ -550,6 +550,7 @@ else if lib.hasPrefix "no-intermediate-reboot" scenario then
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending")
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay")
       appliance.succeed("test ! -f /var/lib/nixtache/reboot-pending-overlay.tmp")
+      appliance.succeed("test -f /var/lib/nixtache/upper-preparation-pending")
       assert prepared_target() == (slot_v2, generation_v2, target_v2), "failed v3 preparation replaced the ready v2 target"
       appliance.succeed("systemctl start nixtache-auto-update-reboot.service", timeout=300)
       assert appliance.succeed("cat /proc/sys/kernel/random/boot_id").strip() == original_boot, "stale v2 markers rebooted after v3 preparation failed"
@@ -558,9 +559,23 @@ else if lib.hasPrefix "no-intermediate-reboot" scenario then
       appliance.succeed(
         "rm -rf /etc/systemd/system/nixtache-overlay-prepare.service.d && systemctl daemon-reload"
       )
+      appliance.succeed("systemctl start nixtache-auto-update.service", timeout=900)
+      slot_v3, generation_v3, target_v3 = prepared_target()
+      assert generation_v3 != generation_v2, "recovery reused the v2 preparation generation"
+      assert metadata_value(target_v3, "state") == "ready"
+      assert metadata_value(target_v3, "image_version") == "3"
+      assert metadata_value(target_v3, "lower_sha256") == failed_v3_sha
+      appliance.succeed("test ! -f /var/lib/nixtache/upper-preparation-pending")
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending")
+      appliance.succeed("test -f /var/lib/nixtache/reboot-pending-overlay")
+      print("OK: a no-op poll recovered the installed but previously unprepared v3 lower")
+
+      recovered_generation_v3 = generation_v3
+      appliance.succeed("nixtache-ab-recover 3")
       install("${stackedV3RewrittenPkg}", "3")
       slot_v3, generation_v3, target_v3 = prepared_target()
       assert generation_v3 != generation_v2, "v3 installation reused the v2 preparation generation"
+      assert generation_v3 != recovered_generation_v3, "same-version rewrite reused the recovered v3 generation"
       assert metadata_value(target_v3, "state") == "ready"
       assert metadata_value(target_v3, "image_version") == "3", "pre-reboot metadata does not describe the installed v3 image"
       expected_v3_sha = appliance.succeed("sha256sum /boot/EFI/nixtache/abtest_3.lower-db | cut -d ' ' -f 1").strip()
@@ -591,10 +606,11 @@ else if lib.hasPrefix "no-intermediate-reboot" scenario then
       assert appliance.succeed("cat /etc/image-version").strip() == "3"
       assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == slot_v3
       selected_generation = appliance.succeed("cat /run/nixtache-overlay/selected-generation").strip()
+      selected_generation_id = selected_generation.rsplit("/", 1)[-1]
       if WIPE:
-          assert selected_generation != generation_v3, "changed deferred source did not refresh the wipe target"
-          generation_v3 = selected_generation
-          target_v3 = "/var/lib/nix-overlay/upper-slots/" + slot_v3 + "/generations/" + selected_generation
+          assert selected_generation_id != generation_v3, "changed deferred source did not refresh the wipe target"
+          generation_v3 = selected_generation_id
+          target_v3 = "/var/lib/nix-overlay/upper-slots/" + slot_v3 + "/generations/" + generation_v3
           assert metadata_value(target_v3, "state") == "ready"
           assert metadata_value(target_v3, "lower_sha256") == expected_v3_sha
           appliance.fail("test -e " + target_v3 + "/host/upper/deferred-wipe-upper")
@@ -604,7 +620,7 @@ else if lib.hasPrefix "no-intermediate-reboot" scenario then
           appliance.fail("test -e /var/lib/nix-overlay/upper/deferred-wipe-upper")
           appliance.fail("test -e /nix/var/nix/gcroots/deferred-wipe-state")
       else:
-          assert selected_generation == generation_v3, "boot recovery replaced the prepared v3 generation"
+          assert selected_generation_id == generation_v3, "boot recovery replaced the prepared v3 generation"
       assert appliance.succeed("readlink -f /var/lib/nix-overlay/upper-slots/" + slot_v3 + "/current").strip() == target_v3
       assert metadata_value(target_v3, "image_version") == "3"
       appliance.wait_until_succeeds("nix --version", timeout=300)
@@ -887,9 +903,17 @@ pkgs.testers.runNixOSTest {
 
     def assert_tree_deferred_marker():
         basename = "${baseNameOf p4Path}"
+        generation = auto.succeed("cat /run/nixtache-overlay/selected-generation").strip()
+        frozen = {
+          "host": generation + "/nodes/host-lower",
+          "a": generation + "/nodes/a-lower",
+        }
         for node in TREE_STORES:
-            auto.succeed("test -e " + shlex.quote(TREE_UPPERS[node] + "/" + basename))
-            root = TREE_STATES[node] + "/gcroots/deferred-window"
+            retained = frozen.get(node)
+            upper = retained + "/upper" if retained is not None else TREE_UPPERS[node]
+            state = retained + "/state" if retained is not None else TREE_STATES[node]
+            auto.succeed("test -e " + shlex.quote(upper + "/" + basename))
+            root = state + "/gcroots/deferred-window"
             assert auto.succeed("readlink " + shlex.quote(root)).strip() == "${p4Path}"
         print("OK: deferred source refresh preserved the marker at host, intermediate, leaf and sibling")
 

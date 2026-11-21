@@ -220,8 +220,10 @@ an intermediate reboot therefore publish readiness for the latest installed
 lower, not the earlier pending one. Metadata includes image version, lower dump
 and descriptor checksums and whole-graph fingerprints. A same-version lower
 rewrite with a changed dump also invalidates an earlier generation even though
-its version string is unchanged. No-op or rejected updates do not invoke
-preparation.
+its version string is unchanged. Rejected updates and clean no-op polls do not
+invoke preparation. A no-op poll can instead recover an earlier installed lower
+whose preparation remains pending, as specified in
+[`auto-update.md`](auto-update.md#ab-upper-readiness-and-deferred-reboots).
 
 At boot, `nixtache-overlay-select.service` resolves and records the mounted
 lower's `PARTUUID` before either selecting a persistent generation or leaving

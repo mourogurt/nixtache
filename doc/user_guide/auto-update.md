@@ -19,8 +19,10 @@ One module, two mechanisms chosen per system type:
   activation (unit red, GC hint in the journal) until space is freed.
 - **ab-image** (OTA): the poll service starts the sysupdate unit appropriate
   for the host's systemd version and waits for installation to finish before
-  inspecting its result. Only a completed new-image install can set a reboot
-  marker or trigger a reboot; a no-new-image result does neither. The runner
+  inspecting its result. A completed new-image install can set a reboot marker
+  or trigger a reboot; a clean no-new-image result does neither. A no-op poll
+  recovering an earlier installed but unprepared upper is the explicit exception
+  described below. The runner
   host self-updates through the idle-gated `nixtache-ab-apply` unit. See the
   [A/B OTA requirements](../../openspec/specs/ab-ota/spec.md).
 
@@ -62,10 +64,14 @@ services.nixtache.auto-update = {
 
 ## A/B upper readiness and deferred reboots
 
-A completed lower installation triggers `nixtache-overlay-prepare.service`
-before any reboot decision, including with `rebootPolicy = "never"`; a failed or
-no-op installation does not. Preparation failure makes the poll fail and
-suppresses the reboot while the active slot remains available. Each later
+A completed lower installation records an upper-preparation requirement and
+triggers `nixtache-overlay-prepare.service` before any reboot decision,
+including with `rebootPolicy = "never"`; a failed installation or clean no-op
+does not. Preparation failure makes the poll fail, suppresses the reboot and
+keeps the requirement pending while the active slot remains available. A later
+poll that installs nothing retries preparation when that pending record exists
+and `systemd-sysupdate pending` confirms an installed target awaiting cutover;
+success clears it and applies the ordinary reboot policy. Each later
 installation runs preparation again, so a pending reboot always describes the
 latest installed lower and target descriptor rather than an earlier ready
 upper generation.

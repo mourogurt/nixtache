@@ -373,6 +373,8 @@ let
         lib.hasInfix "remount-hook=" (cfg.nix.settings.store or "");
       remountHookIsScript =
         lib.hasInfix "remount-hook=/" (cfg.nix.settings.store or "");
+      gcPathInfoCacheOff =
+        lib.hasInfix "path-info-cache-size=0" (cfg.nix.settings.store or "");
     });
 
   overlayLifecycleCfg = mode: lib.recursiveUpdate overlayCfg {

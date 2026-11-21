@@ -202,6 +202,9 @@ in
             + "?root=${store.path}"
             + "&lower-store=${lowerStore}"
             + "&upper-layer=${store.path}/overlay/upper"
+            # Cached lower fallback validity can bypass upper reference
+            # copy-up after GC invalidation and abort with InvalidPath.
+            + "&path-info-cache-size=0"
             + "&ignore-gc-delete-failure=true";
         in
         {

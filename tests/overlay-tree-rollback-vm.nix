@@ -95,6 +95,12 @@ pkgs.testers.runNixOSTest {
       "b": PATHS["commonDependency"],
     }
     CANARY = "nixtache-overlay-tree-rollback-canary.service"
+    PREPARED_PHYSICAL = {
+      "host": "host-lower",
+      "a": "a-lower",
+      "grand": "grand",
+      "b": "b",
+    }
     V2_MARKER_ORDER = []
 
     def create_ab_machine(**kwargs):
@@ -112,7 +118,7 @@ pkgs.testers.runNixOSTest {
         return ROOTS[node].rstrip("/") + store_path
 
     def node_dir(target, node):
-        return target + ("/host" if node == "host" else "/layers/" + node)
+        return target + "/nodes/" + PREPARED_PHYSICAL[node]
 
     def upper_path(node, path, target=None):
         upper = UPPERS[node] if target is None else node_dir(target, node) + "/upper"
@@ -182,7 +188,8 @@ pkgs.testers.runNixOSTest {
 
     def assert_consumers(target=None):
         for node, path in CONSUMERS.items():
-            assert_placement(path, [node], target)
+            expected = ["host", "b"] if path == PATHS["hostConsumer"] else [node]
+            assert_placement(path, expected, target)
 
     def assert_seeded_roots(target=None):
         for node, path in CONSUMERS.items():
@@ -335,10 +342,10 @@ pkgs.testers.runNixOSTest {
         assert appliance.succeed("cat /etc/image-version").strip() == "2", f"boot {boot_number} did not select v2"
         wait_tree()
         assert_selected_generation(v2_slot, v2_target)
-        assert_consumers()
-        assert_seeded_roots()
+        assert_consumers(v2_target)
+        assert_seeded_roots(v2_target)
         for case in REPAIR_CASES:
-            assert_placement(case["path"], case["nodes"])
+            assert_placement(case["path"], case["nodes"], v2_target)
         assert_runtime_consumers()
         remaining_tries = 2 - boot_number
         appliance.succeed("ls /boot/EFI/Linux/abtest_2+" + str(remaining_tries) + "*.efi > /dev/null")

@@ -244,6 +244,23 @@ The three workarounds, each mapped to the behaviour that forces it:
 Nix's unconditional directory creation makes all three workarounds necessary;
 re-check these constraints when changing Nix versions.
 
+## GC metadata copy-up and path-info caching
+
+A `local-overlay` GC scans the merged store and invalidates duplicate upper
+records for dead lower-backed paths. A later topological query can cache the
+still-valid lower answer without restoring the upper row. Closure copy-up then
+trusts that positive cache entry, skips registration of a reference and fails
+with `InvalidPath` when inserting the referrer's reference edge. The visible
+symptom is an aborted appliance or runner GC with a different missing-reference
+path depending on traversal order; the lower snapshot itself is intact.
+
+Production host and runner overlay store URLs therefore set
+`path-info-cache-size=0`. Every validity check then performs the overlay's
+lower-to-upper closure copy-up instead of accepting an upper-row-less cached
+answer. This costs additional SQLite/lower-store queries and applies to current
+Nix 2.34 and 2.35 implementations; re-check the cache/copy-up sequence before
+removing the mitigation.
+
 ## Alternatives considered
 
 - **Custom NAR serializer or content-derived path renaming**: Nix's scratch

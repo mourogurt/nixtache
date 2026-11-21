@@ -2,6 +2,7 @@
 , pkgs
 , cfg
 , imageId
+, stateDir
 , runtimeState
 , slotsDir
 , legacyBackup
@@ -87,8 +88,16 @@ let
     }
 
     merge_state() {
-      local source=$1 destination=$2 name
+      local source=$1 destination=$2 name entry
       mkdir -p "$destination"
+      if [ -d "$source/db" ]; then
+        mkdir -p "$destination/db"
+        while IFS= read -r -d "" entry; do
+          name=$(basename "$entry")
+          case "$name" in db.sqlite|db.sqlite-*) continue ;; esac
+          cp -a --reflink=auto "$entry" "$destination/db/"
+        done < <(find "$source/db" -mindepth 1 -maxdepth 1 ! -name db.sqlite ! -name 'db.sqlite-*' -print0)
+      fi
       if [ -f "$source/db/db.sqlite" ]; then
         mkdir -p "$destination/db"
         nix-store --option experimental-features "read-only-local-store" \
@@ -493,6 +502,7 @@ let
         printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
         printf 'ephemeral\n' > "${runtimeState}/prepared-generation"
         printf '%s\n' "$source_slot:$source_generation" > "${runtimeState}/prepared-source"
+        rm -f ${stateDir}/upper-preparation-pending
         trap - EXIT
         return 0
       fi
@@ -518,6 +528,7 @@ let
         printf '%s\n' "$target_slot" > "${runtimeState}/prepared-slot"
         printf '%s\n' "$(basename "$current_before")" > "${runtimeState}/prepared-generation"
         printf '%s\n' "$source_slot:$source_generation" > "${runtimeState}/prepared-source"
+        rm -f ${stateDir}/upper-preparation-pending
         trap - EXIT
         return 0
       fi
@@ -531,7 +542,12 @@ let
         if [ "$old" = "$current_before" ] || [ "$old" = "$selected_before" ]; then continue; fi
         rm -rf "$old"
       done < <(find "$slot_dir/generations" -mindepth 1 -maxdepth 1 -type d)
-      mkdir -p "$slot_dir/generations/$generation" "$stage"
+      mkdir -p "$slot_dir/generations/$generation"
+      # Make the recovery state visible before staging exists: an interruption
+      # immediately after staging creation must still leave explicit unready
+      # metadata for diagnostics and retry classification.
+      printf 'generation=%s\nstate=unready\n' "$generation" > "$slot_dir/generations/$generation/metadata"
+      mkdir -p "$stage"
       cp "$target_dump" "$stage/lower-db"
       cp "$target_descriptor" "$stage/overlay-topology.json"
       target_dump="$stage/lower-db"
@@ -602,6 +618,7 @@ let
       printf '%s\n' "$generation" > "${runtimeState}/prepared-generation"
       printf '%s\n' "$source_slot:$source_generation" > "${runtimeState}/prepared-source"
       resume_writers
+      rm -f ${stateDir}/upper-preparation-pending
       trap - EXIT
     }
 
