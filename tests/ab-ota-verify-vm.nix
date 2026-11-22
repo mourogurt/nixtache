@@ -16,16 +16,18 @@
 #                                  already proven by C4) but signed with the
 #                                  SECOND throwaway keypair (fixture.testSignKey2)
 #                                  → rejected.
-#   C2 ab-deploy-verify-tampered:  v3 signed with the right key, then one byte of
-#                                  the .nix-store.raw flipped → hash mismatch →
-#                                  rejected.
 #   C3 ab-deploy-verify-unsigned:  v3 signed, then SHA256SUMS.gpg removed →
 #                                  rejected.
+#   C2 ab-deploy-verify-tampered:  v3 signed with the right key, then one byte of
+#                                  the .nix-store.raw flipped → hash mismatch →
+#                                  rejected. C2 runs last because replacing the
+#                                  inactive v2 slot is intrinsic to two-slot updates.
 #
 # Reset between cases: each negative case re-stages from scratch on the deployer
 # (rm + cp + sha256sum + gpg). The target needs no reset. The key negative
 # assertion is "no committed v3": no abtest_3+*.efi in the boot-target dir
-# (nothing bootable was created), while the good nix-store_2 stays intact.
+# (nothing bootable was created). Manifest rejections preserve nix-store_2;
+# the final mid-install rejection preserves the running nix-store_1.
 #
 # Rejection model on the pinned systemd (261.1) — two distinct stages:
 #  - MANIFEST-stage rejection (C1 wrong key, C3 unsigned): verification of
@@ -290,12 +292,11 @@ pkgs.testers.runNixOSTest {
           f"cd {stage} && gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS"
         )
 
-    def attempt_v3(case):
-        """Trigger sysupdate on the target against the (mutated) v3 staging
-        and assert the update is REJECTED: nothing bootable appears, and the
-        good v2 slot survives — including through the vacuum that heals a
-        mid-install partial. Records the unit's exit status (manifest-stage
-        rejections exit 0, mid-install ones fail the unit)."""
+    def attempt_v3(case, mid_install=False):
+        """Reject v3 without creating a bootable entry. Manifest failures leave
+        v2 intact; a mid-install failure has already recycled the inactive v2
+        partition, so vacuum must turn its partial v3 replacement back into the
+        single empty slot while the running v1 remains protected."""
         # --wait: the upstream unit is Type=simple, so a plain start returns
         # at fork — without --wait the journal grep below would race the
         # still-running update.
@@ -310,12 +311,20 @@ pkgs.testers.runNixOSTest {
         has_partial = target.succeed(
           "sgdisk -p /dev/vdb | grep -c nix-store_3 || true"
         ).strip() != "0"
-        if has_partial:
+        if mid_install:
+            assert status != 0, "mid-install checksum rejection unexpectedly succeeded"
+            assert has_partial, "mid-install checksum rejection left no partial v3"
             target.succeed("systemd-sysupdate vacuum", timeout=120)
             target.fail("sgdisk -p /dev/vdb | grep nix-store_3")
-        # The good version survives the rejected update (and the vacuum).
-        target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
-        target.succeed(f"test -f {slots}/abtest_2+*.efi")
+            target.fail("sgdisk -p /dev/vdb | grep nix-store_2")
+            assert target.succeed("sgdisk -p /dev/vdb | grep -c _empty").strip() == "1"
+        else:
+            assert not has_partial, "manifest-stage rejection created a partial v3"
+            target.succeed("sgdisk -p /dev/vdb | grep nix-store_2")
+            target.succeed(f"test -f {slots}/abtest_2+*.efi")
+        # The running image is protected even when the inactive slot is recycled.
+        target.succeed("sgdisk -p /dev/vdb | grep nix-store_1")
+        assert target.succeed(". /etc/os-release && printf '%s\\n' \"$IMAGE_VERSION\"").strip() == "1"
         # Journal of THIS run shows the rejection (tail = latest attempt).
         # Query BOTH names: on current systemd the update unit's canonical
         # name is systemd-sysupdate-update.service (the plain name is an
@@ -330,17 +339,17 @@ pkgs.testers.runNixOSTest {
     attempt_v3("C1")
     print("C1 OK: wrong-key signature rejected — no v3 committed")
 
-    # -- C2: right key, then one byte of the payload flipped → hash mismatch --
-    stage_v3("/etc/signing-key")
-    deployer.succeed(f"printf 'x' | dd of={stage}/abtest_3.nix-store.raw bs=1 seek=1024 conv=notrunc")
-    attempt_v3("C2")
-    print("C2 OK: tampered payload rejected — no v3 committed")
-
     # -- C3: signature removed entirely → unsigned rejected ------------------
     stage_v3("/etc/signing-key")
     deployer.succeed(f"rm {stage}/SHA256SUMS.gpg")
     attempt_v3("C3")
     print("C3 OK: unsigned manifest rejected — no v3 committed")
+
+    # -- C2: right key, then one byte of the payload flipped → hash mismatch --
+    stage_v3("/etc/signing-key")
+    deployer.succeed(f"printf 'x' | dd of={stage}/abtest_3.nix-store.raw bs=1 seek=1024 conv=notrunc")
+    attempt_v3("C2", mid_install=True)
+    print("C2 OK: tampered payload rejected, partial vacuumed, running v1 protected")
 
     target.succeed("sgdisk -p /dev/vdb")
     print("PASS: C1-C4 — Verify=yes accepts the correct signature, rejects wrong-key/tampered/unsigned")
