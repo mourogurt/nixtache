@@ -367,7 +367,9 @@ let
       in
       {
         recordsSourceFingerprint = lib.hasInfix "/var/lib/nixtache/reboot-pending-overlay.tmp" script;
-        hashesWholeGeneration = lib.hasInfix ''nix --extra-experimental-features nix-command hash path "$generation"'' script;
+        hashesWholeGeneration = lib.hasInfix ''tar --sort=name --format=gnu'' script
+          && lib.hasInfix ''--exclude='*/state/db/db.sqlite-shm' '' script
+          && lib.hasInfix ''-C "$generation" .'' script;
         invalidatesOlderMarkersBeforePreparation = before
           ''rm -f "/var/lib/nixtache/reboot-pending" "/var/lib/nixtache/reboot-pending-overlay" "/var/lib/nixtache/reboot-pending-overlay.tmp"''
           "systemctl start nixtache-overlay-prepare.service"
@@ -659,7 +661,7 @@ let
     STUB
     cat > "$TMPDIR/bin/findmnt" <<'STUB'
     #!/bin/sh
-    printf '%s\n' tmpfs
+    printf '%s\n' "$FSTYPE"
     STUB
     cat > "$TMPDIR/bin/systemctl" <<'STUB'
     #!/bin/sh
@@ -671,6 +673,7 @@ let
     STUB
     chmod +x "$TMPDIR/bin/date" "$TMPDIR/bin/findmnt" "$TMPDIR/bin/systemctl"
     sed -e "s|/var/lib/nixtache|$TMPDIR/state|g" \
+      -e "s|/var/lib/nix-overlay|$TMPDIR/overlay|g" \
       -e "s|/run/nixtache-overlay|$TMPDIR/runtime|g" \
       -e "s|/boot/EFI/nixtache|$TMPDIR/boot|g" \
       -e "s|/etc/image-version|$TMPDIR/image-version|g" \
@@ -678,8 +681,9 @@ let
     printf '1\n' > "$TMPDIR/runtime/selected-slot"
     printf '2\n' > "$TMPDIR/image-version"
     printf 'lower-db\n' > "$TMPDIR/boot/nixtache_2.lower-db"
-    export PATH="$TMPDIR/bin:${pkgs.coreutils}/bin:${pkgs.bash}/bin"
+    export PATH="$TMPDIR/bin:${pkgs.coreutils}/bin:${pkgs.gnutar}/bin:${pkgs.gnused}/bin:${pkgs.gawk}/bin:${pkgs.bash}/bin"
     export REBOOT_LOG="$TMPDIR/reboots"
+    export FSTYPE=tmpfs
     export LOWER_DB="$TMPDIR/boot/nixtache_2.lower-db"
     export REWRITE_ON_REFRESH=
     {
@@ -736,6 +740,35 @@ let
     [ ! -e "$TMPDIR/state/reboot-pending-overlay" ]
     [ ! -e "$TMPDIR/state/reboot-pending-overlay.tmp" ]
     printf 'ok  stable source refresh publishes its pre-refresh snapshot and reboots\n' >> "$out"
+
+    sed -n '/^fingerprint_source() {$/,/^}$/p' "$TMPDIR/overlay-window" > "$TMPDIR/fingerprint-source"
+    printf '\nfingerprint_source\n' >> "$TMPDIR/fingerprint-source"
+    mkdir -p "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db" \
+      "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/gcroots" \
+      "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/temproots" \
+      "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/host/upper"
+    ln -s generations/g1 "$TMPDIR/overlay/upper-slots/slot-a/current"
+    printf 'slot-a\n' > "$TMPDIR/runtime/selected-slot"
+    printf 'database-v1\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite"
+    printf 'wal-v1\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite-wal"
+    printf 'shm-v1\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite-shm"
+    printf 'upper-v1\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/host/upper/object"
+    FSTYPE=ext4 baseline=$(bash "$TMPDIR/fingerprint-source")
+    printf 'shm-v2\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite-shm"
+    FSTYPE=ext4 after_shm=$(bash "$TMPDIR/fingerprint-source")
+    [ "$after_shm" = "$baseline" ]
+    printf 'database-v2\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite"
+    FSTYPE=ext4 after_db=$(bash "$TMPDIR/fingerprint-source")
+    [ "$after_db" != "$baseline" ]
+    printf 'database-v1\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite"
+    printf 'wal-v2\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite-wal"
+    FSTYPE=ext4 after_wal=$(bash "$TMPDIR/fingerprint-source")
+    [ "$after_wal" != "$baseline" ]
+    printf 'wal-v1\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/state/db/db.sqlite-wal"
+    printf 'upper-v2\n' > "$TMPDIR/overlay/upper-slots/slot-a/generations/g1/host/upper/object"
+    FSTYPE=ext4 after_upper=$(bash "$TMPDIR/fingerprint-source")
+    [ "$after_upper" != "$baseline" ]
+    printf 'ok  persistent fingerprint ignores only SQLite shm and detects DB, WAL and upper writes\n' >> "$out"
   '';
 
   abRecoveryBehaviorCheck = pkgs.runCommand "auto-update-ab-recovery-behavior" {
@@ -750,7 +783,7 @@ let
     STUB
     cat > "$TMPDIR/bin/findmnt" <<'STUB'
     #!/bin/sh
-    printf '%s\n' tmpfs
+    printf '%s\n' "$FSTYPE"
     STUB
     cat > "$TMPDIR/bin/journalctl" <<'STUB'
     #!/bin/sh
@@ -791,6 +824,7 @@ let
     printf 'lower-db\n' > "$TMPDIR/boot/nixtache_2.lower-db"
     export PATH="$TMPDIR/bin:${pkgs.coreutils}/bin:${pkgs.gnugrep}/bin:${pkgs.bash}/bin"
     export SYSTEMCTL_LOG="$TMPDIR/systemctl-log"
+    export FSTYPE=tmpfs
     export INSTALL=0 PREPARE_FAIL=0 PENDING=1
 
     reset_state() {

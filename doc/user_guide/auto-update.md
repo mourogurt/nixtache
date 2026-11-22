@@ -77,8 +77,10 @@ latest installed lower and target descriptor rather than an earlier ready
 upper generation.
 
 On a persistent overlay in window mode, the poll records the active upper
-generation's fingerprint after preparation. At the deferred cutover, a changed
-fingerprint causes another target-only preparation. `reconcile` therefore
+generation's fingerprint after preparation. The fingerprint excludes only
+SQLite's volatile `db.sqlite-shm`; database, WAL, upper, root and profile changes
+remain significant. At the deferred cutover, a changed fingerprint causes
+another target-only preparation. `reconcile` therefore
 freezes the latest parent runtime continuations before the child rebase;
 `wipe` validates a clean target against the latest installed lower. Neither
 policy refreshes an active mounted lower or reconciles the previous slot during

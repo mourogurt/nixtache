@@ -86,7 +86,10 @@ let
       generation=$(readlink -f "${overlaySlotsDir}/$active_slot/current") || return 1
       [ -d "$generation" ] || return 1
       printf '%s %s\n' "$active_slot" "$(basename "$generation")"
-      nix --extra-experimental-features nix-command hash path "$generation"
+      # SQLite's shm is volatile shared-memory bookkeeping, not durable state;
+      # include the database and WAL while excluding only that transient file.
+      tar --sort=name --format=gnu --numeric-owner --owner=0 --group=0 --mtime=@0 \
+        --exclude='*/state/db/db.sqlite-shm' -cf - -C "$generation" . | sha256sum | awk '{print $1}'
     }
   '';
 
@@ -526,6 +529,8 @@ in
           ++ optional isFlake config.nix.package
           ++ optional (isAb && overlayEnabled) config.nix.package
           ++ optional (isAb && overlayEnabled) util-linux
+          ++ optional (isAb && overlayEnabled) gnutar
+          ++ optional (isAb && overlayEnabled) gawk
           ++ optional (isFlake && cfg.flake.sshPrivateKeyFile != null) openssh;
         serviceConfig = {
           Type = "oneshot";
@@ -553,7 +558,11 @@ in
 
       systemd.services.nixtache-auto-update-reboot = {
         description = "nixtache auto-update: reboot inside the configured window when a reboot is pending";
-        path = with pkgs; [ systemd coreutils ] ++ optional (isAb && overlayEnabled) config.nix.package ++ optional (isAb && overlayEnabled) util-linux;
+        path = with pkgs; [ systemd coreutils ]
+          ++ optional (isAb && overlayEnabled) config.nix.package
+          ++ optional (isAb && overlayEnabled) util-linux
+          ++ optional (isAb && overlayEnabled) gnutar
+          ++ optional (isAb && overlayEnabled) gawk;
         serviceConfig.Type = "oneshot";
         script = ''
           set -euo pipefail
