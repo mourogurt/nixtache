@@ -1081,7 +1081,10 @@ let
         && selectsPlanParent "beta"
         && selectsPlanParent "gamma"
         && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/alpha/nix/var/nix'' parentRootPhase
-        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/beta/nix/var/nix'' parentRootPhase;
+        && lib.hasInfix ''activate_frozen_state "$parent_root/nix/var/nix" /run/nixtache-runner-lower/beta/nix/var/nix'' parentRootPhase
+        && lib.all (id: lib.hasInfix
+          ''activate_lower_root "$parent_root" /run/nixtache-runner-lower/${id}''
+          parentRootPhase) [ "alpha" "beta" "gamma" ];
       frozenMetadataReadOnlyWithoutCopies = lib.all (script:
         lib.hasInfix ''mount -o remount,ro,bind "$target/$name"'' script
         && !(lib.hasInfix ''cp -a "$source'' script)

@@ -50,7 +50,8 @@ let
       inherit version;
       signVerify = true;
       storeSize = "2G";
-      extraPackages = extraPackages ++ [ pkgs.gptfdisk ];
+      extraPackages = extraPackages ++ [ pkgs.gptfdisk ]
+        ++ lib.optional (scenario == "parent-metadata-freshness") pkgs.sqlite;
       extraModules = [
         self.nixosModules.runner
       ] ++ [ self.nixosModules.overlay-nix ] ++ [
@@ -188,7 +189,11 @@ pkgs.testers.runNixOSTest {
 
     deployer.succeed(
       "mkdir -p /var/lib/nixtache/ab-stage/abtest && "
-      "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/"
+      "cp ${v2Pkg}/* /var/lib/nixtache/ab-stage/abtest/ && "
+      "cd /var/lib/nixtache/ab-stage/abtest && "
+      "export GNUPGHOME=$(mktemp -d) && "
+      "${pkgs.gnupg}/bin/gpg --batch --import ${fixture.testSignKey}/priv.asc 2>/dev/null && "
+      "${pkgs.gnupg}/bin/gpg --batch --yes --detach-sign -o SHA256SUMS.gpg SHA256SUMS"
     )
     appliance.succeed("systemctl start --wait systemd-sysupdate-update.service", timeout=900)
     appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)

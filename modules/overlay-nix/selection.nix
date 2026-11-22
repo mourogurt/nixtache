@@ -168,6 +168,7 @@ let
     activate_lower_root "$parent_root" ${parentRoot node.id}
     ${optionalString (node ? containerName) ''
       activate_frozen_state "$parent_root/nix/var/nix" ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
+      activate_lower_root "$parent_root" ${node.lowerRoot}
     ''}
   '') sortedTopology;
 

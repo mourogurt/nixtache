@@ -47,11 +47,42 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     import shlex
+    from typing import TypedDict
+
+    class RunnerSettings(TypedDict):
+        parent: str | None
+        mode: str
+        path: str
+        hostBackup: str
+        containerName: str
+        lowerRoot: str
+        socket: str
+
+    class ExpectedPhysicalNode(TypedDict):
+        id: str
+        logicalId: str
+        role: str
+        parent: str | None
+
+    class ExpectedPhysicalGraph(TypedDict):
+        nodes: list[ExpectedPhysicalNode]
+        order: list[str]
+
+    class ExpectedGraph(TypedDict):
+        nodes: list[dict[str, object]]
+        order: list[str]
+        physical: ExpectedPhysicalGraph
+        consumerNodeByLogical: dict[str, str]
+        frozenLowerByLogical: dict[str, str]
+        lineageByPhysical: dict[str, dict[str, object]]
+        generationFingerprint: str
+        operations: dict[str, str]
+        dispositions: dict[str, str]
 
     POLICY = "reconcile"
-    RUNNERS = ${builtins.toJSON (fixture.pythonRunners state)}
+    RUNNERS: dict[str, RunnerSettings] = json.loads(${builtins.toJSON (builtins.toJSON (fixture.pythonRunners state))})
     MARKERS = ${builtins.toJSON markerPaths}
-    EXPECTED_GRAPH = ${builtins.toJSON (oracle.projection expected)}
+    EXPECTED_GRAPH: ExpectedGraph = json.loads(${builtins.toJSON (builtins.toJSON (oracle.projection expected))})
     SYSUPDATE_PACKAGES = {"2": ${builtins.toJSON v2Package.outPath}}
 
     ${fixture.pythonHelpers}
