@@ -28,6 +28,18 @@ let
   descriptorValidator = pkgs.writeShellScript "nixtache-overlay-validate-descriptor" ''
     exec ${planner} validate --image-id ${escapeShellArg imageId} "$@"
   '';
+  pathInfoReferencesPython = ''
+    def references_by_path(document):
+        if isinstance(document, dict):
+            return {
+              path: sorted(record.get("references", []))
+              for path, record in document.items()
+            }
+        return {
+          record["path"]: sorted(record.get("references", []))
+          for record in document
+        }
+  '';
   ephemeralSourceDescriptor = pkgs.writeText "nixtache-overlay-ephemeral-source.json" (builtins.toJSON {
     schema = "nixtache.overlay-topology/v1";
     imageId = imageId;
@@ -207,7 +219,7 @@ let
 
   verifyNamespaceScript = pkgs.writeShellScript "nixtache-overlay-verify-namespace" ''
         set -euo pipefail
-        export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix ])}
+        export PATH=${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused gawk util-linux nix python3 ])}
         ${encodeStoreUri}
         rows="$stage/persistent-plan.rows"
         if [ "$target_device" = "BOOTED" ]; then
@@ -367,6 +379,51 @@ let
               --store "local?root=$merged&state=$state" --load-db
         }
 
+        reference_oracle_sources="$scratch/reference-oracle-sources"
+        reference_oracle_info="$scratch/reference-oracle.json"
+        mkdir -p "$reference_oracle_sources" "$scratch/oracle-dump-root/nix/store"
+        reference_oracle_count=0
+        load_reference_oracle() {
+          local source_state=$1 output
+          if [ -f "$source_state/db/db.sqlite" ]; then
+            output="$reference_oracle_sources/$reference_oracle_count.json"
+            nix --extra-experimental-features "nix-command read-only-local-store" \
+              path-info --json --all \
+              --store "local?root=$scratch/oracle-dump-root&state=$source_state&read-only=true" > "$output"
+            reference_oracle_count=$((reference_oracle_count + 1))
+          fi
+        }
+        load_reference_oracle "$stage/host/lower-state"
+        while IFS='|' read -r physical_id logical_id role parent rest; do
+          [ -n "$physical_id" ] || continue
+          node_stage=$(physical_stage "$physical_id" "$logical_id" "$role")
+          load_reference_oracle "$node_stage/state"
+        done < "$rows"
+        python3 - "$reference_oracle_info" "$reference_oracle_sources"/*.json <<'PY'
+import json
+import os
+import sys
+
+${pathInfoReferencesPython}
+
+oracle = {}
+source_files = sorted(
+  sys.argv[2:],
+  key=lambda name: int(os.path.basename(name).removesuffix(".json")),
+)
+for filename in source_files:
+    with open(filename, encoding="utf-8") as stream:
+        document = json.load(stream)
+    for path, references in references_by_path(document).items():
+        # The lower and then parents precede child copies. Keep their reference
+        # set unchanged: a stale child subset is repairable, but no child copy
+        # may widen the trusted set used for final validation.
+        if path not in oracle:
+            oracle[path] = {"references": references}
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(oracle, stream, sort_keys=True)
+PY
+
         while IFS='|' read -r physical_id logical_id role parent operation disposition rest; do
           [ -n "$physical_id" ] || continue
           mount_physical "$physical_id" "$logical_id" "$role" "$parent"
@@ -381,11 +438,9 @@ let
           else
             repair_store "$node_url" "$node_stage/state" "$node_root"
           fi
-          ${optionalString (cfg.upperOnUpdate == "reconcile") ''
-            if [ "$disposition" != empty ] && [ "$disposition" != empty-continuation ]; then
-              duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"
-            fi
-          ''}
+          if [ "$disposition" != empty ] && [ "$disposition" != empty-continuation ]; then
+            duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"
+          fi
           publish_mount_upper "$physical_id" "$logical_id" "$role"
           mkdir -p "$scratch/lower-states/$physical_id"
           cp -a "$node_stage/state/." "$scratch/lower-states/$physical_id/"
@@ -711,14 +766,43 @@ let
 
   checkStoreSnippet = ''
     check_store() {
-      local store_url=$1 merged=$2 path listing failed=0
+      local store_url=$1 merged=$2 target_info failed=0
       nix-store --option experimental-features "local-overlay-store read-only-local-store" --store "$store_url" --verify || failed=1
-      if ! listing=$(nix --extra-experimental-features "nix-command local-overlay-store read-only-local-store" path-info --all --store "$store_url"); then
+      target_info=$(mktemp "$scratch/check-store.XXXXXX.json")
+      if ! nix --extra-experimental-features "nix-command local-overlay-store read-only-local-store" \
+        path-info --json --all --store "$store_url" > "$target_info"; then
         failed=1
       fi
-      while read -r path; do
-        case "$path" in /nix/store/*) [ -e "$merged$path" ] || { echo "nixtache-overlay: incoherent target record $path" >&2; failed=1; } ;; esac
-      done <<< "$listing"
+      if [ -s "$target_info" ]; then
+        python3 - "$target_info" "$reference_oracle_info" "$merged" <<'PY' || failed=1
+import json
+import os
+import sys
+
+${pathInfoReferencesPython}
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    target = references_by_path(json.load(stream))
+with open(sys.argv[2], encoding="utf-8") as stream:
+    oracle = references_by_path(json.load(stream))
+merged = sys.argv[3].rstrip("/")
+failed = False
+for path in sorted(target):
+    if not os.path.exists(merged + path):
+        print("nixtache-overlay: incoherent target record " + path, file=sys.stderr)
+        failed = True
+    if path not in oracle:
+        print("nixtache-overlay: no trusted reference record for " + path, file=sys.stderr)
+        failed = True
+    elif target[path] != oracle[path]:
+        print("nixtache-overlay: reference mismatch for " + path, file=sys.stderr)
+        print("expected references:\n" + "\n".join(oracle[path]), file=sys.stderr)
+        print("actual references:\n" + "\n".join(target[path]), file=sys.stderr)
+        failed = True
+sys.exit(1 if failed else 0)
+PY
+      fi
+      rm -f "$target_info"
       [ "$failed" = 0 ]
     }
   '';

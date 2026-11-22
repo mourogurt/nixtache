@@ -294,6 +294,12 @@ let
       quiescesWriters = lib.hasInfix "nix-daemon.socket" reconcileScript;
       failedStopResumesStoppedWriters = lib.isDerivation quiesceRecoveryCheck;
       verifiesPrivateTarget = lib.hasInfix "unshare -m --propagation private" reconcileScript;
+      referenceClosureValidated = lib.hasInfix
+        ''load_reference_oracle "$stage/host/lower-state"'' (namespaceWithLayers [ ])
+        && lib.hasInfix ''reference_oracle_sources="$scratch/reference-oracle-sources"'' (namespaceWithLayers [ ])
+        && lib.hasInfix ''if path not in oracle:'' (namespaceWithLayers [ ])
+        && lib.hasInfix "no trusted reference record for " (namespaceWithLayers [ ])
+        && lib.hasInfix "target[path] != oracle[path]" (namespaceWithLayers [ ]);
       pendingClearedOnEverySuccess = lib.length
         (lib.splitString "rm -f /var/lib/nixtache/upper-preparation-pending" reconcileScript) == 4;
       readinessIsExplicit = lib.hasInfix "state=unready" reconcileScript
@@ -309,6 +315,9 @@ let
       valueIsWipe = (cfgOf hostWipe).upperOnUpdate == "wipe";
       noLegacyLifecycle = !((servicesOf hostWipe) ? nixtache-overlay-lifecycle);
       preparationUsesStaging = lib.hasInfix ".staging-" prepareScript;
+      frozenLowerMetadataIncluded = lib.hasInfix
+        ''duplicate_visible_metadata "$physical_id" "$parent" "$node_stage/state" "$node_root"''
+        (namespaceWipeWithLayers [ (layer "a" null) ]);
       readinessIsAtomic = lib.hasInfix "mv \"$stage\" \"$slot_dir/generations/$generation\"" prepareScript;
       stagingStartsUnready = lib.hasInfix
         ''printf 'generation=%s\nstate=unready\n' "$generation" > "$slot_dir/generations/$generation/metadata"''
@@ -323,14 +332,16 @@ let
     workDir = "/var/lib/layers/${id}/work";
     stateDir = "/var/lib/layers/${id}/state";
   };
-  hostWithLayers = layers: mkHost {
+  hostWithLayersPolicy = policy: layers: mkHost {
     services.nixtache.overlay-nix = {
       _layers = layers;
-      upperOnUpdate = "reconcile";
+      upperOnUpdate = policy;
     };
   };
+  hostWithLayers = hostWithLayersPolicy "reconcile";
   scriptWithLayers = layers: (cfgOf (hostWithLayers layers))._scripts.prepare;
   namespaceWithLayers = layers: (cfgOf (hostWithLayers layers))._scripts.namespace;
+  namespaceWipeWithLayers = layers: (cfgOf (hostWithLayersPolicy "wipe" layers))._scripts.namespace;
   selectWithLayers = layers: (hostWithLayers layers).config.systemd.services.nixtache-overlay-select.script;
   tryHost = extra: builtins.tryEval (mkHost {
     imports = [ extra ];

@@ -191,6 +191,7 @@ in
       serviceConfig.Type = "oneshot";
       script = ''
         set -uo pipefail
+        mkdir -p "${stateDir}" || exit 1
         t0=$(date +%s)
         if ! systemctl start systemd-sysupdate.service; then
           echo "nixtache-ab-update: failed to start systemd-sysupdate.service" >&2

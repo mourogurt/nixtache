@@ -36,6 +36,11 @@ pkgs.testers.runNixOSTest {
     REPAIR_CASES = ${builtins.toJSON fixture.repairCases}
     EXTRA_ROOTS = ${builtins.toJSON fixture.extraRoots}
     PATHS = ${builtins.toJSON fixture.fixturePaths}
+    PREPARED_PHYSICAL = {
+      "host": "host-lower",
+      "a": "a-lower",
+      "middle": "middle-lower",
+    }
 
     if TOPOLOGY == "nested":
         NODE_DEPENDENCIES = {
@@ -72,7 +77,11 @@ pkgs.testers.runNixOSTest {
         return ROOTS[node].rstrip("/") + store_path
 
     def node_dir(target, node):
-        return target + ("/host" if node == "host" else "/layers/" + node)
+        return target + "/nodes/" + PREPARED_PHYSICAL.get(node, node)
+
+    def continuation_dir(target, node):
+        physical = PREPARED_PHYSICAL[node].removesuffix("-lower") + "-runtime"
+        return target + "/nodes/" + physical
 
     def upper_path(node, path, target=None):
         upper = UPPERS[node] if target is None else node_dir(target, node) + "/upper"
@@ -127,7 +136,29 @@ pkgs.testers.runNixOSTest {
 
     def assert_consumers(target=None):
         for node, path in CONSUMERS.items():
-            assert_placement(path, [node], target)
+            if path == PATHS["hostConsumer"] and TOPOLOGY == "sibling":
+                expected = ["host", "left", "right"]
+            elif path == PATHS["hostConsumer"] and TOPOLOGY == "composed":
+                expected = ["host", "b"]
+            elif path == PATHS["sharedConsumer"] and TOPOLOGY == "nested":
+                expected = ["middle", "leaf"]
+            else:
+                expected = [node]
+            assert_placement(path, expected, target)
+
+    def fresh_runtime_dependency_nodes(path):
+        if TOPOLOGY == "sibling" and path == PATHS["hostDependency"]:
+            return ["host", "left", "right"]
+        if TOPOLOGY == "composed" and path == PATHS["hostDependency"]:
+            return ["host", "b"]
+        if TOPOLOGY == "nested" and path == PATHS["sharedDependency"]:
+            return ["middle", "leaf"]
+        if TOPOLOGY == "composed" and path == PATHS["sharedDependency"]:
+            return ["a", "grand"]
+        for case in REPAIR_CASES:
+            if case["path"] == path:
+                return case["nodes"]
+        raise AssertionError("no fresh-runtime ownership rule for " + path)
 
     def assert_fixture_absent(target=None):
         for case in REPAIR_CASES:
@@ -141,20 +172,41 @@ pkgs.testers.runNixOSTest {
             link = state_path(root["node"], target) + "/gcroots/" + root["name"]
             appliance.fail("test -e " + q(link) + " || test -L " + q(link))
 
-    def assert_empty_tree(target):
-        assert_fixture_absent(target)
-        for node in NODE_IDS:
-            upper = node_dir(target, node) + "/upper"
-            state = node_dir(target, node) + "/state"
-            appliance.fail("find " + q(upper) + " -mindepth 1 -print -quit | grep -q .")
-            appliance.fail(
-              "(find " + q(state + "/gcroots") + " " + q(state + "/profiles") +
-              " -type l -print 2>/dev/null || true) | grep -q ."
+    def assert_empty_physical_node(directory, frozen_lower=False):
+        upper = directory + "/upper"
+        state = directory + "/state"
+        appliance.fail("find " + q(upper) + " -mindepth 1 -print -quit | grep -q .")
+        appliance.fail(
+          "(find " + q(state + "/gcroots") + " " + q(state + "/profiles") +
+          " -type l -print 2>/dev/null || true) | grep -q ."
+        )
+        db = state + "/db/db.sqlite"
+        if frozen_lower:
+            appliance.succeed(
+              "test -f " + q(db) + " && "
+              "test \"$(sqlite3 " + q(db) + " " + q("SELECT COUNT(*) FROM ValidPaths;") + ")\" -gt 0"
             )
-            db = state + "/db/db.sqlite"
+        else:
             appliance.succeed(
               "if test -f " + q(db) + "; then "
               "test \"$(sqlite3 " + q(db) + " " + q("SELECT COUNT(*) FROM ValidPaths;") + ")\" = 0; fi"
+            )
+
+    def assert_reconcile_continuations_empty(target):
+        for node in PREPARED_PHYSICAL:
+            if node in NODE_IDS:
+                assert_empty_physical_node(continuation_dir(target, node))
+
+    def assert_empty_tree(target):
+        assert_fixture_absent(target)
+        split = {node: physical for node, physical in PREPARED_PHYSICAL.items() if node in NODE_IDS}
+        physical = set(split.values())
+        physical.update(node for node in NODE_IDS if node not in split)
+        physical.update(continuation_dir(target, node).rsplit("/", 1)[-1] for node in split)
+        for physical_node in sorted(physical):
+            assert_empty_physical_node(
+              target + "/nodes/" + physical_node,
+              frozen_lower=physical_node in split.values(),
             )
 
     def assert_db_record(target, node, path):
@@ -330,6 +382,7 @@ pkgs.testers.runNixOSTest {
         for case in REPAIR_CASES:
             assert_placement(case["path"], case["nodes"], target)
         assert_duplicated_metadata(target)
+        assert_reconcile_continuations_empty(target)
         assert_parent_first_fetches(cursor)
         for case in REPAIR_CASES:
             assert_placement(case["path"], [])
@@ -351,14 +404,17 @@ pkgs.testers.runNixOSTest {
         print("WIPE OK: seeded fixtures and roots stayed absent after reboot")
         for node in NODE_IDS:
             realize(node, CONSUMERS[node])
+        # A freshly wiped frozen parent predates the parent's new runtime
+        # writes, so realizing a cross-layer consumer copies its closure into
+        # the child. This is distinct from reconcile's parent-first repair.
         for case in REPAIR_CASES:
-            assert_placement(case["path"], case["nodes"])
+            assert_placement(case["path"], fresh_runtime_dependency_nodes(case["path"]))
         assert_consumers()
         print("WIPE OK: fresh runtime writes landed in their exact layers after reboot")
     else:
         for case in REPAIR_CASES:
-            assert_placement(case["path"], case["nodes"])
-        assert_consumers()
+            assert_placement(case["path"], case["nodes"], target)
+        assert_consumers(target)
         assert_duplicated_metadata(target)
         print("RECONCILE OK: repaired closures and layer isolation survived cutover")
 

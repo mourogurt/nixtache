@@ -35,6 +35,16 @@ let
       innerPath = builtins.head (lib.splitString "\n"
         (builtins.elemAt (lib.splitString "unshare -m --propagation private " outerText) 1));
       innerText = overlayCfg._scripts.namespace;
+      replaceChecked = name: anchors: replacements: text:
+        let
+          hasPlainInfix = needle: haystack: lib.hasInfix
+            (builtins.unsafeDiscardStringContext needle)
+            (builtins.unsafeDiscardStringContext haystack);
+          missing = builtins.filter (anchor: !hasPlainInfix anchor text) anchors;
+        in
+        assert lib.assertMsg (missing == [ ])
+          "overlay-tree failure fixture ${failureNode}: missing ${name} anchors ${builtins.unsafeDiscardStringContext (builtins.toJSON missing)}";
+        builtins.replaceStrings anchors replacements text;
       failureFunction = ''
         fail_at() {
           local node=$1 stage=$2
@@ -99,17 +109,17 @@ let
         }
       '';
       injectedMaterializer = pkgs.writeShellScript "nixtache-overlay-materialize-failure-${failureNode}"
-        (builtins.replaceStrings [
+        (replaceChecked "materializer" [
           "set -euo pipefail\n"
-          "copy_whole() {\n      local source=$1 destination=$2\n"
-          "merge_whole() {\n      local source=$1 destination=$2\n"
+          "copy_whole() {\n  local source=$1 destination=$2\n"
+          "merge_whole() {\n  local source=$1 destination=$2\n"
         ] [
           "set -euo pipefail\n${failureFunction}"
-          "copy_whole() {\n      local source=$1 destination=$2\n      fail_at \"$logical_id\" clone\n"
-          "merge_whole() {\n      local source=$1 destination=$2\n      fail_at \"$logical_id\" clone\n"
+          "copy_whole() {\n  local source=$1 destination=$2\n      fail_at \"$logical_id\" clone\n"
+          "merge_whole() {\n  local source=$1 destination=$2\n      fail_at \"$logical_id\" clone\n"
         ] materializerText);
       injectedInner = pkgs.writeShellScript "nixtache-overlay-verify-namespace-failure-${failureNode}"
-        (builtins.replaceStrings [
+        (replaceChecked "namespace" [
           "set -euo pipefail\n"
           "nix-store --store \"local?root=$lower_root&state=$stage/host/lower-state\" --load-db < \"$target_dump\""
           "repair_store \"$host_url\" \"$stage/host/state\" \"$host_root\""
@@ -125,7 +135,7 @@ let
           "fail_at \"$(basename \"$node_stage\")\" final\ncorrupt_refs \"$physical_id\" \"$node_url\" \"$node_stage\" \"$node_root\"\ntest_check_store \"$physical_id\" \"$node_url\" \"$node_root\"\naudit_refs \"$physical_id\" \"$node_url\"\ntamper_parent_root \"$physical_id\""
         ] innerText);
       injectedOuter = pkgs.writeShellScript "nixtache-overlay-prepare-failure-${failureNode}"
-        (builtins.replaceStrings [
+        (replaceChecked "outer" [
           "materializer=${materializerPath}"
           "unshare -m --propagation private ${innerPath}"
         ] [
@@ -212,8 +222,16 @@ pkgs.testers.runNixOSTest {
       "grand": PATHS["leafDependency"],
       "b": PATHS["commonDependency"],
     }
+    PREPARED_PHYSICAL = {
+      "host": "host-lower",
+      "a": "a-lower",
+      "grand": "grand",
+      "b": "b",
+    }
+    FAULT_LOG_NODE = FAILURE_NODE + "-runtime" if FAILURE_NODE in ("host", "a") else FAILURE_NODE
     ACTIVE_MARKERS = []
     FAILED_GENERATIONS = []
+    active_uses_frozen_markers = False
 
     def create_ab_machine(**kwargs):
         machine = create_machine(start_command="${otaLib.startCommand { image = "${v1.config.system.build.image}/abtest_1.raw"; }}", **kwargs)
@@ -230,7 +248,25 @@ pkgs.testers.runNixOSTest {
         return ROOTS[node].rstrip("/") + store_path
 
     def node_dir(target, node):
-        return target + ("/host" if node == "host" else "/layers/" + node)
+        return target + "/nodes/" + PREPARED_PHYSICAL[node]
+
+    def continuation_dir(target, node):
+        physical = PREPARED_PHYSICAL[node].removesuffix("-lower") + "-runtime"
+        return target + "/nodes/" + physical
+
+    def assert_reconcile_continuations_empty(target):
+        for node in ("host", "a"):
+            directory = continuation_dir(target, node)
+            appliance.fail("find " + q(directory + "/upper") + " -mindepth 1 -print -quit | grep -q .")
+            appliance.fail(
+              "(find " + q(directory + "/state/gcroots") + " " + q(directory + "/state/profiles") +
+              " -type l -print 2>/dev/null || true) | grep -q ."
+            )
+            db = directory + "/state/db/db.sqlite"
+            appliance.succeed(
+              "if test -f " + q(db) + "; then "
+              "test \"$(sqlite3 " + q(db) + " " + q("SELECT COUNT(*) FROM ValidPaths;") + ")\" = 0; fi"
+            )
 
     def upper_path(node, path, target=None):
         upper = UPPERS[node] if target is None else node_dir(target, node) + "/upper"
@@ -289,7 +325,8 @@ pkgs.testers.runNixOSTest {
 
     def assert_consumers(target=None):
         for node, path in CONSUMERS.items():
-            assert_placement(path, [node], target)
+            expected = ["host", "b"] if path == PATHS["hostConsumer"] else [node]
+            assert_placement(path, expected, target)
 
     def assert_seeded_roots(target=None):
         for node, path in CONSUMERS.items():
@@ -431,11 +468,11 @@ pkgs.testers.runNixOSTest {
         token = "nixtache-overlay-test: " + mode + (" interruption" if mode == "clone" else " failure") + " at " + FAILURE_NODE
         assert token in log, f"missing injected {mode} failure marker at {FAILURE_NODE}: {log}"
         if mode == "repair":
-            assert "nixtache-overlay: repairing " + FAILURE_NODE in log
-            assert "nixtache-overlay: prepared " + FAILURE_NODE not in log
+            assert re.search(r"(?m)^nixtache-overlay: repairing " + re.escape(FAULT_LOG_NODE) + "$", log)
+            assert not re.search(r"(?m)^nixtache-overlay: prepared " + re.escape(FAULT_LOG_NODE) + "$", log)
         if mode == "final":
-            assert "nixtache-overlay: prepared " + FAILURE_NODE in log
-            assert "nixtache-overlay: checking " + FAILURE_NODE in log
+            assert re.search(r"(?m)^nixtache-overlay: prepared " + re.escape(FAULT_LOG_NODE) + "$", log)
+            assert re.search(r"(?m)^nixtache-overlay: checking " + re.escape(FAULT_LOG_NODE) + "$", log)
         print("OK: v" + version + " " + mode + " failure at " + FAILURE_NODE + " stayed unready; active v1 files, DB, roots and closures survived")
 
     def attempt_parent_root_tamper(version):
@@ -493,7 +530,7 @@ pkgs.testers.runNixOSTest {
         appliance.succeed("systemctl start nixtache-overlay-prepare.service", timeout=900)
         assert active_state_checksum() == active_before_success, "successful retry modified the active tree"
         assert_runtime_consumers()
-        assert_markers()
+        assert_markers(active_generation if active_uses_frozen_markers else None)
         for failed_generation in FAILED_GENERATIONS:
             appliance.fail("test -e " + q(failed_generation))
         assert appliance.succeed("cat /run/nixtache-overlay/prepared-slot").strip() == target_slot
@@ -513,6 +550,7 @@ pkgs.testers.runNixOSTest {
                 assert_placement(case["path"], [])
         assert_duplicated_metadata(target)
         assert_markers(target)
+        assert_reconcile_continuations_empty(target)
         assert_parent_first_fetches(cursor)
         print("OK: successful v" + version + " preparation discarded every unready generation and preserved active state")
         return target
@@ -522,12 +560,12 @@ pkgs.testers.runNixOSTest {
         wait_ready_tree()
         assert appliance.succeed("cat /run/nixtache-overlay/selected-slot").strip() == target_slot
         assert appliance.succeed("readlink -f " + q(target_root + "/current")).strip() == target
-        assert_consumers()
-        assert_seeded_roots()
+        assert_consumers(target)
+        assert_seeded_roots(target)
         for case in REPAIR_CASES:
-            assert_placement(case["path"], case["nodes"])
+            assert_placement(case["path"], case["nodes"], target)
         assert_duplicated_metadata(target)
-        assert_markers()
+        assert_markers(target)
         assert_runtime_consumers()
         assert_whole_tree()
         print("OK: post-reboot v" + version + " selected the complete reused-slot generation")
@@ -605,6 +643,7 @@ pkgs.testers.runNixOSTest {
     appliance.reboot()
     appliance.wait_for_unit("multi-user.target", timeout=1800)
     assert_booted_target("2", target)
+    active_uses_frozen_markers = True
     active_slot = target_slot
     active_generation = target
 

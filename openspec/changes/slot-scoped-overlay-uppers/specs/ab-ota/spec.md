@@ -28,7 +28,7 @@ The AB update trigger SHALL reboot only when `systemd-sysupdate` completed a low
 
 #### Scenario: no completed installation does not reboot
 
-- **WHEN** sysupdate completes without installing a lower, including an empty or no-op poll
+- **WHEN** sysupdate completes without installing a lower and no earlier installation has incomplete upper preparation
 - **THEN** no upper preparation or reboot is triggered
 
 ### Requirement: Slot swaps merge the new lower's records additively

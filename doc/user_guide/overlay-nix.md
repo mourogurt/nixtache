@@ -38,9 +38,9 @@ readable store:
 - runtime installs are a **delta**: realizing a path whose closure is
   already valid in the lower downloads only the missing paths into the
   upper layer;
-- an OTA swap replaces the lower, so upper paths whose dependencies lived
-  only in the OLD lower genuinely break (missing interpreter/library) and
-  their DB entries dangle — `upperOnUpdate` below exists exactly for this.
+- an OTA target is checked before readiness: `wipe` starts with clean upper
+  state, while `reconcile` detects and repairs or rejects stale target files,
+  validity records and reference metadata without modifying the active upper.
 
 ## Upper metaslots and generations
 
@@ -199,7 +199,10 @@ generations and remains unready while cloning, seeding or repair is incomplete.
 Publication has three recoverable boundaries: staging becomes a generation,
 its metadata changes from `state=unready` to `state=ready`, and the slot's
 `current` link switches. Readiness is written only after the complete target
-graph validates. Interruption at any boundary leaves the active generation
+graph validates. A private pre-repair oracle from the target lower and staged
+source databases pins every target direct-reference set, so deleting or changing
+`Refs` after that snapshot cannot pass final validation merely because all files
+still exist. Interruption at any boundary leaves the active generation
 unchanged. After fixing the cause, rerun the oneshot:
 
 ```bash
@@ -271,9 +274,10 @@ generation. Activation then moves legacy paths into
 `/var/lib/nix-overlay/legacy-backup` and installs the selected links and binds.
 The other slot remains unready until a subsequent update prepares it.
 
-A move is journaled only after it succeeds and the backup exists. `mv` supplies
-its copy fallback when source and backup are on different filesystems. Upper,
-work and each `db`, `gcroots`, `profiles` and `temproots` activation is recorded;
+A move is journaled only after it succeeds and the backup exists. Across
+filesystems, the source is copied to temporary storage beside the backup and
+verified before publication, journaling and source removal. Upper, work and
+each `db`, `gcroots`, `profiles` and `temproots` activation is recorded;
 an interruption replays that journal backwards to restore previous symlinks,
 directories and bind mounts, and does not expose the selected-chain readiness
 marker. Retrying is idempotent and converges on the migrated generation. Keep

@@ -152,7 +152,7 @@ The module MUST retain `upperOnUpdate = "wipe"` (default) or `"reconcile"`; othe
 
 #### Scenario: A rejected or absent update does not prepare an upper
 
-- **WHEN** an update installs nothing because it is rejected, tampered, interrupted before installation completes, or completes a no-op without installing a lower
+- **WHEN** an update is rejected, tampered or interrupted before installation completes, or a no-op has no incomplete upper preparation from an earlier installation
 - **THEN** neither slot's upper lifecycle action runs and the active upper remains exactly as it was
 
 #### Scenario: A plain reboot keeps the selected persistent upper

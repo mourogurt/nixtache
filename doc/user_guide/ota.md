@@ -44,9 +44,10 @@ deploy-map entry.
   a lower installation, it prepares the inactive slot's upper chain (when
   `overlay-nix` is enabled) and only then starts
   `systemd-sysupdate-reboot.service` (the offline check for a newer installed
-  version). Failed or empty updates, and failed upper preparation, leave the
-  target running and fail the trigger with the actual cause instead of
-  rebooting into an unready slot.
+  version). Failed updates and failed upper preparation leave the target
+  running and fail the trigger with the actual cause. A clean no-op succeeds
+  without preparation or reboot; a no-op recovering an earlier incomplete
+  preparation instead retries it before the normal reboot assessment.
 - **Runtime versioning**: the version is assigned at deploy time (explicit
   `NIXTACHE_AB_VERSION` or a UTC calendar value), written to the repo's
   `image-version` file before `nix build` (wire it via

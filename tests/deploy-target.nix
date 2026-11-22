@@ -368,6 +368,10 @@ let
           (builtins.unsafeDiscardStringContext
             "${hostAb.config.systemd.package}/lib/systemd/systemd-sysupdate pending")
           abUpdateScript;
+      abUpdateCreatesStateBeforePending = lib.hasInfix
+        ''mkdir -p "/var/lib/nixtache" || exit 1'' abUpdateScript
+        && (posOf ''mkdir -p "/var/lib/nixtache"'' abUpdateScript)
+          < (posOf ''touch "/var/lib/nixtache/upper-preparation-pending"'' abUpdateScript);
       abUpdateClearsPendingOnlyAfterPreparation =
         (posOf "systemctl start nixtache-overlay-prepare.service" abUpdateScript)
           < (posOf ''rm -f "/var/lib/nixtache/upper-preparation-pending"'' abUpdateScript);

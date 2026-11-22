@@ -87,40 +87,19 @@ from targeting the other daemon's processes. Canonical requirements:
 
 ### Lower installation versus upper readiness
 
-The A/B image and overlay modules own different steps of an update:
+The A/B image and overlay modules own different steps of an update.
+`ab-image`/sysupdate installs the inactive lower, UKI, lower dump and target
+topology descriptor; that write alone does not make the upper chain ready.
+`overlay-nix` prepares only the target graph, and direct or timer-driven
+triggers invoke that rerunnable preparation before reboot so consecutive
+installations select the latest ready generation.
 
-- `ab-image`/sysupdate installs the inactive lower partition, UKI, lower dump
-  and, when overlay is enabled, the target topology descriptor. Completing
-  that write does not make the upper chain ready.
-- `overlay-nix` validates the descriptor and prepares only the inactive
-  physical slot's target graph. Wipe creates empty upper-owned state;
-  reconcile clones the current active generation and repairs the copy in a
-  private namespace. Readiness binds the lower checksum, descriptor and final
-  logical/physical graph only after the complete target validates.
-- `nixtache-ab-update` and the auto-update poll invoke preparation after every
-  confirmed lower installation and before reboot. Preparation is rerunnable,
-  so v2 followed by v3 without an intermediate reboot publishes and selects
-  the exact ready v3 generation. A same-version rewrite is likewise detected
-  by a changed lower-dump checksum.
-- The persistent deferred-reboot path fingerprints the complete active upper
-  generation. Changes during the window force another target preparation:
-  reconcile freezes the latest parent runtime continuations before children
-  rebase, while wipe keeps target state clean. A running child never receives
-  a live lower refresh; parent writes cross only when it restarts into the
-  rebased generation.
-- An entirely ephemeral chain returns a successful no-persistent-metaslot
-  result, then resets all descendants and loads exactly the new lower dump at
-  boot. Immediate, deferred-window and manual cutovers use the same ephemeral
-  result; window source discovery is documented in
-  [`auto-update.md`](../user_guide/auto-update.md#ab-upper-readiness-and-deferred-reboots).
-- Early boot selects a ready generation from the mounted lower's GPT
-  `PARTUUID`, with descriptor, graph and lower-dump checksum validation. Upper
-  consumers and `boot-complete.target` require that selection. Recovery of an
-  unprepared target runs before consumers start; failure does not bless the
-  boot.
-- Automatic or manual rollback selects the previous lower and its complete
-  preserved logical and physical upper graph. It never performs a reverse
-  wipe, clone, metadata merge or reconcile.
+Boot selection binds the physical lower and one validated upper generation.
+Deferred cutover rechecks source freshness: reconcile freezes the latest parent
+continuations, while wipe keeps target state clean. An entirely ephemeral chain
+needs no persistent metaslot; rollback instead selects the previous lower and
+its preserved graph without reverse preparation. Functional lifecycle and
+failure recovery are documented only in the user guides linked below.
 
 The detailed lifecycle has one owner:
 [`doc/user_guide/overlay-nix.md`](../user_guide/overlay-nix.md). Canonical
