@@ -242,7 +242,10 @@ The three workarounds, each mapped to the behaviour that forces it:
   image satisfies the directory init.
 
 Nix's unconditional directory creation makes all three workarounds necessary;
-re-check these constraints when changing Nix versions.
+re-check these constraints when changing Nix versions. Prepared parent state
+also creates `profiles/per-user` and `gcroots/per-user` before selection makes
+it read-only; without those directories, a later lower open fails while
+realizing an otherwise valid path.
 
 ## GC metadata copy-up and path-info caching
 

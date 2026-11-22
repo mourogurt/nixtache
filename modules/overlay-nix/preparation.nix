@@ -74,9 +74,14 @@ let
       fi
     done < "$rows"
 
+    ensure_state_dirs() {
+      # Read-only local stores still require these directories to exist; their
+      # constructors cannot create them after the selected parent is read-only.
+      mkdir -p "$1" "$1/profiles/per-user" "$1/gcroots/per-user"
+    }
+
     copy_state() {
       local source=$1 destination=$2 name
-      mkdir -p "$destination"
       for name in ${concatStringsSep " " stateNames}; do
         if [ -e "$source/$name" ] || [ -L "$source/$name" ]; then
           cp -a --reflink=auto "$source/$name" "$destination/$name"
@@ -84,6 +89,7 @@ let
           mkdir -p "$destination/$name"
         fi
       done
+      ensure_state_dirs "$destination"
     }
 
     copy_layer() {
@@ -101,7 +107,7 @@ let
 
     merge_state() {
       local source=$1 destination=$2 name entry
-      mkdir -p "$destination"
+      ensure_state_dirs "$destination"
       if [ -d "$source/db" ]; then
         mkdir -p "$destination/db"
         while IFS= read -r -d "" entry; do

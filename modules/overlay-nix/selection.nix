@@ -165,10 +165,10 @@ let
     else
       parent_root="${runtimeState}/frozen/$parent_physical"
     fi
-    activate_lower_root "$parent_root" ${parentRoot node.id}
+    activate_lower_root "$parent_root" ${parentRoot node.id} ${runtimeBackup}/parent-roots/${node.id}
     ${optionalString (node ? containerName) ''
       activate_frozen_state "$parent_root/nix/var/nix" ${node.lowerRoot}/nix/var/nix ${runtimeBackup}/lower-roots/${node.id}
-      activate_lower_root "$parent_root" ${node.lowerRoot}
+      activate_lower_root "$parent_root" ${node.lowerRoot} ${runtimeBackup}/lower-roots/${node.id}/store-root
     ''}
   '') sortedTopology;
 
@@ -240,17 +240,23 @@ let
 
   lowerRootFunctionsSnippet = ''
     activate_lower_root() {
-      local source=$1 destination=$2 name
+      local source=$1 destination=$2 backup=$3 name
       mkdir -p "$destination/nix/store" "$destination/nix/var/nix"
       if ! mountpoint -q "$destination/nix/store"; then
         mount --bind "$source/nix/store" "$destination/nix/store"
       fi
       mount -o remount,ro,bind "$destination/nix/store"
       for name in ${concatStringsSep " " stateNames}; do
-        mkdir -p "$destination/nix/var/nix/$name"
-        if ! mountpoint -q "$destination/nix/var/nix/$name"; then
-          mount --bind "$source/nix/var/nix/$name" "$destination/nix/var/nix/$name"
-        fi
+        # Rebind even when an existing mountpoint pins a deleted source; a
+        # remount alone cannot reconnect it to the newly selected state.
+        activate_state_dir "$source/nix/var/nix/$name" "$destination/nix/var/nix/$name" "$backup/$name"
+        # Nix requires these directories even for a read-only local lower.
+        # Create them while the new or reselected bind is writable, before
+        # sealing it again.
+        mount -o remount,rw,bind "$destination/nix/var/nix/$name"
+        case "$name" in
+          gcroots|profiles) mkdir -p "$destination/nix/var/nix/$name/per-user" ;;
+        esac
         mount -o remount,ro,bind "$destination/nix/var/nix/$name"
       done
     }

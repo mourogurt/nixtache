@@ -291,6 +291,9 @@ let
       ancillaryDbStateRetained = lib.hasInfix
         ''cp -a --reflink=auto "$entry" "$destination/db/"'' materializerSource
         && lib.hasInfix "! -name 'db.sqlite-*'" materializerSource;
+      readOnlyStateLayoutComplete = lib.hasInfix
+        ''"$1/profiles/per-user" "$1/gcroots/per-user"'' materializerSource
+        && lib.length (lib.splitString ''ensure_state_dirs "$destination"'' materializerSource) == 3;
       quiescesWriters = lib.hasInfix "nix-daemon.socket" reconcileScript;
       failedStopResumesStoppedWriters = lib.isDerivation quiesceRecoveryCheck;
       verifiesPrivateTarget = lib.hasInfix "unshare -m --propagation private" reconcileScript;
@@ -1096,6 +1099,15 @@ let
         && lib.all (id: lib.hasInfix
           ''activate_lower_root "$parent_root" /run/nixtache-runner-lower/${id}''
           parentRootPhase) [ "alpha" "beta" "gamma" ];
+      readOnlyLowerPerUserDirs = lib.hasInfix
+        ''activate_state_dir "$source/nix/var/nix/$name" "$destination/nix/var/nix/$name" "$backup/$name"'' parentRootPhase
+        && lib.hasInfix ''mkdir -p "$destination/nix/var/nix/$name/per-user"'' parentRootPhase
+        && (posOf ''activate_state_dir "$source/nix/var/nix/$name"'' parentRootPhase)
+          < (posOf ''mount -o remount,rw,bind "$destination/nix/var/nix/$name"'' parentRootPhase)
+        && (posOf ''mount -o remount,rw,bind "$destination/nix/var/nix/$name"'' parentRootPhase)
+          < (posOf ''mkdir -p "$destination/nix/var/nix/$name/per-user"'' parentRootPhase)
+        && (posOf ''mkdir -p "$destination/nix/var/nix/$name/per-user"'' parentRootPhase)
+          < (posOf ''mount -o remount,ro,bind "$destination/nix/var/nix/$name"'' parentRootPhase);
       frozenMetadataReadOnlyWithoutCopies = lib.all (script:
         lib.hasInfix ''mount -o remount,ro,bind "$target/$name"'' script
         && !(lib.hasInfix ''cp -a "$source'' script)
