@@ -588,7 +588,8 @@ else if lib.hasPrefix "no-intermediate-reboot" scenario then
       appliance.succeed("test -f /boot/EFI/nixtache/abtest_1.lower-db")
       appliance.succeed("test -f /boot/EFI/nixtache/abtest_1.overlay-topology.json")
       appliance.succeed("test -f /boot/EFI/Linux/abtest_1.efi || test -f /boot/EFI/Linux/abtest_1+*.efi")
-      appliance.succeed("nix path-info ${p1Path}")
+      appliance.succeed("${p1Path}/bin/busybox true")
+      appliance.succeed("nix --extra-experimental-features 'nix-command read-only-local-store' --store 'local?root=/run/nixtache-overlay/physical-host&state=/run/nixtache-overlay/physical-host/nix/var/nix&read-only=true' path-info ${p1Path}")
       print("OK: v1 -> v2 -> rewritten v3 without reboot preserved active v1 resources and produced a fresh ready v3 generation and matching lower SHA")
 
       if WIPE:
