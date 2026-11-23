@@ -140,8 +140,13 @@
               echo "nixtache-overlay: recovery backup is unusable: $backup" >&2
               return 1
             fi
+            if ! publish_migration_journal "$journal"; then
+              mv "$backup" "$link" || true
+              return 1
+            fi
             if ! printf 'M|%s|%s\n' "$link" "$backup" >> "$activation_log"; then
               mv "$backup" "$link" || true
+              rm -f -- "$journal"
               return 1
             fi
           else

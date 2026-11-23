@@ -142,7 +142,7 @@ let
     run("mv /boot/EFI/nixtache/abtest_1.lower-db.hold /boot/EFI/nixtache/abtest_1.lower-db && systemctl restart nixtache-overlay-select.service && systemctl start nixtache-overlay-ready.target")
     print("RESULT_MIGRATED_TOOL=" + run("$(cat /tmp/nixtache-legacy-tool-path)"))
     print("RESULT_MIGRATED_PATH_VALID=" + run("nix path-info $(cat /tmp/nixtache-legacy-tool-path) >/dev/null 2>&1 && echo valid || echo invalid"))
-    print("RESULT_MIGRATION_BACKUP=" + run("test -e /var/lib/nix-overlay/legacy-backup/host/upper/$(basename $(cat /tmp/nixtache-legacy-tool-path)) && test -f /var/lib/nix-overlay/legacy-backup/host/state/db/db.sqlite && echo preserved || echo missing"))
+    print("RESULT_MIGRATION_BACKUP=" + run("test -e /var/lib/nix-overlay/legacy-backup/host/upper/$(basename $(cat /tmp/nixtache-legacy-tool-path)) && test -f /var/lib/nix-overlay/legacy-backup/host/state/db/db.sqlite && test -f /var/lib/nix-overlay/legacy-backup/host/state/gcroots.migration-ready && echo preserved || echo missing"))
     print("RESULT_OTHER_SLOT_UNREADY=" + run("find /var/lib/nix-overlay/upper-slots -mindepth 2 -maxdepth 2 -name unready | grep -q . && echo marked || echo missing"))
 
     # Give the overlay daemon time to come up after boot.
@@ -207,6 +207,9 @@ let
     time.sleep(1)
     p.sendline("echo SYNC_REBOOT_$$")
     p.expect(r"SYNC_REBOOT_\d+", timeout=30)
+
+    run("systemctl start nixtache-overlay-ready.target")
+    run("for i in $(seq 1 30); do systemctl is-active --quiet nix-daemon-overlay 2>/dev/null || systemctl is-active --quiet nix-daemon-overlay-mount 2>/dev/null && break; sleep 2; done")
 
     print("RESULT_REBOOT_TOOL=" + run("$(cat /tmp/nixtache-upper-tool-path)"))
     print("RESULT_REBOOT_PATH_VALID=" + run("nix path-info $(cat /tmp/nixtache-upper-tool-path) >/dev/null 2>&1 && echo valid || echo invalid"))

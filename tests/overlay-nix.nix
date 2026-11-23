@@ -109,7 +109,15 @@ let
     test "$(readlink "$link")" = "$source"
     test "$(cat "$backup/keep")" = legacy
     grep -Fx "M|$link|$backup" "$activation_log"
-    test ! -e "$backup.migration-ready"
+    test -e "$backup.migration-ready"
+    rm -f "$link"
+    mkdir -p "$link"
+    ln -s /run/current-system "$link/current-system"
+    : > "$activation_log"
+    activate_path "$source" "$link" "$backup"
+    test "$(readlink "$link")" = "$source"
+    test "$(cat "$backup/keep")" = legacy
+    grep -Fx "M|$link|$backup" "$activation_log"
 
     new_case copy-interruption
     force_exdev=1
@@ -181,7 +189,7 @@ let
   '';
 
   scenarioMigration = {
-    name = "cross-filesystem migration publishes verified backups before journaling and source cleanup";
+    name = "transactional migration preserves verified backups across later reselection";
     checks = {
       transactionalRecovery = lib.isDerivation migrationCheck;
       sameFilesystemMoveRetained = lib.hasInfix ''if ! mv "$link" "$backup"; then'' selectScript;
