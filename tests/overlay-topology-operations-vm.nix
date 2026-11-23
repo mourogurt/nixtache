@@ -228,13 +228,14 @@ pkgs.testers.runNixOSTest {
         assert appliance.succeed("readlink " + q(root_marker(directory, logical_id))).strip() == path
         assert db_count(directory, path) == "1", f"missing validity record for {logical_id} in {directory}"
 
-    def assert_consumer_absent(directory, logical_id):
+    def assert_consumer_absent(directory, logical_id, inherited_record=False):
         path = CONSUMERS[logical_id]
         appliance.fail("test -e " + q(upper_marker(directory, path)) + " || test -L " + q(upper_marker(directory, path)))
         appliance.fail("test -e " + q(root_marker(directory, logical_id)) + " || test -L " + q(root_marker(directory, logical_id)))
-        assert db_count(directory, path) == "0", f"unexpected validity record for {logical_id} in {directory}"
+        expected = "1" if inherited_record else "0"
+        assert db_count(directory, path) == expected, f"unexpected validity count for {logical_id} in {directory}: expected {expected}"
 
-    def assert_empty_node(directory):
+    def assert_empty_node(directory, frozen_lower=False):
         appliance.succeed("test -d " + q(directory + "/upper") + " && test -d " + q(directory + "/state"))
         appliance.fail("find " + q(directory + "/upper") + " -mindepth 1 -print -quit | grep -q .")
         appliance.fail(
@@ -242,10 +243,16 @@ pkgs.testers.runNixOSTest {
           q(directory + "/state/temproots") + " -type l -print 2>/dev/null || true) | grep -q ."
         )
         db = directory + "/state/db/db.sqlite"
-        appliance.succeed(
-          "if test -f " + q(db) + "; then test \"$(sqlite3 " + q(db) + " " +
-          q("SELECT COUNT(*) FROM ValidPaths;") + ")\" = 0; fi"
-        )
+        if frozen_lower:
+            appliance.succeed(
+              "test -f " + q(db) + " && test \"$(sqlite3 " + q(db) + " " +
+              q("SELECT COUNT(*) FROM ValidPaths;") + ")\" -gt 0"
+            )
+        else:
+            appliance.succeed(
+              "if test -f " + q(db) + "; then test \"$(sqlite3 " + q(db) + " " +
+              q("SELECT COUNT(*) FROM ValidPaths;") + ")\" = 0; fi"
+            )
 
     def inactive_slot(active_slot):
         return appliance.succeed(
@@ -409,7 +416,7 @@ pkgs.testers.runNixOSTest {
         if POLICY == "wipe":
             for node in EXPECTED_PHYSICAL:
                 directory = node_dir(target, node["id"])
-                assert_empty_node(directory)
+                assert_empty_node(directory, frozen_lower=node["role"] == "frozen-lower")
                 for logical_id in CONSUMERS:
                     assert_consumer_absent(directory, logical_id)
         else:
@@ -422,12 +429,16 @@ pkgs.testers.runNixOSTest {
                     if retained:
                         assert_consumer(directory, logical_id)
                     else:
-                        assert_consumer_absent(directory, logical_id)
+                        assert_consumer_absent(
+                          directory,
+                          logical_id,
+                          inherited_record=node["id"] == "e" and logical_id == "b" and not STORAGE_RESET,
+                        )
             assert_empty_node(target + "/nodes/b-runtime")
             assert_empty_node(target + "/nodes/c")
             assert_empty_node(target + "/nodes/d")
             if STORAGE_RESET:
-                assert_empty_node(target + "/nodes/b-lower")
+                assert_empty_node(target + "/nodes/b-lower", frozen_lower=True)
         print("PASS: " + SCENARIO + " published the exact v2 graph with the required state disposition")
   '';
 }

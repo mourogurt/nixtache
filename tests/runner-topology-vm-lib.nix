@@ -268,7 +268,7 @@ let
         appliance.fail("test -e " + q(root) + " || test -L " + q(root))
         assert_db_record(directory, path, expected=False)
 
-    def assert_empty_node(directory):
+    def assert_empty_node(directory, frozen_lower=False):
         appliance.succeed("test -d " + q(directory + "/upper") + " && test -d " + q(directory + "/state"))
         appliance.fail("find " + q(directory + "/upper") + " -mindepth 1 -print -quit | grep -q .")
         appliance.fail(
@@ -276,10 +276,16 @@ let
           q(directory + "/state/temproots") + " -type l -print 2>/dev/null || true) | grep -q ."
         )
         db = directory + "/state/db/db.sqlite"
-        appliance.succeed(
-          "if test -f " + q(db) + "; then test \"$(sqlite3 " + q(db) + " " +
-          q("SELECT COUNT(*) FROM ValidPaths;") + ")\" = 0; fi"
-        )
+        if frozen_lower:
+            appliance.succeed(
+              "test -f " + q(db) + " && test \"$(sqlite3 " + q(db) + " " +
+              q("SELECT COUNT(*) FROM ValidPaths;") + ")\" -gt 0"
+            )
+        else:
+            appliance.succeed(
+              "if test -f " + q(db) + "; then test \"$(sqlite3 " + q(db) + " " +
+              q("SELECT COUNT(*) FROM ValidPaths;") + ")\" = 0; fi"
+            )
 
     def tree_checksum(path):
         return appliance.succeed(

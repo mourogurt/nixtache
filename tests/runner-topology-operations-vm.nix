@@ -347,8 +347,11 @@ pkgs.testers.runNixOSTest {
         print("OK: unchanged and moved state survived, reset/new state is empty, and moved dependencies revalidated")
     else:
         for physical_node in EXPECTED_GRAPH["physical"]["nodes"]:
-            assert_empty_node(node_dir(v2_target, physical_node["id"]))
-        print("OK: wipe produced the same physical graph with completely clean target state")
+            assert_empty_node(
+              node_dir(v2_target, physical_node["id"]),
+              frozen_lower=physical_node["role"] == "frozen-lower",
+            )
+        print("OK: wipe produced the same physical graph with clean writable state and populated frozen-lower metadata")
 
     for physical_id in ("stable", "stable-lower", "stable-runtime"):
         appliance.fail("test -e " + q(v2_target + "/nodes/" + physical_id) + " || test -L " + q(v2_target + "/nodes/" + physical_id))
